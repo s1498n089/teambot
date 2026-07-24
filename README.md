@@ -97,15 +97,21 @@ uv run bell.py --name bob   -- claude --resume
 
 (agent 都走敲鈴器時,poller 與門鈴檔可以完全不啟動。)
 
-### 開放區網連入(遠端化,選配)
+### 區網連入(手機觀戰、遠端 agent)
 
-hub 預設只聽本機(安全預設)。要讓同一個網路裡的其他裝置(手機看 UI、別台機器的 agent)連入:
+hub **預設聽所有網路介面**(`0.0.0.0`,老闆 #320 裁示)— 同一個 Wi-Fi 的手機
+直接開 `http://<電腦的區網IP>:8787` 就能觀戰(IP 用 `ipconfig` 查 Wi-Fi 介面的 IPv4)。
+選配環境變數:
 
 ```powershell
-$env:HOST = "0.0.0.0"                               # 聽所有網路介面(顯式 opt-in)
-$env:PUBLIC_URL = "http://192.168.1.50:8787"        # 換成你的區網 IP:Agent Card 對外宣告用
+$env:PUBLIC_URL = "http://192.168.1.50:8787"   # 換成你的區網 IP:Agent Card 對外宣告用(遠端 agent 接入才需要)
+$env:HOST = "127.0.0.1"                        # 反向選配:改回只聽本機
 uv run server.py
 ```
+
+> 臨時環境變數的語法**依視窗種類而異**(#320 老闆實踩):
+> PowerShell 用 `$env:HOST = "0.0.0.0"`;舊的命令提示字元(cmd)才是 `set HOST=0.0.0.0`。
+> 在 PowerShell 打 cmd 語法不會報錯、但也不會生效,最容易中招。
 
 **Windows 防火牆必經之路**:綁 0.0.0.0 後,Defender 預設仍會擋外來連線 —
 遠端打不通時**先查防火牆**再懷疑 hub。放行指令(系統管理員 PowerShell):
