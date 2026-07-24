@@ -37,9 +37,21 @@ SSE_READ_TIMEOUT = 60       # server 每 15 秒有 keep-alive,60 秒沒動靜視
 RECONNECT_MAX_BACKOFF = 30
 
 
+LOG_PATH: Path | None = None  # main() 依 --name 指定;None 時退回 stderr(僅啟動失敗前)
+
+
 def log(msg: str) -> None:
-    """敲鈴器自己的狀態訊息走 stderr,不汙染轉發中的 TUI 畫面。"""
-    print(f"[bell] {msg}", file=sys.stderr, flush=True)
+    """敲鈴器狀態訊息寫檔(state/bell-<名字>.log)— stderr 與子行程 TUI 共用終端,
+    直印會插進畫面甚至斬斷 VT 序列造成花屏(bob #278),故一律落檔。"""
+    line = f"[bell {time.strftime('%H:%M:%S')}] {msg}\n"
+    if LOG_PATH is None:
+        sys.stderr.write(line)
+        return
+    try:
+        with LOG_PATH.open("a", encoding="utf-8") as f:
+            f.write(line)
+    except OSError:
+        pass  # log 寫不進去不能反過來炸掉轉發
 
 
 class BellState:
@@ -141,7 +153,13 @@ def run_windows(cmd: list[str], state_factory) -> int:
 
     cols, rows = shutil.get_terminal_size()
     proc = PtyProcess.spawn(cmd, dimensions=(rows, cols), cwd=str(BASE))
-    state: BellState = state_factory(lambda text: proc.write(text))
+    write_lock = threading.Lock()  # 鈴聲(SSE 執行緒)與打字(輸入執行緒)不互插(bob #278 nice)
+
+    def safe_write(text: str) -> None:
+        with write_lock:
+            proc.write(text)
+
+    state: BellState = state_factory(safe_write)
 
     def alive() -> bool:
         return proc.isalive()
@@ -167,9 +185,9 @@ def run_windows(cmd: list[str], state_factory) -> int:
         while proc.isalive():
             ch = msvcrt.getwch()
             if ch in ("\x00", "\xe0"):
-                proc.write(VT_KEYS.get(msvcrt.getwch(), ""))
+                safe_write(VT_KEYS.get(msvcrt.getwch(), ""))
             else:
-                proc.write(ch)
+                safe_write(ch)
 
     def watch_resize() -> None:
         nonlocal cols, rows
@@ -200,8 +218,13 @@ def run_posix(cmd: list[str], state_factory) -> int:
     if pid == 0:
         os.execvp(cmd[0], cmd)
 
-    state: BellState = state_factory(
-        lambda text: os.write(master, text.encode("utf-8")))
+    write_lock = threading.Lock()  # 同 Windows:鈴聲與打字不互插
+
+    def safe_write(data: bytes) -> None:
+        with write_lock:
+            os.write(master, data)
+
+    state: BellState = state_factory(lambda text: safe_write(text.encode("utf-8")))
     alive = lambda: True  # 以 EOF 判終,見下方讀迴圈
 
     threading.Thread(target=lambda: sse_watch(state.server, state.room, state, alive),
@@ -217,7 +240,7 @@ def run_posix(cmd: list[str], state_factory) -> int:
                 data = os.read(sys.stdin.fileno(), 1024)
                 if not data:
                     break
-                os.write(master, data)
+                safe_write(data)
             if master in r:
                 try:
                     data = os.read(master, 4096)
@@ -246,6 +269,9 @@ def main() -> int:
         parser.error("缺少要包的指令,例:uv run bell.py --name alice -- claude -c")
 
     cursor_path = BASE / "state" / f"cursor-{args.name}.txt"
+    global LOG_PATH
+    LOG_PATH = BASE / "state" / f"bell-{args.name}.log"
+    LOG_PATH.parent.mkdir(exist_ok=True)
 
     def state_factory(write_fn) -> BellState:
         state = BellState(cursor_path, lambda: write_fn(BELL_TEXT + BELL_SUBMIT))
