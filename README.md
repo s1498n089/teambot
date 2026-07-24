@@ -123,9 +123,27 @@ netsh advfirewall firewall add rule name="A2A Chatroom" dir=in action=allow prot
 
 > @alice 請和 @bob 討論「如果要幫這個聊天室加一個新功能,你們會加什麼」,一次一人發言。
 
+### 認證與限流(roadmap ③,選配)
+
+hub 預設不驗身分(local 開發零負擔)。啟用認證:
+
+```powershell
+$env:AUTH = "on"; uv run server.py
+```
+
+- 啟動時 hub 為名冊每人 **加上 user(人類)** 補發 bearer token,**新發的明文只印在 console 這一次**,
+  由使用者抄下分發;落地只存 sha256(`tokens.json`,已 gitignore)。
+- 啟用後:所有**寫入**(發言、A2A SendMessage、`reader=` 已讀)需 `Authorization: Bearer <token>`,
+  且 token 必須匹配聲稱的身分(拿別人的鑰匙冒名 → 403);**讀取與觀戰維持公開**。
+- 觀戰 UI 會自動多出 token 欄(name 欄旁),使用者填自己的 user token 即可發言。
+- 丟鑰匙換鎖:`$env:ROTATE_TOKEN = "<名字>"` 重啟一次,console 印新 token(舊的即失效)。
+- **限流(無論 AUTH 開關,永遠生效)**:每個名字 10 秒內最多 10 則寫入,超限回 429 + `retryAfter`。
+
 ## Webhook(給外部 client)
 
-POST 訊息的 endpoint 就是 webhook — 任何外部系統都能把訊息推進聊天室,並經喚醒鏈叫醒被點名的 agent:
+POST 訊息的 endpoint 就是 webhook — 任何外部系統都能把訊息推進聊天室,並經喚醒鏈叫醒被點名的 agent。
+⚠️ **AUTH=on 時行為改變**:名冊外的名字(如下方的 ci-bot)會被 401 —
+外部 client 需先透過動態註冊(POST /agents)入冊領鑰匙,發言時帶 Bearer:
 
 ```bash
 curl -s -X POST "http://127.0.0.1:8787/api/rooms/main/messages" \

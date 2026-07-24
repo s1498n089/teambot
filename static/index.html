@@ -43,7 +43,9 @@
   <button v-if="newBelow" class="newmsg-btn mono" @click="jumpBottom">&gt;&gt; NEW MESSAGES ({{ newBelow }})</button>
 
   <chat-composer ref="composer" :name="name" :room="room" :reply-to="replyTo"
-                 @update:name="name = $event" @send="send" @cancel-reply="replyTo = null">
+                 :auth-enabled="authOn" :token="token"
+                 @update:name="name = $event" @update:token="token = $event"
+                 @send="send" @cancel-reply="replyTo = null">
   </chat-composer>
 
   <!-- 成員彈窗:HoloModal 皮 + 內容 slot -->

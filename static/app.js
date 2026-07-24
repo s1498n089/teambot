@@ -21,6 +21,7 @@ const API_FAIL_TOAST_THRESHOLD = 3;  // 連續失敗達此數才吵使用者(#15
 const rt = reactive({
   mentionPattern: "(?<![A-Za-z0-9_@.-])(@[\\w一-鿿-]+)", // fallback,與 server 同步
   palette: { user: "#c9d1d9" },                          // 人類底色;agent 色相由 config 下發
+  authEnabled: false,                                    // AUTH=on 時 UI 顯示 token 欄(roadmap ③)
 });
 
 /* toast 的延遲繫結:api 在 root mount 前就建好,先把通知丟進這個殼 */
@@ -136,11 +137,14 @@ function createApi(notify) {
     members: (room) => request(`/api/rooms/${room}/members`),
     tasks: (room) => request(`/api/rooms/${room}/tasks`),
     messages: (room, qs) => request(`/api/rooms/${room}/messages?${qs}`),
-    /** 發言例外:4xx 的 detail 是要給使用者看的,不走 throw,回 {ok, status, data}。 */
-    async send(room, body) {
+    /** 發言例外:4xx 的 detail 是要給使用者看的,不走 throw,回 {ok, status, data}。
+        token 有值時附 Authorization(AUTH=on 的寫入守門,roadmap ③)。 */
+    async send(room, body, token) {
+      const headers = { "Content-Type": "application/json" };
+      if (token) headers["Authorization"] = `Bearer ${token}`;
       const res = await fetch(`/api/rooms/${room}/messages`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify(body),
       });
       const data = await res.json().catch(() => ({}));
@@ -344,8 +348,8 @@ const MessageItem = {
 };
 
 const ChatComposer = {
-  props: ["name", "room", "replyTo"],
-  emits: ["update:name", "send", "cancel-reply"],
+  props: ["name", "room", "replyTo", "authEnabled", "token"],
+  emits: ["update:name", "update:token", "send", "cancel-reply"],
   data() { return { draft: "" }; },
   computed: {
     nameWidth() { return Math.max(3, (this.name || "").length + 1) + "ch"; }, // 名字欄自適應不截斷
@@ -365,6 +369,9 @@ const ChatComposer = {
         <input class="name" :value="name" :style="{ width: nameWidth }"
                @input="$emit('update:name', $event.target.value)">@{{ room }} &gt;_
       </span>
+      <input v-if="authEnabled" class="token mono" type="password" :value="token"
+             placeholder="token" title="AUTH 已啟用:發言需要你的 bearer token"
+             @input="$emit('update:token', $event.target.value)">
       <textarea ref="box" v-model="draft" placeholder="輸入訊息,Enter 送出(Shift+Enter 換行)"
                 @keydown.enter.exact.prevent="fire"
                 @keydown.esc="$emit('cancel-reply')"></textarea>
@@ -395,6 +402,7 @@ createApp({
       rooms: [],
       lastId: 0,
       name: localStorage.getItem("a2a-name") || "user",
+      token: localStorage.getItem("a2a-token") || "",  // AUTH=on 時的個人鑰匙(roadmap ③)
       status: "connecting",
       replyTo: null,
       newBelow: 0,
@@ -409,6 +417,7 @@ createApp({
   },
   computed: {
     myName() { return this.name.trim() || "user"; },
+    authOn() { return rt.authEnabled; },  // 模板需要 reactive 依賴,包一層 computed
     onlineMembers() { return this.members.filter((m) => this.isOnline(m)).slice(0, 6); },
     /** timeline 的顯示列:日期分隔線 + ── NEW ── 未讀線 + 訊息(含 grouping 判定)。 */
     rows() {
@@ -438,6 +447,7 @@ createApp({
     try {
       const cfg = await this.api.config();
       rt.mentionPattern = cfg.mentionPattern;
+      rt.authEnabled = !!cfg.authEnabled;
       rt.palette = { user: "#c9d1d9",
                      ...Object.fromEntries(Object.entries(cfg.agents).map(([n, a]) => [n, a.color])) };
     } catch (e) { /* fallback 規則已內建 */ }
@@ -532,7 +542,9 @@ createApp({
     async send(text) {
       const from = this.myName;
       localStorage.setItem("a2a-name", from);
-      const res = await this.api.send(this.room, { from, text, reply_to: this.replyTo || undefined });
+      localStorage.setItem("a2a-token", this.token);
+      const res = await this.api.send(this.room, { from, text, reply_to: this.replyTo || undefined },
+                                      rt.authEnabled ? this.token : "");
       if (!res.ok) {
         const detail = res.data.detail || res.data.error || `HTTP ${res.status}`;
         this.showToast(`>> SEND FAILED: ${detail}`, false);

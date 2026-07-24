@@ -13,11 +13,17 @@ store / bus / a2a_layer 都在這裡建構與注入,模組 import 不產生副�
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import inspect
 import json
 import os
 import re
+import secrets
 import sys
+import tempfile
+import time
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -71,6 +77,21 @@ class StaleCursorError(ApiError):
 class ConflictError(ApiError):
     """資源衝突(如註冊重名)。"""
     status = 409
+
+
+class UnauthorizedError(ApiError):
+    """未帶或無效的 token(roadmap ③)。"""
+    status = 401
+
+
+class ForbiddenError(ApiError):
+    """token 有效但身分不符(冒名,roadmap ③)。"""
+    status = 403
+
+
+class RateLimitError(ApiError):
+    """寫入頻率超限(roadmap ③),payload 附 retryAfter 秒數。"""
+    status = 429
 
 
 class BadReplyToError(ApiError):
@@ -232,6 +253,85 @@ class MessageStore:
         return list(stats.values())
 
 
+# ---------- TokenStore 與 RateLimiter(roadmap ③)----------
+
+class TokenStore:
+    """per-agent bearer token。明文只在生成當下出現一次,落地只存 sha256。
+
+    - 比對用 hmac.compare_digest(alice #229:防時序側信道)
+    - tokens.json 原子落地(temp+rename),gitignore
+    - 「user」也是持鑰者 — 人類不在名冊,但不能被鎖在門外(bob #228 洞一)
+    """
+
+    def __init__(self, path: Path):
+        self.path = path
+        self.hashes: dict[str, str] = {}
+        if path.exists():
+            try:
+                self.hashes = json.loads(path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError) as exc:
+                print(f"[auth] WARN tokens.json 載入失敗:{exc}", file=sys.stderr)
+
+    @staticmethod
+    def _digest(token: str) -> str:
+        return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+    def _persist(self) -> None:
+        fd, tmp = tempfile.mkstemp(dir=str(self.path.parent), suffix=".tmp")
+        with open(fd, "w", encoding="utf-8") as f:
+            json.dump(self.hashes, f, indent=2)
+        os.replace(tmp, str(self.path))
+
+    def issue(self, name: str) -> str:
+        """生成(或重生)某人的 token,回傳明文 — 呼叫端負責讓使用者看到這唯一一次。"""
+        token = secrets.token_urlsafe(24)
+        self.hashes[name] = self._digest(token)
+        self._persist()
+        return token
+
+    def ensure(self, names: list[str]) -> dict[str, str]:
+        """為還沒有 token 的名字補發;回傳 {名字: 新明文} 供啟動時列印。"""
+        fresh = {}
+        for name in names:
+            if name not in self.hashes:
+                fresh[name] = self.issue(name)
+        return fresh
+
+    def verify(self, name: str, token: str) -> bool:
+        stored = self.hashes.get(name)
+        return bool(stored) and hmac.compare_digest(self._digest(token), stored)
+
+    def owner_of(self, token: str) -> str | None:
+        digest = self._digest(token)
+        for name, stored in self.hashes.items():
+            if hmac.compare_digest(digest, stored):
+                return name
+        return None
+
+
+class RateLimiter:
+    """寫入限流:每個名字 10 秒滑動窗最多 10 則(與 409 重試流程相容,#228 推演)。"""
+
+    WINDOW_SECONDS = 10.0
+    LIMIT = 10
+
+    def __init__(self):
+        self.hits: dict[str, deque] = {}
+
+    def check(self, name: str) -> None:
+        """超限時 raise RateLimitError(附 retryAfter);未超限記錄本次。"""
+        now = time.monotonic()
+        window = self.hits.setdefault(name, deque())
+        while window and now - window[0] > self.WINDOW_SECONDS:
+            window.popleft()
+        if len(window) >= self.LIMIT:
+            retry_after = round(self.WINDOW_SECONDS - (now - window[0]), 1)
+            raise RateLimitError({"error": "rate_limited",
+                                  "detail": f"{self.WINDOW_SECONDS:.0f} 秒內最多 {self.LIMIT} 則寫入",
+                                  "retryAfter": max(retry_after, 0.1)})
+        window.append(now)
+
+
 # ---------- EventBus ----------
 
 @dataclass(eq=False)  # eq=False 保留預設身分 hash — 訂閱者要放進 set,且本來就該以身分區分
@@ -333,8 +433,40 @@ def create_app(port: int | None = None, host: str | None = None,
 
     agents = a2a_mod.AgentRegistry(BASE / "agents.json")  # 名冊:seed + 註冊者(roadmap ②)
     invite_token = os.environ.get("INVITE_TOKEN", "")     # 未設 = 註冊關閉(安全預設)
+
+    # ── 認證與限流(roadmap ③)──
+    auth_enabled = os.environ.get("AUTH", "").lower() in ("on", "1", "true")
+    token_store = TokenStore(BASE / "tokens.json")
+    rate_limiter = RateLimiter()
+    if auth_enabled:
+        # 名冊每人 + user(人類,bob #228 洞一)確保持鑰;新發的印 console 讓使用者分發
+        fresh = token_store.ensure(agents.names() + ["user"])
+        for name, token in fresh.items():
+            print(f"[auth] {name} 的 token(僅此一次,請抄下分發):{token}", file=sys.stderr)
+        rotate = os.environ.get("ROTATE_TOKEN", "")
+        if rotate:  # 丟鑰匙換鎖(alice #229):ROTATE_TOKEN=<名字> 重生該人 token
+            print(f"[auth] {rotate} 的新 token(舊的已失效):{token_store.issue(rotate)}",
+                  file=sys.stderr)
+
+    def check_writer(name: str, request: Request) -> None:
+        """AUTH=on 時的寫入守門:Bearer 必須存在、有效、且與聲稱身分綁定。"""
+        if not auth_enabled:
+            return
+        header = request.headers.get("authorization", "")
+        if not header.lower().startswith("bearer "):
+            raise UnauthorizedError({"error": "no_token",
+                                     "detail": "AUTH 已啟用,寫入需 Authorization: Bearer <token>"})
+        token = header[7:].strip()
+        if token_store.verify(name, token):
+            return
+        owner = token_store.owner_of(token)
+        if owner:  # 鑰匙是真的,但開的不是自己的門 = 冒名
+            raise ForbiddenError({"error": "wrong_identity",
+                                  "detail": f"這把 token 屬於「{owner}」,不能以「{name}」發言"})
+        raise UnauthorizedError({"error": "bad_token", "detail": "無效的 token"})
+
     a2a_layer = a2a_mod.A2ALayer(ingest=ingest, sanitize_sender=sanitize_sender,
-                                 base_url=base_url, agents=agents)
+                                 base_url=base_url, agents=agents, auth_enabled=auth_enabled)
 
     app = FastAPI(title="A2A Chatroom Hub")
     app.mount("/static", StaticFiles(directory=BASE / "static"), name="static")
@@ -356,6 +488,7 @@ def create_app(port: int | None = None, host: str | None = None,
         return {
             "mentionPattern": MentionParser.JS_SOURCE,
             "a2aVersion": a2a_mod.A2A_PROTOCOL_VERSION,
+            "authEnabled": auth_enabled,  # UI 據此顯示/隱藏 token 欄(alice #229)
             "agents": {name: {"color": p.get("color", "#c9d1d9")}
                        for name, p in agents.profiles.items()},
         }
@@ -374,22 +507,32 @@ def create_app(port: int | None = None, host: str | None = None,
         return {"room": room, "last_id": store.last_id(room), "count": store.count(room)}
 
     @app.get("/api/rooms/{room}/messages")
-    async def get_messages(room: str, since_id: int = 0, limit: int = 500,
+    async def get_messages(room: str, request: Request, since_id: int = 0, limit: int = 500,
                            mentioned: str | None = None, before_id: int | None = None,
                            tail: int | None = None, reader: str | None = None):
         sel, last = store.query(room, since_id, limit, mentioned, before_id, tail)
         if reader:
             name = sanitize_sender(reader)
-            if name:
+            # reader= 是隱藏的寫入(觸發 task 轉 WORKING)— AUTH=on 時必須驗身分,
+            # 驗不過就優雅降級:GET 本體照常回,只是不觸發已讀(bob #228 洞二)
+            authorized = True
+            if auth_enabled and name:
+                try:
+                    check_writer(name, request)
+                except ApiError:
+                    authorized = False
+            if name and authorized:
                 a2a_layer.on_reader_fetch(room, name, sel)  # 已讀回條 = WORKING
         return {"messages": sel, "last_id": last}
 
     @app.post("/api/rooms/{room}/messages", status_code=201)
-    async def post_message(room: str, body: PostMessage):
+    async def post_message(room: str, body: PostMessage, request: Request):
         sender = sanitize_sender(body.sender)
         if sender is None:
             raise BadSenderError({"error": "bad_sender",
                                   "detail": "名字限 1-32 字的中英數與 - _,不含空白與 @"})
+        check_writer(sender, request)   # 認證(AUTH=on 時)
+        rate_limiter.check(sender)      # 限流(永遠啟用)
         msg = await ingest(room, sender, body.text, reply_to=body.reply_to,
                            expect_last_id=body.expect_last_id)
         return {"id": msg["id"]}
@@ -489,7 +632,9 @@ def create_app(port: int | None = None, host: str | None = None,
             agents.register(name, {"color": body.color.lower(),
                                    "description": body.description,
                                    "skills": body.skills})
-        return a2a_layer.agent_card(name)
+        # AUTH=on 時隨註冊發一次性 token(明文僅此一次;勿貼進聊天室,#228 nice)
+        token = token_store.issue(name) if auth_enabled else None
+        return {"agentCard": a2a_layer.agent_card(name), "token": token}
 
     @app.get("/agents/{name}/.well-known/agent-card.json")
     @app.get("/agents/{name}/.well-known/a2a-agent-card")  # 常見路徑別名
@@ -509,8 +654,19 @@ def create_app(port: int | None = None, host: str | None = None,
         method = body.get("method")
         if body.get("jsonrpc") != "2.0" or not isinstance(method, str):
             return {"jsonrpc": "2.0", "id": rid, "error": {"code": -32600, "message": "invalid request"}}
+        params = body.get("params") or {}
+        if method in ("SendMessage", "SendStreamingMessage"):
+            # 寫入方法:AUTH=on 時驗 senderName 的 Bearer 綁定 + 限流(spec 將認證放在 HTTP 層)
+            meta = {**((params.get("message") or {}).get("metadata") or {}),
+                    **(params.get("metadata") or {})}
+            sender = sanitize_sender(str(meta.get("senderName", ""))) or "a2a-client"
+            try:
+                check_writer(sender, request)
+                rate_limiter.check(sender)
+            except ApiError as exc:
+                return JSONResponse(status_code=exc.status, content=exc.payload)
         try:
-            result = await a2a_layer.dispatch(name, method, body.get("params") or {})
+            result = await a2a_layer.dispatch(name, method, params)
         except a2a_mod.A2AError as exc:
             return {"jsonrpc": "2.0", "id": rid, "error": {"code": exc.code, "message": exc.message}}
         if inspect.isasyncgen(result):  # SendStreamingMessage / SubscribeToTask

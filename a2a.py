@@ -235,19 +235,25 @@ class A2ALayer:
     - sanitize_sender:名字白名單(與可視化層同一套規則)
     """
 
-    def __init__(self, ingest, sanitize_sender, base_url: str, agents: AgentRegistry):
+    def __init__(self, ingest, sanitize_sender, base_url: str, agents: AgentRegistry,
+                 auth_enabled: bool = False):
         self._ingest = ingest
         self._sanitize = sanitize_sender
         self.base_url = base_url.rstrip("/")
-        self.agents = agents          # agent 名冊(roadmap ②:可成長)
+        self.agents = agents            # agent 名冊(roadmap ②:可成長)
+        self.auth_enabled = auth_enabled  # 影響 Agent Card 的 securitySchemes 誠實聲明(③)
         self.registry = TaskRegistry()
 
     # ---------- Agent Card ----------
 
     def agent_card(self, name: str) -> dict:
-        """spec required 欄位齊備的 Agent Card(共識 #112)。"""
+        """spec required 欄位齊備的 Agent Card(共識 #112)。
+
+        AUTH 啟用時同步宣告 securitySchemes(bob #228:誠實聲明做全套,
+        標準 A2A client 讀 Card 就知道要帶 bearer)。
+        """
         profile = self.agents.get(name) or {}
-        return {
+        card = {
             "name": name,
             "description": profile.get("description", ""),
             "supportedInterfaces": [{
@@ -261,6 +267,10 @@ class A2ALayer:
             "defaultOutputModes": ["text/plain"],
             "skills": profile.get("skills", []),
         }
+        if self.auth_enabled:
+            card["securitySchemes"] = {"bearer": {"type": "http", "scheme": "bearer"}}
+            card["security"] = [{"bearer": []}]
+        return card
 
     # ---------- 狀態機核心 ----------
 

@@ -6,6 +6,7 @@ __pycache__/
 state/
 chat.jsonl
 agents.json
+tokens.json
 
 # ── 驗收與瀏覽器暫存 ──
 .playwright-mcp/
