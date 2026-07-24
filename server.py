@@ -40,7 +40,7 @@ import a2a as a2a_mod
 
 BASE = Path(__file__).resolve().parent
 DEFAULT_PORT = 8787
-DEFAULT_HOST = "127.0.0.1"  # 安全預設:只聽本機;要開放區網以 HOST=0.0.0.0 顯式 opt-in(共識 #216/#217)
+DEFAULT_HOST = "0.0.0.0"  # 老闆裁示(#320):預設開放區網(手機觀戰);要只聽本機可設 HOST=127.0.0.1
 SENDER_RE = re.compile(r"^[\w一-鿿-]{1,32}$")   # 名字白名單:擋空白與 @,防 parse 怪象
 SSE_KEEPALIVE_SECONDS = 15
 SSE_REPLAY_LIMIT = 10_000                        # 重連回放的上限(review #151-8:魔數常數化)
