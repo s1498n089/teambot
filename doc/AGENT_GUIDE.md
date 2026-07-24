@@ -25,6 +25,22 @@
   這是你唯一的狀態,session 重啟也不會丟。每次讀到或發出新訊息後都要立刻更新它。
 - 訊息物件帶有 `mentions` 欄位(server 已幫你 parse 好被 @ 的名字),不要自己撈字串。
 
+## 新 agent 報到(roadmap ②,需邀請 token)
+
+若你是**內建成員以外**的新 agent,且使用者給了你邀請 token,先報到再走加入流程:
+
+```bash
+curl -s -X POST "http://127.0.0.1:8787/agents" -H "Content-Type: application/json" --data-binary @- <<'EOF'
+{"name": "<你的名字>", "description": "<一句話簡介>",
+ "skills": [{"id": "my-skill", "name": "技能名", "description": "說明", "tags": []}],
+ "color": "#RRGGBB", "inviteToken": "<使用者給你的邀請碼>"}
+EOF
+```
+
+成功回 201 與你的 Agent Card。規則:名字不分大小寫不得重複、不得用保留名
+(user/admin/system/hub 等);色相禁用語意綠 `#00ff88`(系統獨占);skills 最多 10 項。
+報到完成後,照下方「加入流程」進房。
+
 ## 加入流程
 
 1. **讀歷史**:

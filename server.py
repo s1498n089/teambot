@@ -68,6 +68,11 @@ class StaleCursorError(ApiError):
     status = 409
 
 
+class ConflictError(ApiError):
+    """資源衝突(如註冊重名)。"""
+    status = 409
+
+
 class BadReplyToError(ApiError):
     status = 422
 
@@ -271,6 +276,15 @@ class PostMessage(BaseModel):
     model_config = {"populate_by_name": True}
 
 
+class RegisterAgent(BaseModel):
+    """roadmap ② 動態註冊:新 agent 憑邀請 token 自報。欄位上限防灌書(alice #222)。"""
+    name: str = Field(min_length=1, max_length=32)
+    description: str = Field(default="", max_length=300)
+    skills: list = Field(default_factory=list)
+    color: str = Field(pattern=r"^#[0-9a-fA-F]{6}$")
+    inviteToken: str = Field(min_length=1, max_length=128)
+
+
 # ---------- Composition Root ----------
 
 def create_app(port: int | None = None, host: str | None = None,
@@ -317,8 +331,10 @@ def create_app(port: int | None = None, host: str | None = None,
         a2a_layer.on_room_message(room, msg)  # 完成橋接(耦合點,見 docstring)
         return msg
 
+    agents = a2a_mod.AgentRegistry(BASE / "agents.json")  # 名冊:seed + 註冊者(roadmap ②)
+    invite_token = os.environ.get("INVITE_TOKEN", "")     # 未設 = 註冊關閉(安全預設)
     a2a_layer = a2a_mod.A2ALayer(ingest=ingest, sanitize_sender=sanitize_sender,
-                                 base_url=base_url)
+                                 base_url=base_url, agents=agents)
 
     app = FastAPI(title="A2A Chatroom Hub")
     app.mount("/static", StaticFiles(directory=BASE / "static"), name="static")
@@ -335,11 +351,13 @@ def create_app(port: int | None = None, host: str | None = None,
 
     @app.get("/api/config")
     async def get_config():
-        """前端開機設定:mention 規則與 agent 色相的單一事實來源(#151-7)。"""
+        """前端開機設定:mention 規則與 agent 色相的單一事實來源(#151-7)。
+        名冊動態化後,新註冊者的色相在「重新整理後」生效(已知時效行為,#222)。"""
         return {
             "mentionPattern": MentionParser.JS_SOURCE,
             "a2aVersion": a2a_mod.A2A_PROTOCOL_VERSION,
-            "agents": {name: {"color": p["color"]} for name, p in a2a_mod.AGENT_PROFILES.items()},
+            "agents": {name: {"color": p.get("color", "#c9d1d9")}
+                       for name, p in agents.profiles.items()},
         }
 
     @app.get("/api/rooms")
@@ -437,12 +455,46 @@ def create_app(port: int | None = None, host: str | None = None,
     @app.get("/agents")
     async def agents_index():
         return {"agents": [{"name": n, "card": f"/agents/{n}/.well-known/agent-card.json"}
-                           for n in a2a_mod.AGENT_PROFILES]}
+                           for n in agents.names()]}
+
+    @app.post("/agents", status_code=201)
+    async def register_agent(body: RegisterAgent):
+        """roadmap ② 動態註冊:憑邀請 token 入冊,回 Agent Card。
+
+        驗證順序:註冊開關 → token → 名字消毒 → 保留名單 → 語意綠黑名單 →
+        (持鎖)不分大小寫重名 → 入冊原子落地(共識 #221/#222/#223)。
+        """
+        if not invite_token:
+            return JSONResponse(status_code=403, content={
+                "error": "registration_closed",
+                "detail": "hub 未設定 INVITE_TOKEN,註冊功能關閉"})
+        if body.inviteToken != invite_token:
+            return JSONResponse(status_code=403, content={"error": "bad_invite_token"})
+        name = sanitize_sender(body.name)
+        if name is None:
+            raise BadSenderError({"error": "bad_name",
+                                  "detail": "名字限 1-32 字的中英數與 - _,不含空白與 @"})
+        if name.lower() in a2a_mod.RESERVED_NAMES:
+            raise BadSenderError({"error": "reserved_name",
+                                  "detail": f"「{name}」是保留名(人類/基礎設施專用)"})
+        if body.color.lower() == a2a_mod.SEMANTIC_GREEN:
+            raise BadSenderError({"error": "semantic_color",
+                                  "detail": "語意綠 #00ff88 為系統獨占(點名/連線/NEW),sender 禁用"})
+        if len(json.dumps(body.skills, ensure_ascii=False)) > 2000 or len(body.skills) > 10:
+            raise BadSenderError({"error": "skills_too_large", "detail": "skills 最多 10 項、總長 2000 字"})
+        async with post_lock:  # 併發決勝:同名同時註冊只有一人成功(bob #223)
+            if agents.taken_ci(name):
+                raise ConflictError({"error": "name_taken",
+                                     "detail": f"名字「{name}」已被使用(不分大小寫)"})
+            agents.register(name, {"color": body.color.lower(),
+                                   "description": body.description,
+                                   "skills": body.skills})
+        return a2a_layer.agent_card(name)
 
     @app.get("/agents/{name}/.well-known/agent-card.json")
     @app.get("/agents/{name}/.well-known/a2a-agent-card")  # 常見路徑別名
     async def agent_card(name: str):
-        if name not in a2a_mod.AGENT_PROFILES:
+        if agents.get(name) is None:
             return JSONResponse(status_code=404, content={"error": "unknown agent"})
         return a2a_layer.agent_card(name)
 

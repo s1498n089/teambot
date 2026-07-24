@@ -17,6 +17,9 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import os
+import sys
+import tempfile
 import uuid
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -57,8 +60,13 @@ ERR_UNSUPPORTED_OPERATION = -32004
 ERR_CONTENT_TYPE = -32005
 ERR_EXTENDED_CARD_NOT_CONFIGURED = -32007
 
-# Agent 註冊表:skills 為各 agent 自報;color 經 /api/config 下發給前端(SSOT,#151-7)。
-AGENT_PROFILES = {
+# 名冊治理常數(roadmap ② 共識 #222/#223)
+RESERVED_NAMES = {"user", "admin", "system", "hub", "server", "poller"}  # 撞人類/基礎設施的名字
+SEMANTIC_GREEN = "#00ff88"  # 語意色獨占鐵律(v4):sender 禁用,註冊時黑名單
+
+# 內建 seed agent:寫在 code 裡,永遠存在;註冊者另存 agents.json(runtime 資料)。
+# skills 為各 agent 自報;color 經 /api/config 下發給前端(SSOT,#151-7)。
+SEED_PROFILES = {
     "alice": {
         "color": "#ff79c6",
         "description": "UI/UX 視覺與可讀性導向的評審 agent:設計提案、可用性實測、規格挑戰。",
@@ -97,6 +105,51 @@ class A2AError(Exception):
         self.code = code
         self.message = message
         super().__init__(message)
+
+
+class AgentRegistry:
+    """agent 名冊(roadmap ②):內建 seed 永遠在,註冊者落地 agents.json。
+
+    - 載入:seed 優先,agents.json 補上註冊者(重啟不忘人)
+    - 寫入:temp + rename 原子落地(bob #223:斷電不留半寫檔)
+    - 併發決勝由呼叫端持鎖(server 的 post_lock),本類別不重複上鎖
+    """
+
+    def __init__(self, path):
+        self.path = path
+        self.profiles: dict[str, dict] = {name: dict(p) for name, p in SEED_PROFILES.items()}
+        self._load()
+
+    def _load(self) -> None:
+        if not self.path.exists():
+            return
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+            for name, profile in data.items():
+                self.profiles.setdefault(name, profile)  # seed 名字不可被覆蓋
+        except (json.JSONDecodeError, OSError) as exc:
+            print(f"[registry] WARN agents.json 載入失敗,僅用 seed:{exc}", file=sys.stderr)
+
+    def get(self, name: str) -> dict | None:
+        return self.profiles.get(name)
+
+    def names(self) -> list[str]:
+        return list(self.profiles)
+
+    def taken_ci(self, name: str) -> bool:
+        """重名判定不分大小寫(alice #222:pill 全大寫,ALICE/alice 會撞臉)。"""
+        low = name.lower()
+        return any(n.lower() == low for n in self.profiles)
+
+    def register(self, name: str, profile: dict) -> None:
+        """呼叫端已完成驗證與持鎖;這裡只負責入冊與原子落地。"""
+        self.profiles[name] = profile
+        registered = {n: p for n, p in self.profiles.items() if n not in SEED_PROFILES}
+        directory = str(self.path.parent)
+        fd, tmp = tempfile.mkstemp(dir=directory, suffix=".tmp")
+        with open(fd, "w", encoding="utf-8") as f:
+            json.dump(registered, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, str(self.path))
 
 
 @dataclass
@@ -182,20 +235,21 @@ class A2ALayer:
     - sanitize_sender:名字白名單(與可視化層同一套規則)
     """
 
-    def __init__(self, ingest, sanitize_sender, base_url: str):
+    def __init__(self, ingest, sanitize_sender, base_url: str, agents: AgentRegistry):
         self._ingest = ingest
         self._sanitize = sanitize_sender
         self.base_url = base_url.rstrip("/")
+        self.agents = agents          # agent 名冊(roadmap ②:可成長)
         self.registry = TaskRegistry()
 
     # ---------- Agent Card ----------
 
     def agent_card(self, name: str) -> dict:
         """spec required 欄位齊備的 Agent Card(共識 #112)。"""
-        profile = AGENT_PROFILES[name]
+        profile = self.agents.get(name) or {}
         return {
             "name": name,
-            "description": profile["description"],
+            "description": profile.get("description", ""),
             "supportedInterfaces": [{
                 "url": f"{self.base_url}/agents/{name}/a2a",
                 "protocolBinding": "JSONRPC",
@@ -205,7 +259,7 @@ class A2ALayer:
             "capabilities": {"streaming": True, "pushNotifications": False, "extendedAgentCard": False},
             "defaultInputModes": ["text/plain"],
             "defaultOutputModes": ["text/plain"],
-            "skills": profile["skills"],
+            "skills": profile.get("skills", []),
         }
 
     # ---------- 狀態機核心 ----------
@@ -289,7 +343,7 @@ class A2ALayer:
 
     async def dispatch(self, agent: str, method: str, params: dict):
         """方法分派。回傳 dict(一般結果)或 async generator(SSE 串流)。"""
-        if agent not in AGENT_PROFILES:
+        if self.agents.get(agent) is None:
             raise A2AError(ERR_UNSUPPORTED_OPERATION, f"unknown agent: {agent}")
         handlers = {
             "SendMessage": self._send_message,

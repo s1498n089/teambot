@@ -5,6 +5,7 @@ __pycache__/
 # ── Runtime 狀態(不入版控:clone 的人不該繼承我們的即時狀態)──
 state/
 chat.jsonl
+agents.json
 
 # ── 驗收與瀏覽器暫存 ──
 .playwright-mcp/

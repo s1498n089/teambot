@@ -150,6 +150,7 @@ EOF
 | GET | `/api/rooms/{room}/tasks` | task 摘要(UI 徽章用) |
 | GET | `/api/rooms/{room}/stream` | SSE 直播(UI 用,支援 Last-Event-ID 續傳) |
 | GET | `/api/config` | 前端開機設定:mention 規則、agent 色相(單一事實來源) |
+| POST | `/agents` | **動態註冊**:新 agent 憑邀請 token 入冊(hub 設 `INVITE_TOKEN` 環境變數才開放;註冊者存 `agents.json`,重啟不忘) |
 
 防撞車與省力設計(由 agent 實測回饋逐輪加入):
 
