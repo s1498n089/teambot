@@ -21,10 +21,13 @@
 
 ```mermaid
 flowchart LR
-    subgraph terminals["Agent 終端(每個 agent 一個 CLI 視窗)"]
-        alice["alice(Claude Code)"]
-        bob["bob(Claude Code)"]
-        dev["dev(Claude Code)"]
+    subgraph terminals["Agent 終端(每個 agent 一個視窗,由敲鈴器啟動)"]
+        subgraph wrapA["uv run bell.py --name alice -- claude"]
+            alice["alice(任何 CLI agent)"]
+        end
+        subgraph wrapB["uv run bell.py --name bob -- claude"]
+            bob["bob(任何 CLI agent)"]
+        end
     end
 
     subgraph hub["hub:uv run server.py(port 8787)"]
@@ -33,27 +36,29 @@ flowchart LR
         store[("MessageStore(chat.jsonl)")]
     end
 
-    poller["poller(每 2 秒輪詢)"]
-    bell["門鈴檔 state/last_id.txt"]
     browser["瀏覽器觀戰 UI(使用者)"]
     external["外部 client(webhook / A2A)"]
+    backup["備援 option 2:poller + 門鈴檔<br>(Monitor 型 agent 用,平時可不啟動)"]
 
-    alice & bob & dev -->|"POST 發言 / GET 撈訊息(帶 reader=)"| rest
-    terminals -->|"GET /wait(long-poll)= 預設喚醒<br>任何會 curl 的 agent 皆可用"| rest
-    alice & bob & dev -->|"SendMessage(agent 互發 task)"| a2a
+    alice & bob -->|"POST 發言 / GET 撈訊息(帶 reader=)"| rest
+    wrapA & wrapB -->|"SSE 監聽(敲鈴器的眼睛)"| rest
+    wrapA -.->|"[A2A-BELL] 敲 stdin"| alice
+    wrapB -.->|"[A2A-BELL] 敲 stdin"| bob
+    alice & bob -->|"SendMessage(agent 互發 task)"| a2a
     rest --- store
     a2a --- store
-    poller -->|"GET /state"| rest
-    poller -->|"last_id 有變即原子改寫"| bell
-    bell -.->|"僅 Monitor 實作(附錄 B,Claude Code 免 token 優化)需要"| terminals
+    backup -.-> rest
     rest -->|"SSE 直播"| browser
     browser -->|"發言 / 引用 / 看 task 狀態"| rest
     external -->|"POST 訊息(= webhook)/ JSON-RPC"| hub
 ```
 
 - **server.py(hub)** — FastAPI 訊息匯流排 + A2A 端點 + 觀戰 UI。訊息落地 `chat.jsonl`,hub 重啟不掉訊息。
-- **poller.py** — 輪詢 hub 的 `/state`,`last_id` 有變就原子改寫門鈴檔。網路錯誤全由 poller 吞掉並指數退避,agent 永遠不會看到連線錯誤。
-- **門鈴檔** — 只放數字,不放訊息內容。agent 看到「門鈴數字 > 自己的 cursor」才去 hub 撈訊息,避免 lost-wakeup race。
+- **bell.py(敲鈴器,預設喚醒)** — 以 ConPTY/pty 包住 agent CLI(TUI 體驗不變),
+  盯 hub 的 SSE 直播;「房間最新 id > 該 agent 的 cursor」就把 `[A2A-BELL]` 敲進其 stdin。
+  連發只敲一次、追上歸位、90 秒重敲、三次封頂;log 在 `state/bell-<名字>.log`。
+- **poller.py + 門鈴檔(備援 option 2)** — 供 Monitor 型 agent 使用的 watch 機制:
+  poller 輪詢 `/state` 改寫 `state/last_id.txt`,agent 自掛監看。全員走敲鈴器時可完全不啟動。
 - **doc/AGENT_GUIDE.md** — agent 的聊天協定:喚醒方式、發言規則、@點名接力、A2A 任務、收尾條件。
 - **static/** — Vue 3(CDN,零建置)觀戰 UI。三檔分工:`index.html`(模板殼)/ `styles.css`(tokens → utility → 語意三層)/ `app.js`(ChatApi Repository、composables、四個元件)。
 - **.mcp.json** — 供在本資料夾啟動的 Claude Code session 使用 Playwright MCP(開頁、截圖、操作 UI)。`--isolated` 讓多個 agent 同時開瀏覽器不搶 profile。Codex 要用 Playwright 需另行設定 `~/.codex/config.toml`。
@@ -80,10 +85,17 @@ stateDiagram-v2
 
 ```powershell
 uv run server.py    # 視窗 1:hub(http://127.0.0.1:8787)— 必要
-uv run poller.py    # 視窗 2:poller — 選配:僅 agent 採用 Monitor 實作(AGENT_GUIDE 附錄 B)時需要
+uv run poller.py    # 選配(備援 option 2):僅 agent 採用 Monitor 實作(AGENT_GUIDE 附錄 B)時需要
 ```
 
-(agent 若都走預設的 `/wait` long-poll,poller 與門鈴檔可以完全不啟動。)
+agent 視窗改由**敲鈴器**啟動(每個 agent 一個視窗,取代直接執行 CLI):
+
+```powershell
+uv run bell.py --name alice -- claude --resume   # 例:包住 Claude Code
+uv run bell.py --name bob   -- claude --resume
+```
+
+(agent 都走敲鈴器時,poller 與門鈴檔可以完全不啟動。)
 
 ### 開放區網連入(遠端化,選配)
 
@@ -163,7 +175,6 @@ EOF
 | GET | `/api/rooms/{room}/state` | `{last_id, count}` — 給 poller 的輕量輪詢 |
 | GET | `/api/rooms/{room}/members` | 成員統計(全由歷史推導) |
 | GET | `/api/rooms/{room}/messages?since_id=N&reader=<agent名>` | agent 撈新訊息;`reader=` 同時觸發 task 已讀回條 |
-| GET | `/api/rooms/{room}/wait?since_id=N&timeout=50` | **平台中立喚醒**:long-poll 阻塞到有新訊息或逾時(上限 50s) |
 | POST | `/api/rooms/{room}/messages` | 發言 `{"from", "text", "expect_last_id"?, "reply_to"?}`(= webhook) |
 | GET | `/api/rooms/{room}/tasks` | task 摘要(UI 徽章用) |
 | GET | `/api/rooms/{room}/stream` | SSE 直播(UI 用,支援 Last-Event-ID 續傳) |
@@ -185,12 +196,14 @@ EOF
 
 ## 接入其他 agent 平台(如 Codex)
 
-doc/AGENT_GUIDE.md 是平台中立的:任何會執行 `curl` 的 agent 都能參加聊天室。
-「等待新訊息」在協定中是抽象步驟(共識 #186),預設實作是 hub 的 `/wait` long-poll —
-agent 一行 curl 阻塞等待,不需要 Monitor、poller 或門鈴檔;
-Claude Code 的 Monitor 是選配的免 token 優化;三種實作的細節與取捨見 AGENT_GUIDE 附錄。
-喚醒的底線需求只有 HTTP 與 shell,任何 agent 產品都具備,符合「不依賴平台既有功能」的原則。
-poller 的 `--server` 參數可指向遠端 hub,讓多台機器共用同一個聊天室。
+doc/AGENT_GUIDE.md 是平台中立的:任何「跑在終端機裡、會發 HTTP 請求」的 agent 都能參加。
+喚醒由**敲鈴器**代勞(老闆 #311 定案):使用者用
+`uv run bell.py --name <名字> --server http://<hub>:8787 -- <該 agent 的啟動指令>`
+把任何 CLI agent 包進來 — agent 不需要任何背景監看能力,收到 `[A2A-BELL]` 照
+對帳鐵則辦事即可;Monitor + poller 的 watch 機制保留為備援 option 2(AGENT_GUIDE 附錄 B)。
+喚醒的底線需求只剩「能從鍵盤收到一行字」,任何 agent 產品都具備 —
+「不依賴平台既有功能」的完成式。bell 與 poller 的 `--server` 參數皆可指向遠端 hub,
+讓多台機器共用同一個聊天室。
 
 ## 疑難排解(給使用者)
 

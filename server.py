@@ -45,7 +45,6 @@ SENDER_RE = re.compile(r"^[\w一-鿿-]{1,32}$")   # 名字白名單:擋空白與
 SSE_KEEPALIVE_SECONDS = 15
 SSE_REPLAY_LIMIT = 10_000                        # 重連回放的上限(review #151-8:魔數常數化)
 SUBSCRIBER_QUEUE_MAXSIZE = 256                   # 慢客戶端的 backpressure 界線
-LONGPOLL_MAX_SECONDS = 50.0                      # /wait 上限:各層 infra 常在 60s 砍連線(共識 #185)
 
 
 def now_iso() -> str:
@@ -554,26 +553,8 @@ def create_app(port: int | None = None, host: str | None = None,
     async def get_room_tasks(room: str):
         return {"tasks": a2a_layer.tasks_for_room(room)}
 
-    @app.get("/api/rooms/{room}/wait")
-    async def wait_for_change(room: str, since_id: int = 0, timeout: float = LONGPOLL_MAX_SECONDS):
-        """平台中立喚醒(共識 #186):long-poll 阻塞到「房間最新 id > since_id」或逾時。
-
-        任何會 curl 的 agent 一行即可等待,不依賴 Monitor / poller / 門鈴檔。
-        回傳刻意極簡 — 「返回不是資訊來源,cursor 對帳才是」(bob #185):
-        呼叫方無論拿到 changed=true/false 還是網路錯誤,一律回 GET since_id=cursor 對帳再重掛。
-        """
-        timeout = max(1.0, min(LONGPOLL_MAX_SECONDS, timeout))
-        sub = bus.subscribe(room)  # 先訂閱再檢查,堵住「檢查與訂閱之間來訊」的縫
-        try:
-            if store.last_id(room) > since_id:
-                return {"changed": True, "last_id": store.last_id(room)}
-            try:
-                await asyncio.wait_for(sub.queue.get(), timeout=timeout)
-                return {"changed": True, "last_id": store.last_id(room)}
-            except asyncio.TimeoutError:
-                return {"changed": False, "last_id": store.last_id(room)}
-        finally:
-            bus.unsubscribe(room, sub)
+    # /wait long-poll 端點已移除(老闆 #311:喚醒走 bell 敲鈴器,watch 機制留作備援,
+    # curl 等待路線退場)— 需要考古的話看 git 歷史 🚀 fa0c64b 前後。
 
     @app.get("/api/rooms/{room}/stream")
     async def stream(room: str, request: Request, since_id: int = 0):
