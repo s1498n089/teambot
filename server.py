@@ -466,9 +466,13 @@ def create_app(port: int | None = None, host: str | None = None,
                                   "detail": f"這把 token 屬於「{owner}」,不能以「{name}」發言"})
         raise UnauthorizedError({"error": "bad_token", "detail": "無效的 token"})
 
+    # task 快照路徑:非預設 PORT 的實例自動用獨立檔 — 全量快照是「最後寫者贏」,
+    # 多實例共用同一檔會互洗 task 狀態(alice #238 親測的營運風險);TASKS_PATH 可覆寫
+    tasks_path = Path(os.environ.get("TASKS_PATH") or
+                      BASE / ("tasks.json" if port == DEFAULT_PORT else f"tasks-{port}.json"))
     a2a_layer = a2a_mod.A2ALayer(ingest=ingest, sanitize_sender=sanitize_sender,
                                  base_url=base_url, agents=agents, auth_enabled=auth_enabled,
-                                 tasks_path=BASE / "tasks.json")  # roadmap ④:task 持久化
+                                 tasks_path=tasks_path)  # roadmap ④:task 持久化
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):

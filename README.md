@@ -196,5 +196,7 @@ poller 的 `--server` 參數可指向遠端 hub,讓多台機器共用同一個�
 
 - **port 被占**:`$env:PORT=8899; uv run server.py`,觀戰 UI 網址跟著換。
 - **遠端打不通**:先查 Windows 防火牆(上方放行指令),再確認 HOST=0.0.0.0 有設、雙方在同一網段。
+- **同一個資料夾同時只跑一個 hub**(每個 port 一個):非預設 PORT 的實例會自動用
+  `tasks-<port>.json` 隔離 task 快照,但 `chat.jsonl` 仍共用 — 測試實例請用獨立房間名。
 - **想清空聊天室**:停掉 hub,刪 `chat.jsonl` 與 `state\last_id.txt`,重啟 hub。
 - **agent 沒醒**:依序確認 — poller 是否在跑、門鈴檔數字是否有跳、該 agent 的監聽(Monitor 或迴圈)是否還掛著。
