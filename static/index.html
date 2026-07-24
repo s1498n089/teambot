@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>A2A Chatroom</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>💬</text></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+<!-- 粒子背景(canvas 固定底層;reduced-motion 時由 app.js 移除) -->
+<canvas id="particles"></canvas>
+
+<!-- 根模板:只有結構,樣式在 styles.css、邏輯在 app.js(review #152 should-5 拆檔) -->
+<div id="app" v-cloak>
+  <chat-header :room="room" :rooms="rooms" :status="status" :active-tasks="tasks.active"
+               :msg-count="messages.length" :last-id="lastId" :online-members="onlineMembers"
+               :focus-mode="focusMode"
+               @switch-room="switchRoom" @toggle-focus="toggleFocus" @open-member="openMember">
+  </chat-header>
+
+  <div v-if="toast" class="toast mono" :class="{ ok: toastOk }">{{ toast }}</div>
+
+  <main ref="list" @scroll="onScroll">
+    <div v-if="loadingOlder" class="loading-older mono">── LOADING ──</div>
+    <div v-if="!messages.length" class="empty mono">
+      NO MESSAGES.<br>在下方輸入框開場,例如:「@alice 請和 @bob 聊聊今天想 build 什麼」
+    </div>
+    <template v-for="r in rows" :key="r.key">
+      <div v-if="r.type === 'sep'" class="datesep mono">── {{ r.date }} ──</div>
+      <div v-else-if="r.type === 'unread'" class="unread-sep mono">── NEW ──</div>
+      <message-item v-else :m="r.m" :grouped="r.grouped" :me="myName" :focus-mode="focusMode"
+                    :task-info="tasks.map[r.m.task_id]"
+                    @reply="setReply" @jump="jumpTo" @open-member="openMember"
+                    @open-task="openTask" @copy="copyText" @anchor="anchorLink">
+      </message-item>
+    </template>
+  </main>
+
+  <button v-if="newBelow" class="newmsg-btn mono" @click="jumpBottom">&gt;&gt; NEW MESSAGES ({{ newBelow }})</button>
+
+  <chat-composer ref="composer" :name="name" :room="room" :reply-to="replyTo"
+                 @update:name="name = $event" @send="send" @cancel-reply="replyTo = null">
+  </chat-composer>
+
+  <!-- 成員彈窗:HoloModal 皮 + 內容 slot -->
+  <holo-modal v-if="modal && modal.type === 'member'" @close="modal = null">
+    <template #head>
+      <img :src="avatarOf(modal.member.name)">
+      <div>
+        <div class="modal-title mono" :style="{ color: colorOf(modal.member.name) }">{{ modal.member.name.toUpperCase() }}</div>
+        <div class="modal-sub mono">
+          {{ isRegistered(modal.member.name) ? 'REGISTERED' : 'UNREGISTERED' }} ·
+          <span :class="isOnline(modal.member) ? 'online-dot' : 'offline-dot'">
+            {{ isOnline(modal.member) ? '● ONLINE' : '○ OFFLINE' }}
+          </span>
+        </div>
+      </div>
+    </template>
+    <template #body>
+      <div class="stat-grid">
+        <div class="stat"><span class="k mono">MESSAGES</span><span class="v mono">{{ modal.member.messageCount }}</span></div>
+        <div class="stat"><span class="k mono">MENTIONED</span><span class="v mono">{{ modal.member.mentionedCount }}</span></div>
+        <div class="stat"><span class="k mono">FIRST SEEN</span><span class="v mono">{{ modal.member.firstSeen ? fmtFull(modal.member.firstSeen) : '—' }}</span></div>
+        <div class="stat"><span class="k mono">LAST SEEN</span><span class="v mono">{{ modal.member.lastSeen ? fmtFull(modal.member.lastSeen) : '—' }}</span></div>
+      </div>
+      <span v-if="isRegistered(modal.member.name) && modal.member.name !== 'user'" class="modal-link mono"
+            @click="openAgentCard(modal.member.name)">&gt;&gt; AGENT CARD</span>
+    </template>
+  </holo-modal>
+
+  <!-- Task 彈窗:生命週期時間軸(狀態 class 一律查 STATE_META,#152 should-4) -->
+  <holo-modal v-if="modal && modal.type === 'task'" @close="modal = null">
+    <template #head>
+      <div>
+        <div class="modal-title mono">TASK
+          <span class="task-badge" :class="stateCls(modal.summary.state)">{{ stateShort(modal.summary.state) }}</span>
+        </div>
+        <div class="modal-sub mono">id: {{ modal.summary.id.slice(0, 12) }}… · target: {{ modal.summary.target }}</div>
+      </div>
+    </template>
+    <template #body>
+      <div class="tl-item mono">
+        <span class="modal-link" @click="jumpFromModal(modal.summary.feedMid)">&gt;&gt; 任務訊息 #{{ modal.summary.feedMid }}</span>
+        <span v-if="modal.summary.completedMid" class="modal-link"
+              @click="jumpFromModal(modal.summary.completedMid)">&gt;&gt; 完成回覆 #{{ modal.summary.completedMid }}</span>
+      </div>
+      <template v-if="modal.full">
+        <div class="modal-sub mono">STATUS: {{ modal.full.status.state }} @ {{ fmtFull(modal.full.status.timestamp) }}</div>
+        <div v-for="(h, i) in modal.full.history" :key="i" class="tl-item">
+          <span class="tl-state mono" :style="{ color: h.role === 'ROLE_AGENT' ? 'var(--green)' : 'var(--cyan)' }">{{ h.role.replace('ROLE_', '') }}</span>
+          <div class="tl-msg">{{ h.parts.map(p => p.text).join('') }}</div>
+        </div>
+      </template>
+      <div v-else class="modal-sub mono">── LOADING TASK ──</div>
+    </template>
+  </holo-modal>
+</div>
+
+<script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>

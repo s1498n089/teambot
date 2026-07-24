@@ -1,0 +1,317 @@
+/* A2A Chatroom — 樣式層。
+   分層:1 tokens → 2 utility(只收重複 3 次以上的視覺效果)→ 3 語意/結構 class。
+   拆檔緣由:review #152 should-5 — 單檔初衷是零建置,不是零分檔。 */
+
+/* ═══════════ 1. Design Tokens ═══════════ */
+:root {
+  --bg: #0a0a0f;
+  --panel: #12121a;
+  --panel-2: #1c1c2e;
+  --border: #23232f;
+  --text: #e0e0e0;
+  --muted: #7f8797;
+  --green: #00ff88;    /* 語意色專用:點名/連線正常/NEW —— sender 禁用 */
+  --cyan: #00d4ff;     /* bob、引用、跳轉脈衝 */
+  --pink: #ff79c6;     /* alice */
+  --amber: #ffb86c;    /* dev、task open */
+  --human: #c9d1d9;    /* 人類 */
+  --magenta: #ff00ff;  /* 裝飾層專用(glitch/aberration),不入功能色 */
+  --red: #ff5555;
+  --mono: "Share Tech Mono", Consolas, monospace;
+  --shadow-neon: 0 0 5px var(--green), 0 0 10px rgba(0, 255, 136, 0.25);
+  --shadow-neon-cyan: 0 0 5px var(--cyan), 0 0 12px rgba(0, 212, 255, 0.35);
+}
+
+/* ═══════════ 2. Utility 層 ═══════════ */
+.mono { font-family: var(--mono); }
+.mono-label { font-family: var(--mono); text-transform: uppercase; letter-spacing: 0.15em; font-size: 11px; }
+.chamfer { clip-path: polygon(0 8px, 8px 0, calc(100% - 8px) 0, 100% 8px,
+           100% calc(100% - 8px), calc(100% - 8px) 100%, 8px 100%, 0 calc(100% - 8px)); }
+.chamfer-sm { clip-path: polygon(0 5px, 5px 0, calc(100% - 5px) 0, 100% 5px,
+              100% calc(100% - 5px), calc(100% - 5px) 100%, 5px 100%, 0 calc(100% - 5px)); }
+.glow-green { box-shadow: var(--shadow-neon); }
+.glow-cyan { box-shadow: var(--shadow-neon-cyan); }
+
+/* ═══════════ 3. 基底與背景層 ═══════════ */
+* { box-sizing: border-box; margin: 0; padding: 0; }
+[v-cloak] { display: none; }
+html, body { height: 100%; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  /* 中文本文 sans(共識 #108:mono 限 metadata) */
+  font-family: "Segoe UI", "Microsoft JhengHei", system-ui, sans-serif;
+  display: flex;
+  justify-content: center;
+  overflow: hidden;
+}
+body::before { /* circuit grid(靜態,reduced-motion 也保留) */
+  content: "";
+  position: fixed; inset: 0; z-index: 0; pointer-events: none;
+  background-image:
+    linear-gradient(rgba(0, 255, 136, 0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(0, 255, 136, 0.03) 1px, transparent 1px);
+  background-size: 50px 50px;
+}
+/* scanlines 已依老闆 #139/#141 停用;要復原,把當時的 body::after 規則加回來即可 */
+#particles { position: fixed; inset: 0; z-index: 0; pointer-events: none; }
+#app {
+  position: relative; z-index: 1;
+  width: min(960px, 100vw); /* 版心(老闆 #130 加寬) */
+  height: 100dvh;
+  display: flex; flex-direction: column;
+}
+
+/* cyberpunk scrollbar:green→cyan 漸層 thumb,track 透明;Firefox 用 scrollbar-color 降級 */
+main::-webkit-scrollbar, .modal-body::-webkit-scrollbar { width: 10px; }
+main::-webkit-scrollbar-track, .modal-body::-webkit-scrollbar-track { background: transparent; }
+main::-webkit-scrollbar-thumb, .modal-body::-webkit-scrollbar-thumb {
+  background: linear-gradient(180deg, var(--green), var(--cyan));
+  border-radius: 2px;
+  border: 2px solid var(--bg);
+}
+main::-webkit-scrollbar-thumb:hover { box-shadow: inset 0 0 6px rgba(255, 255, 255, 0.5); }
+main, .modal-body { scrollbar-width: thin; scrollbar-color: #00d4ff transparent; }
+
+/* ═══════════ 4. Header ═══════════ */
+header {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 18px;
+  border-bottom: 1px solid var(--border);
+  background: rgba(18, 18, 26, 0.9);
+  backdrop-filter: blur(4px);
+}
+.hdr-title {
+  font-size: 14px; letter-spacing: 1px; white-space: nowrap;
+  /* 靜態 chromatic aberration:glitch 白名單外唯一允許的常駐色差(標題限定) */
+  text-shadow: -1px 0 rgba(255, 0, 255, 0.45), 1px 0 rgba(0, 212, 255, 0.45);
+}
+.hdr-title:hover { animation: glitchShift 0.3s steps(2) 2; } /* glitch 白名單 1/3 */
+select.room-switch {
+  background: var(--bg); color: var(--cyan); border: 1px solid var(--border);
+  font-family: var(--mono); font-size: 11px; padding: 3px 4px; border-radius: 2px;
+}
+.lamp { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+.lamp.online { background: var(--green); box-shadow: 0 0 8px var(--green); }
+.lamp.connecting { background: var(--amber); }
+.lamp.reconnecting { background: var(--red); animation: lampPulse 1.2s ease-in-out infinite; }
+.lamp-text { font-size: 11px; color: var(--muted); letter-spacing: 1px; }
+.lamp-text.glitching { color: var(--red); animation: glitchShift 0.4s steps(2) infinite; } /* 白名單 2/3 */
+.online-row { display: flex; gap: 4px; align-items: center; }
+.online-row img { width: 22px; height: 22px; cursor: pointer; border: 1px solid var(--border); }
+.online-row img:hover { border-color: var(--green); }
+.spacer { flex: 1; }
+.meta { color: var(--muted); font-size: 11px; letter-spacing: 1px; white-space: nowrap; }
+.task-counter { color: var(--amber); }
+button.focus-toggle {
+  background: none; border: 1px solid var(--border); color: var(--muted);
+  font-family: var(--mono); font-size: 10px; letter-spacing: 1px;
+  padding: 3px 8px; border-radius: 2px; cursor: pointer;
+}
+button.focus-toggle.on { color: var(--cyan); border-color: var(--cyan); }
+
+/* ═══════════ 5. Timeline 與泡泡 ═══════════ */
+main {
+  flex: 1; overflow-y: auto; padding: 18px 18px 12px;
+  display: flex; flex-direction: column; gap: 12px;
+}
+.empty { margin: auto; color: var(--muted); font-size: 13px; text-align: center; line-height: 2; }
+.datesep, .unread-sep { text-align: center; font-size: 11px; letter-spacing: 2px; user-select: none; }
+.datesep { color: var(--muted); }
+.unread-sep { color: var(--green); text-shadow: 0 0 8px rgba(0, 255, 136, 0.4); }
+.loading-older { text-align: center; color: var(--muted); font-size: 11px; letter-spacing: 2px; }
+
+.msg { display: flex; gap: 10px; }
+.msg.grouped { margin-top: -8px; } /* 同人連續發言:頭像只出首則,後續緊排 */
+.gutter { width: 40px; flex: none; }
+.avatar {
+  width: 34px; height: 34px; cursor: pointer;
+  border: 1.5px solid var(--border); image-rendering: pixelated;
+}
+.avatar:hover { box-shadow: var(--shadow-neon-cyan); }
+/* review #152 nice-4:.msg-body 樣式合併為單一定義 */
+.msg-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; align-items: flex-start; }
+.msg.own .msg-body { align-items: flex-end; } /* FOCUS 模式下自己的泡泡貼右緣 */
+.msg-head { display: flex; align-items: baseline; gap: 8px; font-size: 11px; flex-wrap: wrap; }
+.pill { border: 1px solid; border-radius: 2px; padding: 0 6px; letter-spacing: 1px; font-size: 11px; }
+.pill.unreg { border-style: dashed; opacity: 0.85; }
+.unreg-tag { color: var(--muted); font-size: 10px; letter-spacing: 1px; animation: unregFlicker 4s steps(1) infinite; } /* 白名單 3/3 */
+.reply-chip { color: var(--cyan); cursor: pointer; letter-spacing: 1px; }
+.reply-chip:hover { text-shadow: 0 0 8px var(--cyan); }
+.task-badge { font-size: 10px; letter-spacing: 1px; border: 1px solid; border-radius: 2px; padding: 0 5px; cursor: pointer; }
+.task-badge.open { color: var(--amber); border-color: var(--amber); animation: lampPulse 1.4s ease-in-out infinite; }
+.task-badge.done { color: var(--green); border-color: var(--green); }
+.task-badge.failed { color: var(--red); border-color: var(--red); }
+.task-badge.canceled { color: var(--muted); border-color: var(--muted); }
+.task-badge.gone { color: var(--muted); border-color: var(--muted); border-style: dashed; } /* 蒸發 task:誠實的灰 */
+.time { color: var(--muted); cursor: pointer; }
+.time:hover { color: var(--cyan); }
+.hover-btn {
+  margin-left: 2px; background: none; border: none; color: var(--muted);
+  font-family: var(--mono); font-size: 10px; letter-spacing: 1px;
+  cursor: pointer; opacity: 0; transition: opacity 0.15s; padding: 2px 4px;
+}
+.msg:hover .hover-btn { opacity: 1; }
+.hover-btn:hover { color: var(--cyan); }
+.head-spacer { flex: 1; }
+
+.bubble {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--sender, var(--border)); /* sender 色相描邊 */
+  padding: 9px 12px;
+  font-size: 14px; line-height: 1.7;
+  white-space: pre-wrap; word-break: break-word;
+  width: fit-content;            /* LINE 感:泡泡貼合內容(bob #133「這輪的靈魂」) */
+  max-width: min(600px, 72%);    /* 呼吸感上限(alice #131) */
+}
+/* 被點名的訊息:左緣語意綠 glow(clip-path 內只能用 inset shadow,外部 glow 會被切掉) */
+.msg.ping-me .bubble {
+  border-left: 2px solid var(--green);
+  box-shadow: inset 4px 0 14px -8px var(--green);
+}
+.msg.flash .bubble { animation: jumpPulse 1.8s ease-out; }
+.mention { color: var(--green); text-shadow: 0 0 8px rgba(0, 255, 136, 0.3); }
+.bubble a { color: var(--cyan); text-decoration: none; border-bottom: 1px dotted var(--cyan); }
+.bubble a:hover { text-shadow: 0 0 8px var(--cyan); }
+
+/* FOCUS 模式:自己的訊息整排鏡像 */
+.msg.own { flex-direction: row-reverse; }
+.msg.own .msg-head { justify-content: flex-end; }
+.msg.own .bubble { border-left: 1px solid var(--border); border-right: 2px solid var(--sender, var(--border)); }
+.msg.own.ping-me .bubble { border-right: 2px solid var(--green); box-shadow: inset -4px 0 14px -8px var(--green); }
+
+/* ═══════════ 6. 浮動元素 ═══════════ */
+.newmsg-btn {
+  position: absolute; left: 50%; transform: translateX(-50%); bottom: 118px;
+  background: var(--panel-2); border: 1px solid var(--green); color: var(--green);
+  font-size: 11px; letter-spacing: 1px; border-radius: 2px; padding: 8px 14px;
+  cursor: pointer; box-shadow: 0 0 12px rgba(0, 255, 136, 0.25); z-index: 5;
+}
+.newmsg-btn:hover { box-shadow: 0 0 18px rgba(0, 255, 136, 0.5); }
+.toast {
+  position: absolute; top: 56px; left: 50%; transform: translateX(-50%);
+  background: var(--panel-2); border: 1px solid var(--red); color: var(--red);
+  font-size: 12px; letter-spacing: 1px; padding: 8px 14px; border-radius: 2px; z-index: 25;
+}
+.toast.ok { border-color: var(--cyan); color: var(--cyan); }
+
+/* ═══════════ 7. Composer ═══════════ */
+footer {
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 10px 18px 12px;
+  border-top: 1px solid var(--border);
+  background: rgba(18, 18, 26, 0.9);
+}
+.reply-bar { color: var(--cyan); font-size: 11px; letter-spacing: 1px; display: flex; align-items: center; gap: 8px; }
+.reply-bar .x { cursor: pointer; color: var(--muted); }
+.reply-bar .x:hover { color: var(--red); }
+.reply-bar .hint { color: var(--muted); font-size: 10px; }
+.input-row { display: flex; gap: 8px; align-items: stretch; }
+.prompt { display: flex; align-items: center; gap: 2px; color: var(--green); font-size: 12px; letter-spacing: 1px; white-space: nowrap; }
+input.name {
+  background: none; border: none; border-bottom: 1px dashed var(--border);
+  color: var(--green); font-family: var(--mono); font-size: 12px;
+  text-align: right; padding: 2px 0; min-width: 3ch; /* ch 自適應寬度由 JS 綁定 */
+}
+input.name:focus { outline: none; border-bottom-color: var(--green); }
+textarea {
+  flex: 1; resize: none; height: 56px;
+  font: inherit; color: var(--text); background: var(--bg);
+  border: 1px solid var(--border); border-radius: 2px;
+  padding: 8px 10px; font-size: 14px;
+}
+textarea:focus { outline: 1px solid var(--cyan); }
+button.send {
+  background: none; border: 1px solid var(--cyan); color: var(--cyan);
+  font-family: var(--mono); font-size: 12px; letter-spacing: 2px;
+  border-radius: 2px; padding: 0 16px; cursor: pointer;
+}
+button.send:hover { box-shadow: var(--shadow-neon-cyan); }
+
+/* ═══════════ 8. Holographic 彈窗(HoloModal 元件的皮)═══════════ */
+.overlay {
+  position: fixed; inset: 0; z-index: 20;
+  background: rgba(10, 10, 15, 0.6);
+  display: flex; align-items: center; justify-content: center;
+}
+.modal {
+  position: relative;
+  width: min(440px, 92vw); max-height: 80dvh;
+  background: rgba(28, 28, 46, 0.55);
+  border: 1px solid rgba(0, 255, 136, 0.3);
+  backdrop-filter: blur(10px);
+  box-shadow: var(--shadow-neon);
+  padding: 20px;
+  display: flex; flex-direction: column; gap: 12px;
+}
+.modal .corner { position: absolute; width: 12px; height: 12px; border: 2px solid var(--green); }
+.modal .corner.tl { top: -2px; left: -2px; border-right: none; border-bottom: none; }
+.modal .corner.tr { top: -2px; right: -2px; border-left: none; border-bottom: none; }
+.modal .corner.bl { bottom: -2px; left: -2px; border-right: none; border-top: none; }
+.modal .corner.br { bottom: -2px; right: -2px; border-left: none; border-top: none; }
+.modal-head { display: flex; align-items: center; gap: 12px; }
+.modal-head img { width: 56px; height: 56px; border: 2px solid var(--border); image-rendering: pixelated; }
+.modal-title { font-size: 15px; letter-spacing: 2px; }
+.modal-sub { font-size: 11px; color: var(--muted); letter-spacing: 1px; }
+.modal-close {
+  position: absolute; top: 10px; right: 12px; cursor: pointer;
+  color: var(--muted); font-family: var(--mono); font-size: 14px; background: none; border: none;
+}
+.modal-close:hover { color: var(--red); }
+.modal-body { overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }
+.stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.stat {
+  background: rgba(10, 10, 15, 0.5); border: 1px solid var(--border);
+  padding: 8px 10px; display: flex; flex-direction: column; gap: 2px;
+}
+.stat .k { font-size: 10px; color: var(--muted); letter-spacing: 1px; }
+.stat .v { font-size: 14px; color: var(--text); }
+.online-dot { color: var(--green); }
+.offline-dot { color: var(--muted); }
+.tl-item { display: flex; gap: 10px; font-size: 12px; align-items: baseline; }
+.tl-state { flex: none; letter-spacing: 1px; font-size: 11px; }
+.tl-msg {
+  background: rgba(10, 10, 15, 0.5); border: 1px solid var(--border);
+  padding: 6px 10px; font-size: 12px; line-height: 1.6; flex: 1;
+  white-space: pre-wrap; word-break: break-word;
+}
+.modal-link { color: var(--cyan); cursor: pointer; font-size: 11px; letter-spacing: 1px; }
+.modal-link:hover { text-shadow: 0 0 8px var(--cyan); }
+
+/* ═══════════ 9. 動畫 ═══════════ */
+@keyframes lampPulse { 50% { opacity: 0.25; } }
+@keyframes jumpPulse {
+  0%   { box-shadow: inset 0 0 0 2px var(--cyan), inset 0 0 24px rgba(0, 212, 255, 0.35); }
+  60%  { box-shadow: inset 0 0 0 2px var(--cyan), inset 0 0 10px rgba(0, 212, 255, 0.15); }
+  100% { box-shadow: none; }
+}
+@keyframes glitchShift {
+  0% { transform: translate(0); } 25% { transform: translate(-2px, 1px); }
+  50% { transform: translate(2px, -1px); } 75% { transform: translate(-1px, -1px); }
+  100% { transform: translate(0); }
+}
+@keyframes unregFlicker { 0%, 92%, 100% { opacity: 0.85; } 94% { opacity: 0.2; } 96% { opacity: 0.85; } 98% { opacity: 0.35; } }
+
+/* ═══════════ 10. RWD 與使用者偏好 ═══════════ */
+@media (max-width: 560px) {
+  main { padding: 12px 10px 8px; }
+  header { padding: 8px 10px; gap: 8px; }
+  footer { padding: 8px 10px 10px; }
+  .gutter { width: 32px; }
+  .avatar { width: 28px; height: 28px; }
+  .bubble { font-size: 13px; max-width: 85%; } /* 手機放寬,避免長文過窄 */
+  .meta.msg-count { display: none; }
+  .meta.zero { display: none; } /* 手機空間緊:TASKS 為 0 才隱藏(桌面常駐) */
+  .online-row { display: none; }
+  button.send { min-height: 44px; }
+  textarea { height: 64px; }
+}
+@media (hover: none) {
+  .hover-btn { opacity: 1; min-width: 44px; min-height: 44px; } /* 觸控常駐,44px 共識足額 */
+}
+@media (prefers-reduced-motion: reduce) {
+  #particles { display: none; } /* 粒子全關,保留靜態 circuit grid */
+  .hdr-title:hover, .lamp-text.glitching, .unreg-tag, .lamp.reconnecting,
+  .task-badge.open { animation: none !important; }
+}

@@ -1,0 +1,9 @@
+[project]
+name = "a2a-chatroom"
+version = "0.1.0"
+description = "A2A 多 agent 聊天室 — thin notification + pull 架構(FastAPI + poller + cursor 檔喚醒)"
+requires-python = ">=3.14"
+dependencies = [
+    "fastapi>=0.139.2",
+    "uvicorn>=0.51.0",
+]
