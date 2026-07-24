@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import argparse
+import codecs
 import json
 import os
 import shutil
@@ -195,6 +196,9 @@ def run_windows(cmd: list[str], state_factory) -> int:
         """鍵盤 → 子行程。主路徑:VT 輸入模式的原始位元組(Shift+Tab=ESC[Z、
         修飾鍵組合全保真);退路:getwch 逐鍵(寬字元 IME OK,但修飾鍵資訊有限)。"""
         if vt_input:
+            # incremental decoder:os.read 可能把多位元組中文切在 1024 邊界,
+            # 殘餘位元組要跨次保留拼接,否則貼上大段中文會出 � 亂碼(bob #295)
+            decoder = codecs.getincrementaldecoder("utf-8")("replace")
             while proc.isalive():
                 try:
                     data = os.read(0, 1024)
@@ -202,7 +206,9 @@ def run_windows(cmd: list[str], state_factory) -> int:
                     break
                 if not data:
                     break
-                safe_write(data.decode("utf-8", "replace"))
+                text = decoder.decode(data)
+                if text:
+                    safe_write(text)
             return
         while proc.isalive():
             ch = msvcrt.getwch()
