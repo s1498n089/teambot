@@ -145,11 +145,22 @@ def run_windows(cmd: list[str], state_factory) -> int:
     from winpty import PtyProcess
 
     kernel32 = ctypes.windll.kernel32
-    # 輸出開 VT 處理(讓子行程的 ANSI 畫面原樣呈現);輸入用 getwch 逐鍵讀,不動輸入模式
+    # 輸出開 VT 處理(讓子行程的 ANSI 畫面原樣呈現)
     hout = kernel32.GetStdHandle(-11)
     out_mode = wintypes.DWORD()
     kernel32.GetConsoleMode(hout, ctypes.byref(out_mode))
     kernel32.SetConsoleMode(hout, out_mode.value | 0x0004)  # ENABLE_VIRTUAL_TERMINAL_PROCESSING
+
+    # 輸入開 VT 模式(老闆實測抓到:getwch 只回「字元」,Shift+Tab 與 Tab 同為 \t,
+    # 修飾鍵資訊全丟 — TUI 認的 Shift+Tab 是 ESC[Z)。VT 輸入模式下 Windows 會把
+    # 組合鍵翻成標準 VT 序列,按鍵保真交給作業系統。失敗(舊系統)則退回 getwch 路徑。
+    hin = kernel32.GetStdHandle(-10)
+    in_mode = wintypes.DWORD()
+    kernel32.GetConsoleMode(hin, ctypes.byref(in_mode))
+    raw_mode = (in_mode.value | 0x0200) & ~(0x0001 | 0x0002 | 0x0004)  # +VT_INPUT -PROCESSED -LINE -ECHO
+    vt_input = bool(kernel32.SetConsoleMode(hin, raw_mode))
+    if vt_input:
+        kernel32.SetConsoleCP(65001)  # 輸入位元組走 UTF-8,中文 IME 不亂碼
 
     cols, rows = shutil.get_terminal_size()
     proc = PtyProcess.spawn(cmd, dimensions=(rows, cols), cwd=str(BASE))
@@ -175,13 +186,24 @@ def run_windows(cmd: list[str], state_factory) -> int:
                 sys.stdout.write(data)
                 sys.stdout.flush()
 
-    # 傳統鍵碼 → VT 序列(getwch 對特殊鍵回傳 \x00/\xe0 前綴 + 第二碼)
+    # 傳統鍵碼 → VT 序列(getwch 退路用:對特殊鍵回傳 \x00/\xe0 前綴 + 第二碼)
     VT_KEYS = {"H": "\x1b[A", "P": "\x1b[B", "M": "\x1b[C", "K": "\x1b[D",
                "G": "\x1b[H", "O": "\x1b[F", "S": "\x1b[3~", "R": "\x1b[2~",
                "I": "\x1b[5~", "Q": "\x1b[6~"}
 
     def pump_input() -> None:
-        """鍵盤 → 子行程。getwch 走寬字元(IME 中文 OK),特殊鍵翻成 VT。"""
+        """鍵盤 → 子行程。主路徑:VT 輸入模式的原始位元組(Shift+Tab=ESC[Z、
+        修飾鍵組合全保真);退路:getwch 逐鍵(寬字元 IME OK,但修飾鍵資訊有限)。"""
+        if vt_input:
+            while proc.isalive():
+                try:
+                    data = os.read(0, 1024)
+                except OSError:
+                    break
+                if not data:
+                    break
+                safe_write(data.decode("utf-8", "replace"))
+            return
         while proc.isalive():
             ch = msvcrt.getwch()
             if ch in ("\x00", "\xe0"):
