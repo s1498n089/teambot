@@ -3,13 +3,13 @@
 架構定位:房間 = contextId;聊天室 /api/* 與 UI 是本層之上的可視化。
 本模組不做 HTTP,只有純狀態機與方法邏輯 — 路由掛載在 server.create_app()(composition root)。
 
-Task 生命週期(共識 #112):
+Task 生命週期:
   feed 入流                        = TASK_STATE_SUBMITTED
   目標 agent 首次帶 reader= 撈到    = TASK_STATE_WORKING(已讀回條的協定化)
   目標 agent 對 task 訊息 reply_to  = TASK_STATE_COMPLETED(旁人引用不動狀態;首回定終態)
   deadline 逾時                    = TASK_STATE_FAILED
 
-重構紀錄(code review #151/#152 共識):Task dataclass 合體 spec 欄位與 hub 管理欄位、
+設計要點:Task dataclass 合體 spec 欄位與 hub 管理欄位、
 TaskRegistry 統一三索引(Repository)、宣告式狀態轉換表(OCP)、deadline timer 終態即取消。
 """
 from __future__ import annotations
@@ -37,10 +37,10 @@ STREAM_KEEPALIVE_SECONDS = 15
 TERMINAL = {"TASK_STATE_COMPLETED", "TASK_STATE_FAILED", "TASK_STATE_CANCELED", "TASK_STATE_REJECTED"}
 INTERRUPTED = {"TASK_STATE_INPUT_REQUIRED", "TASK_STATE_AUTH_REQUIRED"}
 
-# 宣告式狀態轉換表(bob review #151-2):合法轉換的唯一事實來源。
+# 宣告式狀態轉換表:合法轉換的唯一事實來源。
 # backlog 的 REJECTED / INPUT_REQUIRED 上線時,只需在這裡加表項。
 # 注意:目前沒有任何通往 INTERRUPTED 的表項,_transition 內的 INTERRUPTED 分支
-# 是「刻意預留」不是 dead code(bob 複審 #155)— 等 v2 讓 agent 能標記
+# 是「刻意預留」不是 dead code— 等 v2 讓 agent 能標記
 # input-required 時,加表項即可啟用,阻塞中的 SendMessage 也會正確解除。
 ALLOWED_TRANSITIONS = {
     ("TASK_STATE_SUBMITTED", "TASK_STATE_WORKING"),
@@ -60,12 +60,12 @@ ERR_UNSUPPORTED_OPERATION = -32004
 ERR_CONTENT_TYPE = -32005
 ERR_EXTENDED_CARD_NOT_CONFIGURED = -32007
 
-# 名冊治理常數(roadmap ② 共識 #222/#223)
+# 名冊治理常數(roadmap ②)
 RESERVED_NAMES = {"user", "admin", "system", "hub", "server", "poller"}  # 撞人類/基礎設施的名字
 SEMANTIC_GREEN = "#00ff88"  # 語意色獨占鐵律(v4):sender 禁用,註冊時黑名單
 
 # 內建 seed agent:寫在 code 裡,永遠存在;註冊者另存 agents.json(runtime 資料)。
-# skills 為各 agent 自報;color 經 /api/config 下發給前端(SSOT,#151-7)。
+# skills 為各 agent 自報;color 經 /api/config 下發給前端(SSOT)。
 SEED_PROFILES = {
     "alice": {
         "color": "#ff79c6",
@@ -111,7 +111,7 @@ class AgentRegistry:
     """agent 名冊(roadmap ②):內建 seed 永遠在,註冊者落地 agents.json。
 
     - 載入:seed 優先,agents.json 補上註冊者(重啟不忘人)
-    - 寫入:temp + rename 原子落地(bob #223:斷電不留半寫檔)
+    - 寫入:temp + rename 原子落地(斷電不留半寫檔)
     - 併發決勝由呼叫端持鎖(server 的 post_lock),本類別不重複上鎖
     """
 
@@ -137,7 +137,7 @@ class AgentRegistry:
         return list(self.profiles)
 
     def taken_ci(self, name: str) -> bool:
-        """重名判定不分大小寫(alice #222:pill 全大寫,ALICE/alice 會撞臉)。"""
+        """重名判定不分大小寫(pill 全大寫,ALICE/alice 會撞臉)。"""
         low = name.lower()
         return any(n.lower() == low for n in self.profiles)
 
@@ -154,7 +154,7 @@ class AgentRegistry:
 
 @dataclass
 class Task:
-    """一個 A2A Task:spec 欄位 + hub 內部管理欄位合體(#151-1)。
+    """一個 A2A Task:spec 欄位 + hub 內部管理欄位合體。
 
     spec 形狀一律經 to_spec() 輸出,內部欄位(target/feed_mid/訂閱者等)不外洩。
     持久化(roadmap ④)只序列化 _PERSIST_FIELDS;訂閱者/事件/計時器是 runtime 欄位,
@@ -190,7 +190,7 @@ class Task:
         return cls(**{f: data[f] for f in cls._PERSIST_FIELDS})
 
     def to_spec(self, history_length: int | None = None) -> dict:
-        """輸出 spec 1.0 形狀的 Task JSON。先截 history 再深拷,省一次全量複製(#151-8)。"""
+        """輸出 spec 1.0 形狀的 Task JSON。先截 history 再深拷,省一次全量複製。"""
         history = self.history
         if history_length is not None:
             n = max(0, int(history_length))
@@ -209,10 +209,10 @@ class Task:
 
 
 class TaskRegistry:
-    """Task 的唯一儲存與索引(Repository,#151-1)+ 持久化(roadmap ④)。
+    """Task 的唯一儲存與索引(Repository)+ 持久化(roadmap ④)。
 
     三個索引(id、房間、feed 訊息)的同步只發生在這個類別內。
-    快照落地的唯二時機(alice #234 結構藥方 + bob #235 殭屍防範):
+    快照落地的唯二時機(「不可能忘記存」與殭屍防範):
       1. bind_feed 完成後(= task 建立完成的定義;create 中途永不落盤,殭屍無從誕生)
       2. 狀態轉換後(由 A2ALayer._transition 呼叫 checkpoint)
     """
@@ -245,7 +245,7 @@ class TaskRegistry:
 
     def checkpoint(self) -> None:
         """全量快照原子落地。失敗只記 warning 繼續跑 —
-        可用性優先於持久性(alice #234:最壞退回蒸發行為,不炸訊息流)。"""
+        可用性優先於持久性(最壞退回蒸發行為,不炸訊息流)。"""
         if not self.path:
             return
         try:
@@ -260,7 +260,7 @@ class TaskRegistry:
     def add(self, task: Task) -> None:
         self._by_id[task.id] = task
         self._by_room[task.context_id].append(task.id)
-        # 注意:這裡刻意不 checkpoint — create 中途落盤會養出殭屍(bob #235)
+        # 注意:這裡刻意不 checkpoint — create 中途落盤會養出殭屍
 
     def bind_feed(self, task: Task, feed_mid: int) -> None:
         """task 訊息落地後綁定 feed id,建立 O(1) 反查(reply_to 完成判定的熱路徑)。
@@ -289,7 +289,7 @@ class TaskRegistry:
 class A2ALayer:
     """A2A 狀態機 + JSON-RPC 方法。
 
-    依賴以建構子注入(DIP,#151-3/#151-5):
+    依賴以建構子注入(DIP):
     - ingest:訊息入流的唯一入口(server 提供,含鎖與廣播)
     - sanitize_sender:名字白名單(與可視化層同一套規則)
     """
@@ -302,13 +302,22 @@ class A2ALayer:
         self.agents = agents            # agent 名冊(roadmap ②:可成長)
         self.auth_enabled = auth_enabled  # 影響 Agent Card 的 securitySchemes 誠實聲明(③)
         self.registry = TaskRegistry(tasks_path)  # roadmap ④:tasks.json 持久化
+        self._handlers = {  # 方法分派表建一次即可,dispatch 熱路徑不重建
+            "SendMessage": self._send_message,
+            "SendStreamingMessage": self._send_streaming_message,
+            "GetTask": self._get_task,
+            "ListTasks": self._list_tasks,
+            "CancelTask": self._cancel_task,
+            "SubscribeToTask": self._subscribe_task,
+            "GetExtendedAgentCard": self._extended_card,
+        }
 
     # ---------- Agent Card ----------
 
     def agent_card(self, name: str) -> dict:
-        """spec required 欄位齊備的 Agent Card(共識 #112)。
+        """spec required 欄位齊備的 Agent Card。
 
-        AUTH 啟用時同步宣告 securitySchemes(bob #228:誠實聲明做全套,
+        AUTH 啟用時同步宣告 securitySchemes(誠實聲明做全套,
         標準 A2A client 讀 Card 就知道要帶 bearer)。
         """
         profile = self.agents.get(name) or {}
@@ -337,7 +346,7 @@ class A2ALayer:
         """唯一的狀態變更入口:轉換表驗證 → 更新 → 廣播 → 終態收尾。
 
         不合法的轉換(例如 deadline 在 COMPLETED 之後才觸發)靜默忽略並回 False —
-        這正是轉換表取代散落 guard 的價值(#151-2)。
+        這正是轉換表取代散落 guard 的價值。
         """
         if (task.state, state) not in ALLOWED_TRANSITIONS:
             return False
@@ -357,15 +366,15 @@ class A2ALayer:
         if state in TERMINAL or state in INTERRUPTED:
             task.done.set()
             if state in TERMINAL and task.deadline_handle:
-                task.deadline_handle.cancel()  # 終態即取消計時器,免空轉(#151-8)
-        self.registry.checkpoint()  # 持久化唯二咽喉之二(alice #234:轉換即落盤,不可能忘)
+                task.deadline_handle.cancel()  # 終態即取消計時器,免空轉
+        self.registry.checkpoint()  # 持久化唯二咽喉之二(轉換即落盤,不可能忘)
         return True
 
     async def _deadline_watch(self, task: Task, seconds: float | None = None) -> None:
-        """逾時看門狗:到點仍未終態 → FAILED(共識 #112:漏回的 task 要有收場)。
+        """逾時看門狗:到點仍未終態 → FAILED(漏回的 task 要有收場)。
 
         seconds 允許覆寫 — 重啟復原時傳「剩餘時間」,deadline 不重新起算
-        (alice #234:否則 deadline 形同橡皮筋)。
+        (否則 deadline 形同橡皮筋)。
         """
         try:
             await asyncio.sleep(seconds if seconds is not None else task.deadline_seconds)
@@ -377,7 +386,7 @@ class A2ALayer:
     def restore(self, message_exists) -> None:
         """啟動復原(roadmap ④,需在 running event loop 內呼叫):
 
-        1. 殭屍判定(bob #235):非終態且 feed_mid 為 None 或訊息流查無 → FAILED
+        1. 殭屍判定:非終態且 feed_mid 為 None 或訊息流查無 → FAILED
         2. 停機期間已逾期 → FAILED(記入 downtime 原因)
         3. 其餘非終態:以「剩餘時間」重掛 deadline 計時器
         """
@@ -409,9 +418,9 @@ class A2ALayer:
                 self._transition(task, "TASK_STATE_WORKING")
 
     def on_room_message(self, room: str, msg: dict) -> None:
-        """完成橋接:僅目標 agent 對 task 訊息本身的 reply_to 定終態(共識 #112)。
+        """完成橋接:僅目標 agent 對 task 訊息本身的 reply_to 定終態。
 
-        經 feed 索引 O(1) 反查(#151-1),在每則訊息的熱路徑上不掃全表。
+        經 feed 索引 O(1) 反查,在每則訊息的熱路徑上不掃全表。
         """
         if not msg.get("reply_to"):
             return
@@ -443,15 +452,7 @@ class A2ALayer:
         """方法分派。回傳 dict(一般結果)或 async generator(SSE 串流)。"""
         if self.agents.get(agent) is None:
             raise A2AError(ERR_UNSUPPORTED_OPERATION, f"unknown agent: {agent}")
-        handlers = {
-            "SendMessage": self._send_message,
-            "SendStreamingMessage": self._send_streaming_message,
-            "GetTask": self._get_task,
-            "ListTasks": self._list_tasks,
-            "CancelTask": self._cancel_task,
-            "SubscribeToTask": self._subscribe_task,
-            "GetExtendedAgentCard": self._extended_card,
-        }
+        handlers = self._handlers
         if "PushNotification" in method or method.startswith("pushNotification"):
             raise A2AError(ERR_PUSH_NOT_SUPPORTED, "push notifications not supported")
         if method not in handlers:
@@ -501,7 +502,7 @@ class A2ALayer:
         config = params.get("configuration") or {}
         if not config.get("returnImmediately", False):
             # spec MUST:阻塞到 terminal 或 interrupted。deadline 保證有限時間內必有終態,
-            # 所以這裡不需要額外逾時(#111 bob:逾時回半熟 Task 違反 MUST)。
+            # 所以這裡不需要額外逾時(逾時回半熟 Task 違反 spec 的 MUST)。
             await task.done.wait()
         return task.to_spec(config.get("historyLength"))
 

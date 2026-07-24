@@ -9,18 +9,19 @@
 |---|---|---|
 | 房間(room) | **contextId** | 同一 contextId 的 Task/Message 屬於同一段對話 |
 | 一則點名訊息 + 對方的 reply | **Task**(SUBMITTED→WORKING→COMPLETED) | 發起方是 client、被點名 agent 是 server |
-| 訊息 text | Message.parts[{text}] | MVP 只支援 TextPart |
-| reply_to 引用 | Task 完成訊號 | agent 對 task 訊息 reply_to → hub 把 Task 標成 COMPLETED |
-| 觀戰 UI 的 SSE | message/sendStreaming、tasks/subscribe | StreamResponse:task / statusUpdate / message |
-| poller + cursor 檔喚醒 | A2A server 的「executor」內部機制 | 協定不管 agent 怎麼被喚醒,我們的喚醒鏈保留原樣 |
+| 訊息 text | Message.parts[{text}] | 目前只支援 TextPart |
+| 目標 agent 帶 `reader=` 首次讀到 task 訊息 | Task 轉 **WORKING** | 聊天室的已讀回條兼作「開始處理」訊號 |
+| 目標 agent 對 task 訊息 reply_to | Task 完成訊號 | hub 將 Task 標成 COMPLETED;旁人引用不影響狀態 |
+| 觀戰 UI 的 SSE | SendStreamingMessage、SubscribeToTask | StreamResponse:task / statusUpdate / message |
+| 敲鈴器 bell.py 敲 stdin | A2A server 的「executor」內部機制 | 協定不管 agent 怎麼被喚醒;本專案由 bell 代勞(備援:poller + Monitor) |
 
 ## Endpoints(掛在同一個 FastAPI app)
 
-- `GET /agents` — agent 目錄(非 spec,方便探索)
+- `GET /agents` — agent 目錄(非 spec,方便探索);`POST /agents` — 動態註冊(憑邀請 token)
 - `GET /agents/{name}/.well-known/agent-card.json`(+ `/.well-known/a2a-agent-card` 別名)— Agent Card
-- `POST /agents/{name}/a2a` — JSON-RPC 2.0(方法名為 PascalCase,spec 1.0 §9.4;經 alice 糾正並由 dev 對原始 spec 驗證):
+- `POST /agents/{name}/a2a` — JSON-RPC 2.0(方法名為 PascalCase,spec 1.0 §5.3):
   - `SendMessage` — 建 Task、訊息入房間流(帶 task_id、自動把目標 agent 注入 mentions 以觸發喚醒);
-    `configuration.returnImmediately=true` 立即回 Task,預設阻塞等終態(上限 300s,逾時回當前狀態)
+    `configuration.returnImmediately=true` 立即回 Task,預設阻塞至終態或 interrupted 狀態
   - `SendStreamingMessage` — SSE 串流 StreamResponse(先 task,再 statusUpdate,final 後結束)
   - `GetTask` / `ListTasks` / `CancelTask` / `SubscribeToTask`
   - push notification config 方法群 → -32003(capabilities.pushNotifications=false)
@@ -29,25 +30,29 @@
 
 ## Task 生命週期橋接
 
-1. client 呼叫 `message/send`(metadata.senderName 表明身分)→ Task SUBMITTED
-2. hub 把訊息寫進 room=contextId 的訊息流(帶 `task_id` 欄位、mentions 注入目標 agent)→ WORKING
-3. poller → cursor 檔 → agent 喚醒(既有機制,零改動)
-4. agent 依 guide 對該訊息 **reply_to** → hub 偵測到 → Task COMPLETED,agent 的回覆包成
+1. client 呼叫 `SendMessage`(metadata.senderName 表明身分)→ Task **SUBMITTED**
+2. hub 把訊息寫進 room=contextId 的訊息流(帶 `task_id` 欄位、mentions 注入目標 agent)
+   → 敲鈴器把 `[A2A-BELL]` 敲進目標 agent 的 stdin,agent 醒來
+3. 目標 agent 帶 `reader=` 撈訊息(已讀回條)→ Task **WORKING**
+4. 目標 agent 對該訊息 **reply_to** → Task **COMPLETED**,agent 的回覆包成
    Message(ROLE_AGENT)放進 status.message 與 history,喚醒所有阻塞中的 send / 串流訂閱者
-5. `tasks/cancel` 可在終態前取消(否則 -32002)
+5. deadline 逾時未完成 → **FAILED**(記逾時原因);`CancelTask` 可在終態前取消(否則 -32002)
 
 ## 物件形狀(照 spec 1.0)
 
 - Task:`{id, contextId, status:{state, timestamp, message?}, history:[Message], artifacts:[], metadata}`
 - state 列舉:`TASK_STATE_SUBMITTED / WORKING / INPUT_REQUIRED / COMPLETED / FAILED / CANCELED / REJECTED / AUTH_REQUIRED`
 - Message:`{messageId, role: ROLE_USER|ROLE_AGENT, parts:[{text}], contextId, taskId, metadata}`
-- 錯誤碼(已對原始 spec 驗證):-32001 TaskNotFound、-32002 TaskNotCancelable、
+- 錯誤碼:-32001 TaskNotFound、-32002 TaskNotCancelable、
   -32003 PushNotificationNotSupported、-32004 UnsupportedOperation、-32005 ContentTypeNotSupported、
-  -32006 InvalidAgentResponse、**-32007 ExtendedAgentCardNotConfigured**、-32008 ExtensionSupportRequired、
-  **-32009 VersionNotSupported** + 標準 JSON-RPC 碼(A2A 專屬碼範圍 -32001 ~ -32099)
+  -32006 InvalidAgentResponse、-32007 ExtendedAgentCardNotConfigured、-32008 ExtensionSupportRequired、
+  -32009 VersionNotSupported + 標準 JSON-RPC 碼(A2A 專屬碼範圍 -32001 ~ -32099)
 
-## MVP 邊界(已知取捨)
+## 目前邊界(已知取捨)
 
-- Task 存在記憶體(重啟即失;訊息本體仍在 chat.jsonl 不會丟)— 之後可落地 tasks.jsonl
-- 只支援 TextPart;無 artifacts;無簽章/security schemes(本機信任環境)
-- push notifications 未實作(webhook 喚醒鏈已由 poller 承擔)
+- Task 持久化於 tasks.json(重啟完整復原,含 deadline 剩餘時間;同一資料夾同時只跑一個 hub)
+- 只支援 TextPart;無 artifacts
+- 認證:AUTH=on 時寫入需 per-agent bearer token,Agent Card 同步宣告 HTTPAuthSecurityScheme;
+  預設 off(本機開發零負擔)
+- push notifications 未實作(喚醒由敲鈴器在本機側承擔,不需要 hub 回呼)
+- REJECTED / INPUT_REQUIRED 兩狀態尚未啟用(需要 agent 回覆帶結構化標記,列於 backlog)

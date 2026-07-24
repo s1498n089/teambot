@@ -5,7 +5,7 @@
   可視化層  本檔 /api/*(聊天室 REST + SSE)+ static/(UI)
   儲存      MessageStore(chat.jsonl)— 兩層共用同一份訊息流
 
-組裝:create_app() 是唯一的組裝點(composition root,review #151-3)—
+組裝:create_app() 是唯一的組裝點(composition root)—
 store / bus / a2a_layer 都在這裡建構與注入,模組 import 不產生副作用,測試可注入替身。
 
 啟動:`uv run server.py`(本機無系統 Python,一律走 uv)。
@@ -26,7 +26,6 @@ import tempfile
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import FastAPI, Request
@@ -40,16 +39,14 @@ import a2a as a2a_mod
 
 BASE = Path(__file__).resolve().parent
 DEFAULT_PORT = 8787
-DEFAULT_HOST = "0.0.0.0"  # 老闆裁示(#320):預設開放區網(手機觀戰);要只聽本機可設 HOST=127.0.0.1
+DEFAULT_HOST = "0.0.0.0"  # 預設開放區網(手機觀戰);要只聽本機可設 HOST=127.0.0.1
 SENDER_RE = re.compile(r"^[\w一-鿿-]{1,32}$")   # 名字白名單:擋空白與 @,防 parse 怪象
 SSE_KEEPALIVE_SECONDS = 15
-SSE_REPLAY_LIMIT = 10_000                        # 重連回放的上限(review #151-8:魔數常數化)
+SSE_REPLAY_LIMIT = 10_000                        # 重連回放的上限
 SUBSCRIBER_QUEUE_MAXSIZE = 256                   # 慢客戶端的 backpressure 界線
 
 
-def now_iso() -> str:
-    """UTC RFC3339(帶時區)— 與 a2a.now_iso 同格式,前端負責在地化顯示。"""
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+now_iso = a2a_mod.now_iso  # 時戳格式的單一定義在 a2a.py(UTC RFC3339 帶時區),此處僅取別名
 
 
 def sanitize_sender(raw: str) -> str | None:
@@ -110,7 +107,7 @@ class MentionParser:
     - lookbehind:@ 前貼著 ASCII(alice@main、email)不算點名;中文緊貼 @ 放行
     - 已知成員最長前綴優先(@bob呢 → bob)
     - 冷啟動規則(未知 ASCII 名保留)只在房間 <2 名成員時啟用,
-      成熟房間只認已知名字 — 避免 @media 這類術語誤判(review 時代 #123)
+      成熟房間只認已知名字 — 避免 @media 這類術語誤判
     - JS_SOURCE 經 /api/config 下發,前後端同一套規則(單一事實來源)
     """
 
@@ -150,7 +147,7 @@ class MessageStore:
 
     - id 為房間內獨立遞增(別房流量不造成本房跳號)
     - chat.jsonl 逐行落地,重啟自動載回;壞行跳過記 warning,不讓一行毀掉啟動
-    - _ids / _known 為增量索引(review #151-6):exists()/known() O(1),
+    - _ids / _known 為增量索引:exists()/known() O(1),
       維護只發生在 _index() 一處
     """
 
@@ -185,7 +182,7 @@ class MessageStore:
         return msgs[-1]["id"] if msgs else 0
 
     def count(self, room: str) -> int:
-        """訊息數(bob 複審 #155:補齊封裝,路由不再直摸內部 dict)。"""
+        """訊息數(補齊封裝,路由不再直摸內部 dict)。"""
         return len(self.rooms.get(room, []))
 
     def known(self, room: str) -> set[str]:
@@ -258,9 +255,9 @@ class MessageStore:
 class TokenStore:
     """per-agent bearer token。明文只在生成當下出現一次,落地只存 sha256。
 
-    - 比對用 hmac.compare_digest(alice #229:防時序側信道)
+    - 比對用 hmac.compare_digest(防時序側信道)
     - tokens.json 原子落地(temp+rename),gitignore
-    - 「user」也是持鑰者 — 人類不在名冊,但不能被鎖在門外(bob #228 洞一)
+    - 「user」也是持鑰者 — 人類不在名冊,但不能被鎖在門外
     """
 
     def __init__(self, path: Path):
@@ -310,7 +307,7 @@ class TokenStore:
 
 
 class RateLimiter:
-    """寫入限流:每個名字 10 秒滑動窗最多 10 則(與 409 重試流程相容,#228 推演)。"""
+    """寫入限流:每個名字 10 秒滑動窗最多 10 則(與 409 重試流程相容)。"""
 
     WINDOW_SECONDS = 10.0
     LIMIT = 10
@@ -336,7 +333,7 @@ class RateLimiter:
 
 @dataclass(eq=False)  # eq=False 保留預設身分 hash — 訂閱者要放進 set,且本來就該以身分區分
 class Subscription:
-    """一個 SSE 訂閱者(review #151-4:取代對 asyncio.Queue 的 monkey-patch)。"""
+    """一個 SSE 訂閱者(取代對 asyncio.Queue 的 monkey-patch)。"""
     queue: asyncio.Queue = field(default_factory=lambda: asyncio.Queue(maxsize=SUBSCRIBER_QUEUE_MAXSIZE))
     dead: bool = False   # backpressure:queue 滿了標記,產生器見狀自行收尾
 
@@ -377,7 +374,7 @@ class PostMessage(BaseModel):
 
 
 class RegisterAgent(BaseModel):
-    """roadmap ② 動態註冊:新 agent 憑邀請 token 自報。欄位上限防灌書(alice #222)。"""
+    """roadmap ② 動態註冊:新 agent 憑邀請 token 自報。欄位上限防灌書。"""
     name: str = Field(min_length=1, max_length=32)
     description: str = Field(default="", max_length=300)
     skills: list = Field(default_factory=list)
@@ -393,11 +390,11 @@ def create_app(port: int | None = None, host: str | None = None,
 
     ingest 是「訊息入流」的唯一入口(REST 發言與 A2A SendMessage 共用):
     鎖 → 樂觀鎖驗證 → reply_to 驗證 → 解析 mentions → 落地 → 廣播 → 通知 A2A 層。
-    A2A 完成橋接以 callback 顯式注入 — 一行誠實的呼叫,宣告在組裝處(#151-5 折衷)。
+    A2A 完成橋接以 callback 顯式注入 — 一行誠實的呼叫,宣告在組裝處。
 
     遠端化(roadmap ①):HOST 控制綁定位址(預設只聽本機);PUBLIC_URL 決定
     Agent Card 對外宣告的位址 — 開放綁定卻沒設它時,遠端 client 會拿到
-    對它無效的 127.0.0.1,故啟動時印警告(bob #217)。
+    對它無效的 127.0.0.1,故啟動時印警告。
     """
     port = port or int(os.environ.get("PORT", str(DEFAULT_PORT)))
     host = host or os.environ.get("HOST", DEFAULT_HOST)
@@ -439,12 +436,12 @@ def create_app(port: int | None = None, host: str | None = None,
     token_store = TokenStore(BASE / "tokens.json")
     rate_limiter = RateLimiter()
     if auth_enabled:
-        # 名冊每人 + user(人類,bob #228 洞一)確保持鑰;新發的印 console 讓使用者分發
+        # 名冊每人 + user(人類)確保持鑰;新發的印 console 讓使用者分發
         fresh = token_store.ensure(agents.names() + ["user"])
         for name, token in fresh.items():
             print(f"[auth] {name} 的 token(僅此一次,請抄下分發):{token}", file=sys.stderr)
         rotate = os.environ.get("ROTATE_TOKEN", "")
-        if rotate:  # 丟鑰匙換鎖(alice #229):ROTATE_TOKEN=<名字> 重生該人 token
+        if rotate:  # 丟鑰匙換鎖:ROTATE_TOKEN=<名字> 重生該人 token
             print(f"[auth] {rotate} 的新 token(舊的已失效):{token_store.issue(rotate)}",
                   file=sys.stderr)
 
@@ -466,7 +463,7 @@ def create_app(port: int | None = None, host: str | None = None,
         raise UnauthorizedError({"error": "bad_token", "detail": "無效的 token"})
 
     # task 快照路徑:非預設 PORT 的實例自動用獨立檔 — 全量快照是「最後寫者贏」,
-    # 多實例共用同一檔會互洗 task 狀態(alice #238 親測的營運風險);TASKS_PATH 可覆寫
+    # 多實例共用同一檔會互洗 task 狀態(實測過的營運風險);TASKS_PATH 可覆寫
     tasks_path = Path(os.environ.get("TASKS_PATH") or
                       BASE / ("tasks.json" if port == DEFAULT_PORT else f"tasks-{port}.json"))
     a2a_layer = a2a_mod.A2ALayer(ingest=ingest, sanitize_sender=sanitize_sender,
@@ -495,12 +492,12 @@ def create_app(port: int | None = None, host: str | None = None,
 
     @app.get("/api/config")
     async def get_config():
-        """前端開機設定:mention 規則與 agent 色相的單一事實來源(#151-7)。
-        名冊動態化後,新註冊者的色相在「重新整理後」生效(已知時效行為,#222)。"""
+        """前端開機設定:mention 規則與 agent 色相的單一事實來源。
+        名冊動態化後,新註冊者的色相在「重新整理後」生效(已知時效行為)。"""
         return {
             "mentionPattern": MentionParser.JS_SOURCE,
             "a2aVersion": a2a_mod.A2A_PROTOCOL_VERSION,
-            "authEnabled": auth_enabled,  # UI 據此顯示/隱藏 token 欄(alice #229)
+            "authEnabled": auth_enabled,  # UI 據此顯示/隱藏 token 欄
             "agents": {name: {"color": p.get("color", "#c9d1d9")}
                        for name, p in agents.profiles.items()},
         }
@@ -526,7 +523,7 @@ def create_app(port: int | None = None, host: str | None = None,
         if reader:
             name = sanitize_sender(reader)
             # reader= 是隱藏的寫入(觸發 task 轉 WORKING)— AUTH=on 時必須驗身分,
-            # 驗不過就優雅降級:GET 本體照常回,只是不觸發已讀(bob #228 洞二)
+            # 驗不過就優雅降級:GET 本體照常回,只是不觸發已讀
             authorized = True
             if auth_enabled and name:
                 try:
@@ -553,7 +550,7 @@ def create_app(port: int | None = None, host: str | None = None,
     async def get_room_tasks(room: str):
         return {"tasks": a2a_layer.tasks_for_room(room)}
 
-    # /wait long-poll 端點已移除(老闆 #311:喚醒走 bell 敲鈴器,watch 機制留作備援,
+    # /wait long-poll 端點已移除(喚醒改走 bell 敲鈴器,watch 機制留作備援,
     # curl 等待路線退場)— 需要考古的話看 git 歷史 🚀 fa0c64b 前後。
 
     @app.get("/api/rooms/{room}/stream")
@@ -599,7 +596,7 @@ def create_app(port: int | None = None, host: str | None = None,
         """roadmap ② 動態註冊:憑邀請 token 入冊,回 Agent Card。
 
         驗證順序:註冊開關 → token → 名字消毒 → 保留名單 → 語意綠黑名單 →
-        (持鎖)不分大小寫重名 → 入冊原子落地(共識 #221/#222/#223)。
+        (持鎖)不分大小寫重名 → 入冊原子落地。
         """
         if not invite_token:
             return JSONResponse(status_code=403, content={
@@ -619,14 +616,14 @@ def create_app(port: int | None = None, host: str | None = None,
                                   "detail": "語意綠 #00ff88 為系統獨占(點名/連線/NEW),sender 禁用"})
         if len(json.dumps(body.skills, ensure_ascii=False)) > 2000 or len(body.skills) > 10:
             raise BadSenderError({"error": "skills_too_large", "detail": "skills 最多 10 項、總長 2000 字"})
-        async with post_lock:  # 併發決勝:同名同時註冊只有一人成功(bob #223)
+        async with post_lock:  # 併發決勝:同名同時註冊只有一人成功
             if agents.taken_ci(name):
                 raise ConflictError({"error": "name_taken",
                                      "detail": f"名字「{name}」已被使用(不分大小寫)"})
             agents.register(name, {"color": body.color.lower(),
                                    "description": body.description,
                                    "skills": body.skills})
-        # AUTH=on 時隨註冊發一次性 token(明文僅此一次;勿貼進聊天室,#228 nice)
+        # AUTH=on 時隨註冊發一次性 token(明文僅此一次;勿貼進聊天室)
         token = token_store.issue(name) if auth_enabled else None
         return {"agentCard": a2a_layer.agent_card(name), "token": token}
 

@@ -1,4 +1,4 @@
-"""poller — 笨眼睛。
+"""poller — 笨眼睛(備援喚醒 option 2 專用;預設喚醒是敲鈴器 bell.py,用不到本程式)。
 
 每隔幾秒拉一次 server 的 /state,last_id 有變就原子性地改寫本地狀態檔。
 agent(Claude Code 的 Monitor、或任何 blocking shell 迴圈)只盯這個檔案,
@@ -50,7 +50,7 @@ def main() -> int:
 
     url = f"{args.server.rstrip('/')}/api/rooms/{args.room}/state"
     known = read_current(args.state_file)
-    failures = 0  # 連續失敗計數:驅動指數退避(review #151-9)
+    failures = 0  # 連續失敗計數:驅動指數退避
     print(f"[poller] watching {url} -> {args.state_file} (interval={args.interval}s)", flush=True)
 
     while True:

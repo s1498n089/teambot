@@ -1,6 +1,6 @@
 /* A2A Chatroom — 樣式層。
    分層:1 tokens → 2 utility(只收重複 3 次以上的視覺效果)→ 3 語意/結構 class。
-   拆檔緣由:review #152 should-5 — 單檔初衷是零建置,不是零分檔。 */
+   拆檔緣由:單檔初衷是零建置,不是零分檔。 */
 
 /* ═══════════ 1. Design Tokens ═══════════ */
 :root {
@@ -20,7 +20,7 @@
   --mono: "Share Tech Mono", Consolas, monospace;
   --shadow-neon: 0 0 5px var(--green), 0 0 10px rgba(0, 255, 136, 0.25);
   --shadow-neon-cyan: 0 0 5px var(--cyan), 0 0 12px rgba(0, 212, 255, 0.35);
-  --bubble-font: 18px; /* 聊天本文字級(老闆 #262:原 14px 偏小);A-/A/A+ 切換會覆寫,localStorage 記憶 */
+  --bubble-font: 18px; /* 聊天本文字級(原 14px 偏小);A-/A/A+ 切換會覆寫,localStorage 記憶 */
 }
 
 /* ═══════════ 2. Utility 層 ═══════════ */
@@ -40,7 +40,7 @@ html, body { height: 100%; }
 body {
   background: var(--bg);
   color: var(--text);
-  /* 中文本文 sans(共識 #108:mono 限 metadata) */
+  /* 中文本文 sans(mono 限 metadata) */
   font-family: "Segoe UI", "Microsoft JhengHei", system-ui, sans-serif;
   display: flex;
   justify-content: center;
@@ -54,11 +54,11 @@ body::before { /* circuit grid(靜態,reduced-motion 也保留) */
     linear-gradient(90deg, rgba(0, 255, 136, 0.03) 1px, transparent 1px);
   background-size: 50px 50px;
 }
-/* scanlines 已依老闆 #139/#141 停用;要復原,把當時的 body::after 規則加回來即可 */
+/* scanlines 已停用;要復原,把當時的 body::after 規則加回來即可 */
 #particles { position: fixed; inset: 0; z-index: 0; pointer-events: none; }
 #app {
   position: relative; z-index: 1;
-  width: min(960px, 100vw); /* 版心(老闆 #130 加寬) */
+  width: min(960px, 100vw); /* 版心(加寬) */
   height: 100dvh;
   display: flex; flex-direction: column;
 }
@@ -137,7 +137,7 @@ main {
   border: 1.5px solid var(--border); image-rendering: pixelated;
 }
 .avatar:hover { box-shadow: var(--shadow-neon-cyan); }
-/* review #152 nice-4:.msg-body 樣式合併為單一定義 */
+/* .msg-body 樣式合併為單一定義 */
 .msg-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; align-items: flex-start; }
 .msg.own .msg-body { align-items: flex-end; } /* FOCUS 模式下自己的泡泡貼右緣 */
 .msg-head { display: flex; align-items: baseline; gap: 8px; font-size: 11px; flex-wrap: wrap; }
@@ -170,8 +170,8 @@ main {
   padding: 9px 12px;
   font-size: var(--bubble-font); line-height: 1.7;
   white-space: pre-wrap; word-break: break-word;
-  width: fit-content;            /* LINE 感:泡泡貼合內容(bob #133「這輪的靈魂」) */
-  max-width: min(600px, 72%);    /* 呼吸感上限(alice #131) */
+  width: fit-content;            /* LINE 感:泡泡貼合內容 */
+  max-width: min(600px, 72%);    /* 呼吸感上限 */
 }
 /* 被點名的訊息:左緣語意綠 glow(clip-path 內只能用 inset shadow,外部 glow 會被切掉) */
 .msg.ping-me .bubble {

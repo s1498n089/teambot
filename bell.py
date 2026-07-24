@@ -1,14 +1,14 @@
-"""bell(敲鈴器)— stdin 喚醒 wrapper(roadmap 敲鈴器,共識 #255-#273)。
+"""bell(敲鈴器)— stdin 喚醒 wrapper。
 
 用法:
-    uv run bell.py --name alice [--server http://127.0.0.1:8787] [--room main] -- claude -c
+    uv run bell.py --name alice [--server http://127.0.0.1:8787] [--room main] -- claude --resume
 
-角色:老闆拍板(#250/#253)的喚醒最終型 — 不靠 agent 自律重掛、不靠檔案旗子,
+角色:本專案的預設喚醒機制 — 不靠 agent 自律重掛、不靠檔案旗子,
 由本程式把 agent CLI 包成子行程(ConPTY / pty,TUI 體驗保真),
 盯著 hub 的 SSE 直播當眼睛,發現「房間進度 > 該 agent 的 cursor」
 就往子行程的 stdin 敲一行固定鈴聲。agent 看到鈴聲照對帳鐵則辦事。
 
-設計要點(planning #270 + bob #273):
+設計要點:
 - 鈴聲固定單行:BELL_TEXT + BELL_SUBMIT(ConPTY 的送出鍵是 \r,不是 \n — T2.5 生死關卡)
 - 自己發言不會被敲:發言後 cursor 已推進,last_id 不再領先(老規矩,零額外機制)
 - 重敲保險:敲後 RE_RING_SECONDS 內 cursor 未推進且仍落後 → 再敲,上限 MAX_RINGS 次
@@ -33,7 +33,7 @@ BASE = Path(__file__).resolve().parent
 BELL_TEXT = "[A2A-BELL] cursor updated"
 BELL_SUBMIT = "\r"          # ConPTY/TUI 的送出鍵(T2.5:對真 CLI 驗證會自動成為 prompt)
 RE_RING_SECONDS = 90        # 敲後多久 cursor 仍未推進就重敲
-MAX_RINGS = 3               # 同一段落後最多敲幾次,之後改印警告(不騷擾設計,bob #255)
+MAX_RINGS = 3               # 同一段落後最多敲幾次,之後改印警告(不騷擾設計)
 SSE_READ_TIMEOUT = 60       # server 每 15 秒有 keep-alive,60 秒沒動靜視為死連線
 RECONNECT_MAX_BACKOFF = 30
 
@@ -43,7 +43,7 @@ LOG_PATH: Path | None = None  # main() 依 --name 指定;None 時退回 stderr(�
 
 def log(msg: str) -> None:
     """敲鈴器狀態訊息寫檔(state/bell-<名字>.log)— stderr 與子行程 TUI 共用終端,
-    直印會插進畫面甚至斬斷 VT 序列造成花屏(bob #278),故一律落檔。"""
+    直印會插進畫面甚至斬斷 VT 序列造成花屏,故一律落檔。"""
     line = f"[bell {time.strftime('%H:%M:%S')}] {msg}\n"
     if LOG_PATH is None:
         sys.stderr.write(line)
@@ -152,7 +152,7 @@ def run_windows(cmd: list[str], state_factory) -> int:
     kernel32.GetConsoleMode(hout, ctypes.byref(out_mode))
     kernel32.SetConsoleMode(hout, out_mode.value | 0x0004)  # ENABLE_VIRTUAL_TERMINAL_PROCESSING
 
-    # 輸入開 VT 模式(老闆實測抓到:getwch 只回「字元」,Shift+Tab 與 Tab 同為 \t,
+    # 輸入開 VT 模式(getwch 只回「字元」,Shift+Tab 與 Tab 同為 \t,
     # 修飾鍵資訊全丟 — TUI 認的 Shift+Tab 是 ESC[Z)。VT 輸入模式下 Windows 會把
     # 組合鍵翻成標準 VT 序列,按鍵保真交給作業系統。失敗(舊系統)則退回 getwch 路徑。
     hin = kernel32.GetStdHandle(-10)
@@ -165,7 +165,7 @@ def run_windows(cmd: list[str], state_factory) -> int:
 
     cols, rows = shutil.get_terminal_size()
     proc = PtyProcess.spawn(cmd, dimensions=(rows, cols), cwd=str(BASE))
-    write_lock = threading.Lock()  # 鈴聲(SSE 執行緒)與打字(輸入執行緒)不互插(bob #278 nice)
+    write_lock = threading.Lock()  # 鈴聲(SSE 執行緒)與打字(輸入執行緒)不互插
 
     def safe_write(text: str) -> None:
         with write_lock:
@@ -197,7 +197,7 @@ def run_windows(cmd: list[str], state_factory) -> int:
         修飾鍵組合全保真);退路:getwch 逐鍵(寬字元 IME OK,但修飾鍵資訊有限)。"""
         if vt_input:
             # incremental decoder:os.read 可能把多位元組中文切在 1024 邊界,
-            # 殘餘位元組要跨次保留拼接,否則貼上大段中文會出 � 亂碼(bob #295)
+            # 殘餘位元組要跨次保留拼接,否則貼上大段中文會出 � 亂碼
             decoder = codecs.getincrementaldecoder("utf-8")("replace")
             while proc.isalive():
                 try:
@@ -290,11 +290,11 @@ def main() -> int:
     parser.add_argument("--server", default="http://127.0.0.1:8787", help="hub 位址(遠端機器指向遠端 hub)")
     parser.add_argument("--room", default="main")
     parser.add_argument("cmd", nargs=argparse.REMAINDER,
-                        help="-- 之後接要包的指令,如:-- claude -c")
+                        help="-- 之後接要包的指令,如:-- claude --resume")
     args = parser.parse_args()
     cmd = args.cmd[1:] if args.cmd and args.cmd[0] == "--" else args.cmd
     if not cmd:
-        parser.error("缺少要包的指令,例:uv run bell.py --name alice -- claude -c")
+        parser.error("缺少要包的指令,例:uv run bell.py --name alice -- claude --resume")
 
     cursor_path = BASE / "state" / f"cursor-{args.name}.txt"
     global LOG_PATH

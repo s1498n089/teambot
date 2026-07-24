@@ -1,5 +1,5 @@
 /* A2A Chatroom — 前端邏輯層。
-   分層(review #152 共識):
+   分層:
      ChatApi(Repository)   — HTTP 唯一出入口 + 統一錯誤策略
      composables            — useTasks / useUnread / useStream(SRP,root 瘦身)
      元件                    — HoloModal(彈窗皮)/ ChatHeader / MessageItem / ChatComposer
@@ -14,10 +14,10 @@ const GROUP_WINDOW_MS = 300000;      // 同人連續發言的 grouping 視窗(5 
 const ONLINE_WINDOW_MS = 600000;     // lastSeen 在此窗內視為在線(10 分鐘)
 const TOAST_MS = 3500;
 const FLASH_MS = 2000;               // 跳轉脈衝動畫的 class 存留時間
-const API_FAIL_TOAST_THRESHOLD = 3;  // 連續失敗達此數才吵使用者(#152 must-3)
+const API_FAIL_TOAST_THRESHOLD = 3;  // 連續失敗達此數才吵使用者
 
 /* 執行期設定:開機從 /api/config 灌入 — reactive 讓 tokens/顏色 computed 真正依賴它
-   (#152 must-2:regex 熱替換必須觸發重算,不能靠呼叫順序保命)。 */
+   (regex 熱替換必須觸發重算,不能靠呼叫順序保命)。 */
 const rt = reactive({
   mentionPattern: "(?<![A-Za-z0-9_@.-])(@[\\w一-鿿-]+)", // fallback,與 server 同步
   palette: { user: "#c9d1d9" },                          // 人類底色;agent 色相由 config 下發
@@ -99,7 +99,7 @@ function dayOf(ts) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
-/* task 狀態的單一事實來源(#152 should-4):CSS class 與縮寫都查這張表,
+/* task 狀態的單一事實來源:CSS class 與縮寫都查這張表,
    REJECTED / INPUT_REQUIRED 上線時只加表項。null(蒸發 task)→ 誠實的灰。 */
 const STATE_META = {
   TASK_STATE_SUBMITTED: { cls: "open", short: "SUBMITTED" },
@@ -117,7 +117,7 @@ function stateMeta(state) { return STATE_META[state] || STATE_GONE; }
 function createApi(notify) {
   let failStreak = 0;
 
-  /** 通用 GET/RPC:失敗 console.warn,連續失敗才 toast(#152 must-3 誠實原則)。 */
+  /** 通用 GET/RPC:失敗 console.warn,連續失敗才 toast(誠實原則)。 */
   async function request(url, options) {
     try {
       const res = await fetch(url, options);
@@ -158,7 +158,7 @@ function createApi(notify) {
   };
 }
 
-/* ═══════════ Composables(#152 should-2)═══════════ */
+/* ═══════════ Composables ═══════════ */
 
 /** task 摘要的載入與查詢:UI 徽章、header 計數、彈窗摘要都吃這份。 */
 function useTasks(api, room) {
@@ -227,7 +227,7 @@ function startParticles() {
     canvas.style.width = W + "px"; canvas.style.height = H + "px";
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     let target = Math.min(80, Math.floor((W * H) / 18000));
-    if (W < 560) target = Math.floor(target / 2); // 手機減半;resize 時重判(#152 nice-5)
+    if (W < 560) target = Math.floor(target / 2); // 手機減半;resize 時重判
     while (pts.length < target) pts.push(newPt());
     pts.length = target;
   }
@@ -265,7 +265,7 @@ startParticles();
 
 /* ═══════════ 元件 ═══════════ */
 
-/** Holographic 彈窗的皮(#152 should-3):overlay/四角/close 只寫一次,內容走 slot。 */
+/** Holographic 彈窗的皮:overlay/四角/close 只寫一次,內容走 slot。 */
 const HoloModal = {
   emits: ["close"],
   template: `
@@ -301,7 +301,7 @@ const ChatHeader = {
            @click="$emit('open-member', m.name)">
     </span>
     <span class="spacer"></span>
-    <span class="font-ctl" title="聊天字級(老闆 #262)">
+    <span class="font-ctl" title="聊天字級">
       <button class="mono" @click="$emit('adjust-font', -2)">A-</button>
       <button class="mono" @click="$emit('adjust-font', 0)">A</button>
       <button class="mono" @click="$emit('adjust-font', 2)">A+</button>
@@ -317,7 +317,7 @@ const MessageItem = {
   emits: ["reply", "jump", "open-member", "open-task", "copy", "anchor"],
   computed: {
     isOwn() { return this.m.from === this.me; },
-    /** tokenize 內部讀 rt.mentionPattern(reactive)→ config 熱替換會觸發重算(#152 must-2) */
+    /** tokenize 內部讀 rt.mentionPattern(reactive)→ config 熱替換會觸發重算 */
     tokens() { return tokenize(this.m.text); },
     senderColor() { return colorHexOf(this.m.from); },
     registered() { return this.m.from in rt.palette; },
@@ -416,8 +416,8 @@ createApp({
       toast: null,
       toastOk: false,
       modal: null,   // { type: 'member'|'task', ... }
-      focusMode: localStorage.getItem("a2a-focus") !== "0", // 老闆拍板:預設開(自己靠右)
-      bubbleFont: parseInt(localStorage.getItem("a2a-font") || "18", 10), // 聊天字級 px(老闆 #262),A-/A/A+ 調整
+      focusMode: localStorage.getItem("a2a-focus") !== "0", // 預設開(自己靠右,聊天慣例)
+      bubbleFont: parseInt(localStorage.getItem("a2a-font") || "18", 10), // 聊天字級 px,A-/A/A+ 調整
       nowTick: Date.now(),  // 每分鐘跳動,驅動在線狀態的重新計算
     };
   },
@@ -428,7 +428,7 @@ createApp({
     /** timeline 的顯示列:日期分隔線 + ── NEW ── 未讀線 + 訊息(含 grouping 判定)。 */
     rows() {
       const out = [];
-      let prevDay = "", prevMsg = null, unreadPlaced = false; // 旗標取代 out.some(#152 nice-3)
+      let prevDay = "", prevMsg = null, unreadPlaced = false; // 旗標取代 out.some(免迴圈內線性掃描)
       for (const m of this.messages) {
         const d = dayOf(m.ts);
         if (d !== prevDay) { out.push({ type: "sep", key: "sep-" + d, date: d }); prevDay = d; prevMsg = null; }
@@ -448,7 +448,7 @@ createApp({
   },
   async mounted() {
     toastBus.show = this.showToast; // api 的延遲通知在此接上
-    this.applyFont(); // 開機套用記憶的字級(老闆 #262)
+    this.applyFont(); // 開機套用記憶的字級
 
     // 順序:config(mention 規則/色相)→ 首頁訊息 → 平行載入輔助資料
     try {
@@ -504,7 +504,7 @@ createApp({
         && this.nowTick - new Date(member.lastSeen).getTime() < ONLINE_WINDOW_MS;
     },
 
-    /* ── SSE 進訊息:具名 handler 鏈(#152 should-2,一步一責)── */
+    /* ── SSE 進訊息:具名 handler 鏈(一步一責)── */
     handleIncoming(m) {
       if (m.id <= this.lastId) return; // 回放/即時交界去重
       const nearBottom = this.isNearBottom();
@@ -555,7 +555,7 @@ createApp({
       if (!res.ok) {
         const detail = res.data.detail || res.data.error || `HTTP ${res.status}`;
         this.showToast(`>> SEND FAILED: ${detail}`, false);
-        return; // 失敗保留草稿與 replyTo(#123 實彈的教訓)
+        return; // 失敗保留草稿與 replyTo(訊息不能無聲消失)
       }
       this.$refs.composer.clear();
       this.replyTo = null;
@@ -600,7 +600,7 @@ createApp({
       el.classList.add("flash");
       setTimeout(() => el.classList.remove("flash"), FLASH_MS);
     },
-    /** 彈窗內跳轉:先取值再關彈窗(#152 must-1 — 原寫法先清 modal 再讀 modal,必炸)。 */
+    /** 彈窗內跳轉:先取值再關彈窗(原寫法先清 modal 再讀 modal,必炸)。 */
     jumpFromModal(mid) {
       const id = mid;
       this.modal = null;
@@ -634,7 +634,7 @@ createApp({
       this.focusMode = !this.focusMode;
       localStorage.setItem("a2a-focus", this.focusMode ? "1" : "0");
     },
-    /** 字級調整(老闆 #262):delta ±2 步進、0 = 回預設 18;夾在 14~26 之間。 */
+    /** 字級調整:delta ±2 步進、0 = 回預設 18;夾在 14~26 之間。 */
     adjustFont(delta) {
       this.bubbleFont = delta === 0 ? 18 : Math.min(26, Math.max(14, this.bubbleFont + delta));
       localStorage.setItem("a2a-font", String(this.bubbleFont));
@@ -651,7 +651,7 @@ createApp({
         || { name, messageCount: 0, mentionedCount: 0, firstSeen: null, lastSeen: null };
       this.modal = { type: "member", member };
     },
-    openAgentCard(name) { // window 不進 data,免被 reactive 整包代理(#152 nice-2)
+    openAgentCard(name) { // window 不進 data,免被 reactive 整包代理
       window.open(`/agents/${name}/.well-known/agent-card.json`);
     },
     async openTask(taskId) {
@@ -669,7 +669,7 @@ createApp({
         }
       } catch (e) { /* request 已記錄;彈窗維持 LOADING 字樣 */ }
     },
-    /** task 彈窗開著時跟 SSE 即時同步(alice v5 驗收回饋)。 */
+    /** task 彈窗開著時跟 SSE 即時同步。 */
     syncTaskModal() {
       if (!this.modal || this.modal.type !== "task") return;
       const cur = this.tasks.map[this.modal.summary.id];

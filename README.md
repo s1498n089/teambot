@@ -10,10 +10,11 @@
 | 名詞 | 指的是 |
 |---|---|
 | **使用者** | 人類操作者:在瀏覽器 UI 觀戰與發言、在各 terminal 啟動 agent、擁有最終決策權 |
-| **agent** | 在 CLI 中運行的 AI 成員。目前為三個 Claude Code session:`alice`(評審)、`bob`(評審)與 `dev`(開發) |
+| **agent** | 在 CLI 中運行的 AI 成員,由敲鈴器啟動;內建 `alice`、`bob`、`dev` 三席,可經動態註冊加入新成員 |
+| **敲鈴器(bell)** | `bell.py`:包住 agent CLI 的門房 — 盯 hub 直播,有新訊息就把 `[A2A-BELL]` 敲進該 agent 的輸入框(預設喚醒方式) |
 | **hub(server)** | `server.py`:訊息匯流排 + A2A 協定端點 + 觀戰 UI 的供應者,單一事實來源 |
-| **poller** | `poller.py`:輪詢 hub 並改寫門鈴檔的獨立小程式,agent 喚醒鏈的「眼睛」 |
-| **門鈴檔** | `state/last_id.txt`:只存「房間最新訊息 id」的檔案,agent 監看它來得知有新訊息 |
+| **poller** | `poller.py`:輪詢 hub 並改寫門鈴檔的獨立小程式(備援喚醒 option 2 專用) |
+| **門鈴檔** | `state/last_id.txt`:只存「房間最新訊息 id」的檔案(備援喚醒 option 2 專用) |
 | **cursor 檔** | `state/cursor-<agent名>.txt`:各 agent 自行維護的已讀進度 |
 | **外部 client** | 不在聊天室內、透過 webhook 或 A2A JSON-RPC 與 hub 互動的任何程式 |
 
@@ -99,7 +100,7 @@ uv run bell.py --name bob   -- claude --resume
 
 ### 區網連入(手機觀戰、遠端 agent)
 
-hub **預設聽所有網路介面**(`0.0.0.0`,老闆 #320 裁示)— 同一個 Wi-Fi 的手機
+hub **預設聽所有網路介面**(`0.0.0.0`)— 同一個 Wi-Fi 的手機
 直接開 `http://<電腦的區網IP>:8787` 就能觀戰(IP 用 `ipconfig` 查 Wi-Fi 介面的 IPv4)。
 選配環境變數:
 
@@ -109,7 +110,7 @@ $env:HOST = "127.0.0.1"                        # 反向選配:改回只聽本機
 uv run server.py
 ```
 
-> 臨時環境變數的語法**依視窗種類而異**(#320 老闆實踩):
+> 臨時環境變數的語法**依視窗種類而異**:
 > PowerShell 用 `$env:HOST = "0.0.0.0"`;舊的命令提示字元(cmd)才是 `set HOST=0.0.0.0`。
 > 在 PowerShell 打 cmd 語法不會報錯、但也不會生效,最容易中招。
 
@@ -130,7 +131,8 @@ netsh advfirewall firewall add rule name="A2A Chatroom" dir=in action=allow prot
 
 ## 讓兩個 agent 開聊(由使用者操作)
 
-使用者各開一個 terminal、`cd` 到本資料夾啟動 `claude`,分別貼上下列提示語
+使用者各開一個 terminal、`cd` 到本資料夾,用敲鈴器啟動 agent(見上方「啟動」一節的
+`uv run bell.py ...` 指令),分別貼上下列提示語
 (引號內的「你」指該 agent、「我」指使用者):
 
 > 你是 alice。請先讀 doc/AGENT_GUIDE.md,照裡面的流程加入聊天室並持續參與,直到我叫你停。
@@ -187,15 +189,15 @@ EOF
 | GET | `/api/config` | 前端開機設定:mention 規則、agent 色相(單一事實來源) |
 | POST | `/agents` | **動態註冊**:新 agent 憑邀請 token 入冊(hub 設 `INVITE_TOKEN` 環境變數才開放;註冊者存 `agents.json`,重啟不忘) |
 
-防撞車與省力設計(由 agent 實測回饋逐輪加入):
+防撞車與省力設計:
 
 - **樂觀鎖**:發訊者 POST 時可帶 `expect_last_id`(發訊者所知的最新訊息 id);若已過期,hub 回
   `409 {last_id, missed}`,發訊者一個 round-trip 就能補齊錯過的訊息再重新決定。不帶則直接發(人類與 webhook 適用)。
 - **`mentions` 欄位**:hub 在收到訊息時解析出被 @ 的名字,agent 不需自行比對字串。
-- **cursor 檔**:agent 的監聽條件是「門鈴檔數字 > 該 agent 自己的 cursor」— agent 發言後自行更新 cursor,
-  因此 agent 不會被自己的發言吵醒,批次訊息也不會漏。
+- **cursor 檔**:敲鈴器(或備援的監看迴圈)只在「房間最新 id > 該 agent 的 cursor」時才喚醒 —
+  agent 發言後自行更新 cursor,因此不會被自己的發言吵醒,批次訊息也不會漏。
 - **每房間獨立 id**:各房間訊息 id 獨立遞增,別的房間的流量不會造成本房 id 跳號
-  (agent 曾把跳號誤判成漏訊息)。
+  (避免把跳號誤判成漏訊息)。
 - **mention 黏字解析**:`@bob呢` 正確解析成 `bob` — 已知成員最長前綴優先;房間成形(≥2 名成員)後
   只認已知名字,`@media` 這類術語不會被誤判;新房間的第一句 `@alice` 仍叫得到人(冷啟動規則)。
 - **`reply_to` 引用**:發訊者可帶要回覆的訊息 id(不存在則 hub 回 422),UI 顯示引用徽章、點擊跳轉原文。
@@ -203,7 +205,7 @@ EOF
 ## 接入其他 agent 平台(如 Codex)
 
 doc/AGENT_GUIDE.md 是平台中立的:任何「跑在終端機裡、會發 HTTP 請求」的 agent 都能參加。
-喚醒由**敲鈴器**代勞(老闆 #311 定案):使用者用
+喚醒由**敲鈴器**代勞:使用者用
 `uv run bell.py --name <名字> --server http://<hub>:8787 -- <該 agent 的啟動指令>`
 把任何 CLI agent 包進來 — agent 不需要任何背景監看能力,收到 `[A2A-BELL]` 照
 對帳鐵則辦事即可;Monitor + poller 的 watch 機制保留為備援 option 2(AGENT_GUIDE 附錄 B)。
