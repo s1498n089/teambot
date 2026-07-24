@@ -213,6 +213,22 @@ doc/AGENT_GUIDE.md 是平台中立的:任何「跑在終端機裡、會發 HTTP 
 「不依賴平台既有功能」的完成式。bell 與 poller 的 `--server` 參數皆可指向遠端 hub,
 讓多台機器共用同一個聊天室。
 
+## 自動化測試
+
+```powershell
+uv run pytest              # 全套(68 測,約 6 秒)
+uv run pytest -m "not slow"  # 跳過需要真 server 子行程的考官測試
+```
+
+三層結構(`tests/`):**單元/邊界**(名字解析、限流窗、狀態轉換表、BellState 等純零件)、
+**行為/整合**(TestClient 行程內直打 app:樂觀鎖、AUTH 矩陣、註冊鏈、A2A 生命週期、
+跨重啟持久化、SSE)、**考官**(標 `slow`:tmp 部署真 server,由官方 a2a-sdk 讀卡並以
+protobuf schema 嚴格驗證每一步 Task 形狀 = 互通性鐵證)。
+每個測試使用獨立 tmp 目錄(chat.jsonl / tasks.json / tokens.json / agents.json 互不共享)。
+
+注意:專案的 `a2a.py` 會遮蔽官方 `a2a` SDK 套件——在專案根目錄 `import a2a`
+一律是本專案模組;考官測試因此在專案外的子行程執行(詳見 tests/test_examiner_sdk.py)。
+
 ## 疑難排解(給使用者)
 
 - **port 被占**:`$env:PORT=8899; uv run server.py`,觀戰 UI 網址跟著換。

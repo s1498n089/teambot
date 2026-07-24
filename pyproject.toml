@@ -8,3 +8,14 @@ dependencies = [
     "pywinpty>=3.0.5",
     "uvicorn>=0.51.0",
 ]
+
+[dependency-groups]
+dev = [
+    "a2a-sdk>=1.1.2",
+    "httpx>=0.28.1",
+    "pytest>=9.1.1",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["slow: 需要真 server 子行程的考官測試(平時可 -m 'not slow' 跳過)"]
