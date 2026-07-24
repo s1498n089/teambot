@@ -157,6 +157,8 @@ class Task:
     """一個 A2A Task:spec 欄位 + hub 內部管理欄位合體(#151-1)。
 
     spec 形狀一律經 to_spec() 輸出,內部欄位(target/feed_mid/訂閱者等)不外洩。
+    持久化(roadmap ④)只序列化 _PERSIST_FIELDS;訂閱者/事件/計時器是 runtime 欄位,
+    重啟後由 restore() 重建。
     """
     id: str
     context_id: str                 # = 房間名
@@ -169,9 +171,23 @@ class Task:
     metadata: dict = field(default_factory=dict)
     feed_mid: int | None = None            # 對應的聊天室訊息 id(完成訊號比對用)
     completed_mid: int | None = None       # 完成回覆的訊息 id(可視化反向連結用)
+    created_ts: str = field(default_factory=now_iso)  # UTC ISO8601(家法);deadline 復原計算用
     subscribers: set[asyncio.Queue] = field(default_factory=set)  # 串流訂閱者
     done: asyncio.Event = field(default_factory=asyncio.Event)    # terminal/interrupted 時 set
     deadline_handle: asyncio.Task | None = None                   # 逾時計時器,終態即取消
+
+    _PERSIST_FIELDS = ("id", "context_id", "target", "deadline_seconds", "state", "state_ts",
+                       "state_message", "history", "metadata", "feed_mid", "completed_mid",
+                       "created_ts")
+
+    def to_snapshot(self) -> dict:
+        """持久化形狀(runtime 欄位除外)。"""
+        return {f: getattr(self, f) for f in self._PERSIST_FIELDS}
+
+    @classmethod
+    def from_snapshot(cls, data: dict) -> "Task":
+        """從快照重建;runtime 欄位(訂閱者/事件/計時器)以全新狀態起始。"""
+        return cls(**{f: data[f] for f in cls._PERSIST_FIELDS})
 
     def to_spec(self, history_length: int | None = None) -> dict:
         """輸出 spec 1.0 形狀的 Task JSON。先截 history 再深拷,省一次全量複製(#151-8)。"""
@@ -193,25 +209,68 @@ class Task:
 
 
 class TaskRegistry:
-    """Task 的唯一儲存與索引(Repository,#151-1)。
+    """Task 的唯一儲存與索引(Repository,#151-1)+ 持久化(roadmap ④)。
 
-    三個索引(id、房間、feed 訊息)的同步只發生在這個類別內 —
-    外界不再有機會漏更新其中一本。
+    三個索引(id、房間、feed 訊息)的同步只發生在這個類別內。
+    快照落地的唯二時機(alice #234 結構藥方 + bob #235 殭屍防範):
+      1. bind_feed 完成後(= task 建立完成的定義;create 中途永不落盤,殭屍無從誕生)
+      2. 狀態轉換後(由 A2ALayer._transition 呼叫 checkpoint)
     """
 
-    def __init__(self):
+    def __init__(self, path=None):
+        self.path = path  # None = 不持久化(隔離測試用)
         self._by_id: dict[str, Task] = {}
         self._by_room: dict[str, list[str]] = defaultdict(list)
         self._by_feed: dict[tuple[str, int], str] = {}  # (room, feed_mid) -> task id
+        self._load()
+
+    def _load(self) -> None:
+        if not self.path or not self.path.exists():
+            return
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as exc:
+            print(f"[tasks] WARN tasks.json 載入失敗,以空名冊啟動:{exc}", file=sys.stderr)
+            return
+        for item in data:
+            try:
+                task = Task.from_snapshot(item)
+            except (KeyError, TypeError) as exc:
+                print(f"[tasks] WARN 跳過壞快照:{exc}", file=sys.stderr)
+                continue
+            self._by_id[task.id] = task
+            self._by_room[task.context_id].append(task.id)
+            if task.feed_mid is not None:
+                self._by_feed[(task.context_id, task.feed_mid)] = task.id
+
+    def checkpoint(self) -> None:
+        """全量快照原子落地。失敗只記 warning 繼續跑 —
+        可用性優先於持久性(alice #234:最壞退回蒸發行為,不炸訊息流)。"""
+        if not self.path:
+            return
+        try:
+            snap = [t.to_snapshot() for t in self._by_id.values()]
+            fd, tmp = tempfile.mkstemp(dir=str(self.path.parent), suffix=".tmp")
+            with open(fd, "w", encoding="utf-8") as f:
+                json.dump(snap, f, ensure_ascii=False)
+            os.replace(tmp, str(self.path))
+        except OSError as exc:
+            print(f"[tasks] WARN 快照落地失敗(繼續運行):{exc}", file=sys.stderr)
 
     def add(self, task: Task) -> None:
         self._by_id[task.id] = task
         self._by_room[task.context_id].append(task.id)
+        # 注意:這裡刻意不 checkpoint — create 中途落盤會養出殭屍(bob #235)
 
     def bind_feed(self, task: Task, feed_mid: int) -> None:
-        """task 訊息落地後綁定 feed id,建立 O(1) 反查(reply_to 完成判定的熱路徑)。"""
+        """task 訊息落地後綁定 feed id,建立 O(1) 反查(reply_to 完成判定的熱路徑)。
+        這一刻 task 才算「建立完成」,也是第一次落盤的時機。"""
         task.feed_mid = feed_mid
         self._by_feed[(task.context_id, feed_mid)] = task.id
+        self.checkpoint()
+
+    def all_tasks(self) -> list[Task]:
+        return list(self._by_id.values())
 
     def get(self, task_id: str) -> Task | None:
         return self._by_id.get(task_id)
@@ -236,13 +295,13 @@ class A2ALayer:
     """
 
     def __init__(self, ingest, sanitize_sender, base_url: str, agents: AgentRegistry,
-                 auth_enabled: bool = False):
+                 auth_enabled: bool = False, tasks_path=None):
         self._ingest = ingest
         self._sanitize = sanitize_sender
         self.base_url = base_url.rstrip("/")
         self.agents = agents            # agent 名冊(roadmap ②:可成長)
         self.auth_enabled = auth_enabled  # 影響 Agent Card 的 securitySchemes 誠實聲明(③)
-        self.registry = TaskRegistry()
+        self.registry = TaskRegistry(tasks_path)  # roadmap ④:tasks.json 持久化
 
     # ---------- Agent Card ----------
 
@@ -299,16 +358,45 @@ class A2ALayer:
             task.done.set()
             if state in TERMINAL and task.deadline_handle:
                 task.deadline_handle.cancel()  # 終態即取消計時器,免空轉(#151-8)
+        self.registry.checkpoint()  # 持久化唯二咽喉之二(alice #234:轉換即落盤,不可能忘)
         return True
 
-    async def _deadline_watch(self, task: Task) -> None:
-        """逾時看門狗:到點仍未終態 → FAILED(共識 #112:漏回的 task 要有收場)。"""
+    async def _deadline_watch(self, task: Task, seconds: float | None = None) -> None:
+        """逾時看門狗:到點仍未終態 → FAILED(共識 #112:漏回的 task 要有收場)。
+
+        seconds 允許覆寫 — 重啟復原時傳「剩餘時間」,deadline 不重新起算
+        (alice #234:否則 deadline 形同橡皮筋)。
+        """
         try:
-            await asyncio.sleep(task.deadline_seconds)
+            await asyncio.sleep(seconds if seconds is not None else task.deadline_seconds)
         except asyncio.CancelledError:
             return  # 正常完成時被取消
         task.metadata["failureReason"] = f"deadline {task.deadline_seconds}s exceeded"
         self._transition(task, "TASK_STATE_FAILED")
+
+    def restore(self, message_exists) -> None:
+        """啟動復原(roadmap ④,需在 running event loop 內呼叫):
+
+        1. 殭屍判定(bob #235):非終態且 feed_mid 為 None 或訊息流查無 → FAILED
+        2. 停機期間已逾期 → FAILED(記入 downtime 原因)
+        3. 其餘非終態:以「剩餘時間」重掛 deadline 計時器
+        """
+        for task in self.registry.all_tasks():
+            if task.state in TERMINAL:
+                continue
+            if task.feed_mid is None or not message_exists(task.context_id, task.feed_mid):
+                task.metadata["failureReason"] = "orphaned on restore(建立中途遺留的殭屍)"
+                self._transition(task, "TASK_STATE_FAILED")
+                continue
+            elapsed = (datetime.now(timezone.utc)
+                       - datetime.fromisoformat(task.created_ts)).total_seconds()
+            remaining = task.deadline_seconds - elapsed
+            if remaining <= 0:
+                task.metadata["failureReason"] = "deadline expired during downtime"
+                self._transition(task, "TASK_STATE_FAILED")
+            else:
+                task.deadline_handle = asyncio.get_running_loop().create_task(
+                    self._deadline_watch(task, remaining))
 
     # ---------- 可視化層 hooks(由 server 在對應時機呼叫)----------
 

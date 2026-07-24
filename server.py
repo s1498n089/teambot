@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+from contextlib import asynccontextmanager
 import inspect
 import json
 import os
@@ -466,9 +467,17 @@ def create_app(port: int | None = None, host: str | None = None,
         raise UnauthorizedError({"error": "bad_token", "detail": "無效的 token"})
 
     a2a_layer = a2a_mod.A2ALayer(ingest=ingest, sanitize_sender=sanitize_sender,
-                                 base_url=base_url, agents=agents, auth_enabled=auth_enabled)
+                                 base_url=base_url, agents=agents, auth_enabled=auth_enabled,
+                                 tasks_path=BASE / "tasks.json")  # roadmap ④:task 持久化
 
-    app = FastAPI(title="A2A Chatroom Hub")
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        # 復原 in-flight task(roadmap ④):殭屍判定/停機逾期/剩餘時間重掛,
+        # 必須在 event loop 起來後執行,故掛在 lifespan 而非 create_app 本體
+        a2a_layer.restore(store.exists)
+        yield
+
+    app = FastAPI(title="A2A Chatroom Hub", lifespan=lifespan)
     app.mount("/static", StaticFiles(directory=BASE / "static"), name="static")
 
     @app.exception_handler(ApiError)
