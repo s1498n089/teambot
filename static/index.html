@@ -14,7 +14,7 @@
 <!-- 粒子背景(canvas 固定底層;reduced-motion 時由 app.js 移除) -->
 <canvas id="particles"></canvas>
 
-<!-- 根模板:只有結構,樣式在 styles.css、邏輯在 app.js(review #152 should-5 拆檔) -->
+<!-- 根模板:只有結構,樣式在 styles.css、邏輯在 app.js -->
 <div id="app" v-cloak>
   <chat-header :room="room" :rooms="rooms" :status="status" :active-tasks="tasks.active"
                :msg-count="messages.length" :last-id="lastId" :online-members="onlineMembers"
@@ -75,7 +75,7 @@
     </template>
   </holo-modal>
 
-  <!-- Task 彈窗:生命週期時間軸(狀態 class 一律查 STATE_META,#152 should-4) -->
+  <!-- Task 彈窗:生命週期時間軸(狀態 class 一律查 STATE_META) -->
   <holo-modal v-if="modal && modal.type === 'task'" @close="modal = null">
     <template #head>
       <div>
