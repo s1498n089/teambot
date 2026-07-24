@@ -33,6 +33,7 @@ import a2a as a2a_mod
 
 BASE = Path(__file__).resolve().parent
 DEFAULT_PORT = 8787
+DEFAULT_HOST = "127.0.0.1"  # 安全預設:只聽本機;要開放區網以 HOST=0.0.0.0 顯式 opt-in(共識 #216/#217)
 SENDER_RE = re.compile(r"^[\w一-鿿-]{1,32}$")   # 名字白名單:擋空白與 @,防 parse 怪象
 SSE_KEEPALIVE_SECONDS = 15
 SSE_REPLAY_LIMIT = 10_000                        # 重連回放的上限(review #151-8:魔數常數化)
@@ -272,14 +273,26 @@ class PostMessage(BaseModel):
 
 # ---------- Composition Root ----------
 
-def create_app(port: int | None = None) -> FastAPI:
+def create_app(port: int | None = None, host: str | None = None,
+               public_url: str | None = None) -> FastAPI:
     """組裝一切:store / bus / a2a_layer 在這裡建構、耦合點在這裡宣告。
 
     ingest 是「訊息入流」的唯一入口(REST 發言與 A2A SendMessage 共用):
     鎖 → 樂觀鎖驗證 → reply_to 驗證 → 解析 mentions → 落地 → 廣播 → 通知 A2A 層。
     A2A 完成橋接以 callback 顯式注入 — 一行誠實的呼叫,宣告在組裝處(#151-5 折衷)。
+
+    遠端化(roadmap ①):HOST 控制綁定位址(預設只聽本機);PUBLIC_URL 決定
+    Agent Card 對外宣告的位址 — 開放綁定卻沒設它時,遠端 client 會拿到
+    對它無效的 127.0.0.1,故啟動時印警告(bob #217)。
     """
     port = port or int(os.environ.get("PORT", str(DEFAULT_PORT)))
+    host = host or os.environ.get("HOST", DEFAULT_HOST)
+    public_url = (public_url or os.environ.get("PUBLIC_URL", "")).rstrip("/")
+    base_url = public_url or f"http://127.0.0.1:{port}"
+    if host not in ("127.0.0.1", "localhost") and not public_url:
+        print(f"[hub] WARN HOST={host}(對外開放)但未設 PUBLIC_URL — "
+              f"遠端 client 取得的 Agent Card url 會指向對它無效的 {base_url};"
+              f"建議啟動時設 PUBLIC_URL=http://<你的區網IP>:{port}", file=sys.stderr)
     store = MessageStore(BASE / "chat.jsonl")
     bus = EventBus()
     post_lock = asyncio.Lock()
@@ -305,7 +318,7 @@ def create_app(port: int | None = None) -> FastAPI:
         return msg
 
     a2a_layer = a2a_mod.A2ALayer(ingest=ingest, sanitize_sender=sanitize_sender,
-                                 base_url=f"http://127.0.0.1:{port}")
+                                 base_url=base_url)
 
     app = FastAPI(title="A2A Chatroom Hub")
     app.mount("/static", StaticFiles(directory=BASE / "static"), name="static")
@@ -460,4 +473,5 @@ if __name__ == "__main__":
     import uvicorn
 
     _port = int(os.environ.get("PORT", str(DEFAULT_PORT)))
-    uvicorn.run(create_app(_port), host="127.0.0.1", port=_port)
+    _host = os.environ.get("HOST", DEFAULT_HOST)
+    uvicorn.run(create_app(_port, _host), host=_host, port=_port)

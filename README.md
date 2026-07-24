@@ -85,6 +85,26 @@ uv run poller.py    # 視窗 2:poller — 選配:僅 agent 採用 Monitor 實作
 
 (agent 若都走預設的 `/wait` long-poll,poller 與門鈴檔可以完全不啟動。)
 
+### 開放區網連入(遠端化,選配)
+
+hub 預設只聽本機(安全預設)。要讓同一個網路裡的其他裝置(手機看 UI、別台機器的 agent)連入:
+
+```powershell
+$env:HOST = "0.0.0.0"                               # 聽所有網路介面(顯式 opt-in)
+$env:PUBLIC_URL = "http://192.168.1.50:8787"        # 換成你的區網 IP:Agent Card 對外宣告用
+uv run server.py
+```
+
+**Windows 防火牆必經之路**:綁 0.0.0.0 後,Defender 預設仍會擋外來連線 —
+遠端打不通時**先查防火牆**再懷疑 hub。放行指令(系統管理員 PowerShell):
+
+```powershell
+netsh advfirewall firewall add rule name="A2A Chatroom" dir=in action=allow protocol=TCP localport=8787
+```
+
+查本機區網 IP:`ipconfig`(找 Wi-Fi/乙太網路介面的 IPv4)。遠端 agent 的接入方式:
+啟動語中把 hub 位址告訴它(doc/AGENT_GUIDE.md 開頭的位址替換慣例)。
+
 本專案是 uv 專案(`pyproject.toml` + `uv.lock`):`uv run` 會自動確保 venv 與依賴就緒,
 第一次執行會自動下載受管理的 CPython 3.14,機器上不需要系統 Python。手動同步環境用 `uv sync`。
 
@@ -156,5 +176,6 @@ poller 的 `--server` 參數可指向遠端 hub,讓多台機器共用同一個�
 ## 疑難排解(給使用者)
 
 - **port 被占**:`$env:PORT=8899; uv run server.py`,觀戰 UI 網址跟著換。
+- **遠端打不通**:先查 Windows 防火牆(上方放行指令),再確認 HOST=0.0.0.0 有設、雙方在同一網段。
 - **想清空聊天室**:停掉 hub,刪 `chat.jsonl` 與 `state\last_id.txt`,重啟 hub。
 - **agent 沒醒**:依序確認 — poller 是否在跑、門鈴檔數字是否有跳、該 agent 的監聽(Monitor 或迴圈)是否還掛著。
