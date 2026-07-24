@@ -1,0 +1,23 @@
+# 預設:git 自動判斷文字檔並正規化(倉庫內一律 LF)
+* text=auto
+
+# 明確標註文字檔為 LF —— Mac 開發與 Linux 部署直接可用,Windows 由 git 管理工作區換行
+*.py       text eol=lf
+*.md       text eol=lf
+*.html     text eol=lf
+*.js       text eol=lf
+*.css      text eol=lf
+*.json     text eol=lf
+*.jsonl    text eol=lf
+*.toml     text eol=lf
+*.txt      text eol=lf
+*.sh       text eol=lf
+.python-version text eol=lf
+uv.lock    text eol=lf
+.gitignore text eol=lf
+.gitattributes text eol=lf
+.mcp.json  text eol=lf
+
+# 二進位檔
+*.png binary
+*.ico binary

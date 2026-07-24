@@ -1,0 +1,14 @@
+# ── Python / uv ──
+.venv/
+__pycache__/
+
+# ── Runtime 狀態(不入版控:clone 的人不該繼承我們的即時狀態)──
+state/
+chat.jsonl
+
+# ── 驗收與瀏覽器暫存 ──
+.playwright-mcp/
+*.png
+
+# ── 個人環境設定(Claude Code session 本地設定)──
+.claude/
