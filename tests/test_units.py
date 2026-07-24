@@ -206,12 +206,24 @@ class TestTransitions:
             assert not [t for t in legal if t[0] == terminal], f"{terminal} 不可再轉出"
 
 
-class TestDeadlineClamp:
-    """deadlineSeconds 有上下限 clamp(5s ~ 3600s)— 邊界測試揭露並鎖定此行為。"""
+class TestSpecConstants:
+    """規格值鎖定(bob 突變抽查的教訓):行為測試多用相對寫法(range(LIMIT)),
+    常數改了測試會跟著過 — 規格數字本身需要專人看守,改動必須是「有意識的」
+    (改這裡的斷言 = 明示改規格)。"""
 
-    def test_bounds_exist(self):
+    def test_rate_limit_contract(self):
+        assert RateLimiter.LIMIT == 10
+        assert RateLimiter.WINDOW_SECONDS == 10.0
+
+    def test_deadline_clamp_contract(self):
         assert a2a_mod.MIN_DEADLINE_SECONDS == 5.0
         assert a2a_mod.MAX_DEADLINE_SECONDS == 3600.0
+
+    def test_bell_contract(self):
+        assert bell_mod.RE_RING_SECONDS == 90
+        assert bell_mod.MAX_RINGS == 3
+        assert bell_mod.BELL_TEXT == "[A2A-BELL] cursor updated"
+        assert bell_mod.BELL_SUBMIT == ""  # ConPTY 送出鍵,換行符會讓鈴聲躺在輸入框
 
 
 # ---------- BellState ----------
