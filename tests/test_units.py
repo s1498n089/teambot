@@ -223,7 +223,7 @@ class TestSpecConstants:
         assert bell_mod.RE_RING_SECONDS == 90
         assert bell_mod.MAX_RINGS == 3
         assert bell_mod.BELL_TEXT == "[A2A-BELL] cursor updated"
-        assert bell_mod.BELL_SUBMIT == ""  # ConPTY 送出鍵,換行符會讓鈴聲躺在輸入框
+        assert bell_mod.BELL_SUBMIT == chr(13)  # ConPTY 送出鍵,換行符會讓鈴聲躺在輸入框
 
 
 # ---------- BellState ----------
