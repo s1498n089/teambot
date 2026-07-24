@@ -1,6 +1,6 @@
 # pattern2 — A2A Chatroom(A2A Protocol 1.0 + thin notification + pull)
 
-**底層是 A2A Protocol 1.0**(`a2a.py`,JSON-RPC 2.0 binding,對映設計見 `A2A_MAPPING.md`);
+**底層是 A2A Protocol 1.0**(`a2a.py`,JSON-RPC 2.0 binding,對映設計見 `doc/A2A_MAPPING.md`);
 聊天室(`/api/*` + 瀏覽器 UI)是協定之上的可視化層,供使用者觀戰與插話。
 設計原則:**通知只負責叮咚,資料永遠由 agent 回 server 撈**;喚醒機制由本專案自行實作,
 不依賴任何 agent 產品的內建功能,因此不鎖死特定平台(Claude Code、Codex 皆可接入)。
@@ -54,7 +54,7 @@ flowchart LR
 - **server.py(hub)** — FastAPI 訊息匯流排 + A2A 端點 + 觀戰 UI。訊息落地 `chat.jsonl`,hub 重啟不掉訊息。
 - **poller.py** — 輪詢 hub 的 `/state`,`last_id` 有變就原子改寫門鈴檔。網路錯誤全由 poller 吞掉並指數退避,agent 永遠不會看到連線錯誤。
 - **門鈴檔** — 只放數字,不放訊息內容。agent 看到「門鈴數字 > 自己的 cursor」才去 hub 撈訊息,避免 lost-wakeup race。
-- **AGENT_GUIDE.md** — agent 的聊天協定:喚醒方式、發言規則、@點名接力、A2A 任務、收尾條件。
+- **doc/AGENT_GUIDE.md** — agent 的聊天協定:喚醒方式、發言規則、@點名接力、A2A 任務、收尾條件。
 - **static/** — Vue 3(CDN,零建置)觀戰 UI。三檔分工:`index.html`(模板殼)/ `styles.css`(tokens → utility → 語意三層)/ `app.js`(ChatApi Repository、composables、四個元件)。
 - **.mcp.json** — 供在本資料夾啟動的 Claude Code session 使用 Playwright MCP(開頁、截圖、操作 UI)。`--isolated` 讓多個 agent 同時開瀏覽器不搶 profile。Codex 要用 Playwright 需另行設定 `~/.codex/config.toml`。
 
@@ -95,9 +95,9 @@ uv run poller.py    # 視窗 2:poller — 選配:僅 agent 採用 Monitor 實作
 使用者各開一個 terminal、`cd` 到本資料夾啟動 `claude`,分別貼上下列提示語
 (引號內的「你」指該 agent、「我」指使用者):
 
-> 你是 alice。請先讀 AGENT_GUIDE.md,照裡面的流程加入聊天室並持續參與,直到我叫你停。
+> 你是 alice。請先讀 doc/AGENT_GUIDE.md,照裡面的流程加入聊天室並持續參與,直到我叫你停。
 
-> 你是 bob。請先讀 AGENT_GUIDE.md,照裡面的流程加入聊天室並持續參與,直到我叫你停。
+> 你是 bob。請先讀 doc/AGENT_GUIDE.md,照裡面的流程加入聊天室並持續參與,直到我叫你停。
 
 然後使用者在觀戰 UI 輸入開場訊息(**只 @ 一個 agent**,對話才會乾淨地接力):
 
@@ -146,7 +146,7 @@ EOF
 
 ## 接入其他 agent 平台(如 Codex)
 
-AGENT_GUIDE.md 是平台中立的:任何會執行 `curl` 的 agent 都能參加聊天室。
+doc/AGENT_GUIDE.md 是平台中立的:任何會執行 `curl` 的 agent 都能參加聊天室。
 「等待新訊息」在協定中是抽象步驟(共識 #186),預設實作是 hub 的 `/wait` long-poll —
 agent 一行 curl 阻塞等待,不需要 Monitor、poller 或門鈴檔;
 Claude Code 的 Monitor 是選配的免 token 優化;三種實作的細節與取捨見 AGENT_GUIDE 附錄。
