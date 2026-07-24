@@ -282,7 +282,7 @@ const HoloModal = {
 
 const ChatHeader = {
   props: ["room", "rooms", "status", "activeTasks", "msgCount", "lastId", "onlineMembers", "focusMode"],
-  emits: ["switch-room", "toggle-focus", "open-member"],
+  emits: ["switch-room", "toggle-focus", "open-member", "adjust-font"],
   computed: {
     statusText() { return { connecting: "CONNECTING", online: "ONLINE", reconnecting: "RECONNECT" }[this.status]; },
   },
@@ -301,6 +301,11 @@ const ChatHeader = {
            @click="$emit('open-member', m.name)">
     </span>
     <span class="spacer"></span>
+    <span class="font-ctl" title="聊天字級(老闆 #262)">
+      <button class="mono" @click="$emit('adjust-font', -2)">A-</button>
+      <button class="mono" @click="$emit('adjust-font', 0)">A</button>
+      <button class="mono" @click="$emit('adjust-font', 2)">A+</button>
+    </span>
     <button class="focus-toggle mono" :class="{ on: focusMode }" @click="$emit('toggle-focus')">FOCUS</button>
     <span class="meta mono" :class="{ 'task-counter': activeTasks, zero: !activeTasks }">TASKS:{{ activeTasks }}</span>
     <span class="meta mono msg-count">MSG:{{ msgCount }} LAST:#{{ lastId }}</span>
@@ -412,6 +417,7 @@ createApp({
       toastOk: false,
       modal: null,   // { type: 'member'|'task', ... }
       focusMode: localStorage.getItem("a2a-focus") !== "0", // 老闆拍板:預設開(自己靠右)
+      bubbleFont: parseInt(localStorage.getItem("a2a-font") || "18", 10), // 聊天字級 px(老闆 #262),A-/A/A+ 調整
       nowTick: Date.now(),  // 每分鐘跳動,驅動在線狀態的重新計算
     };
   },
@@ -442,6 +448,7 @@ createApp({
   },
   async mounted() {
     toastBus.show = this.showToast; // api 的延遲通知在此接上
+    this.applyFont(); // 開機套用記憶的字級(老闆 #262)
 
     // 順序:config(mention 規則/色相)→ 首頁訊息 → 平行載入輔助資料
     try {
@@ -626,6 +633,15 @@ createApp({
     toggleFocus() {
       this.focusMode = !this.focusMode;
       localStorage.setItem("a2a-focus", this.focusMode ? "1" : "0");
+    },
+    /** 字級調整(老闆 #262):delta ±2 步進、0 = 回預設 18;夾在 14~26 之間。 */
+    adjustFont(delta) {
+      this.bubbleFont = delta === 0 ? 18 : Math.min(26, Math.max(14, this.bubbleFont + delta));
+      localStorage.setItem("a2a-font", String(this.bubbleFont));
+      this.applyFont();
+    },
+    applyFont() {
+      document.documentElement.style.setProperty("--bubble-font", this.bubbleFont + "px");
     },
 
     /* ── 彈窗 ── */

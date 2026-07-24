@@ -20,6 +20,7 @@
   --mono: "Share Tech Mono", Consolas, monospace;
   --shadow-neon: 0 0 5px var(--green), 0 0 10px rgba(0, 255, 136, 0.25);
   --shadow-neon-cyan: 0 0 5px var(--cyan), 0 0 12px rgba(0, 212, 255, 0.35);
+  --bubble-font: 18px; /* 聊天本文字級(老闆 #262:原 14px 偏小);A-/A/A+ 切換會覆寫,localStorage 記憶 */
 }
 
 /* ═══════════ 2. Utility 層 ═══════════ */
@@ -109,6 +110,13 @@ button.focus-toggle {
   padding: 3px 8px; border-radius: 2px; cursor: pointer;
 }
 button.focus-toggle.on { color: var(--cyan); border-color: var(--cyan); }
+.font-ctl { display: flex; gap: 2px; }
+.font-ctl button {
+  background: none; border: 1px solid var(--border); color: var(--muted);
+  font-family: var(--mono); font-size: 10px; letter-spacing: 0;
+  padding: 3px 6px; border-radius: 2px; cursor: pointer; min-width: 26px;
+}
+.font-ctl button:hover { color: var(--cyan); border-color: var(--cyan); }
 
 /* ═══════════ 5. Timeline 與泡泡 ═══════════ */
 main {
@@ -160,7 +168,7 @@ main {
   border: 1px solid var(--border);
   border-left: 2px solid var(--sender, var(--border)); /* sender 色相描邊 */
   padding: 9px 12px;
-  font-size: 14px; line-height: 1.7;
+  font-size: var(--bubble-font); line-height: 1.7;
   white-space: pre-wrap; word-break: break-word;
   width: fit-content;            /* LINE 感:泡泡貼合內容(bob #133「這輪的靈魂」) */
   max-width: min(600px, 72%);    /* 呼吸感上限(alice #131) */
@@ -225,7 +233,7 @@ textarea {
   flex: 1; resize: none; height: 56px;
   font: inherit; color: var(--text); background: var(--bg);
   border: 1px solid var(--border); border-radius: 2px;
-  padding: 8px 10px; font-size: 14px;
+  padding: 8px 10px; font-size: var(--bubble-font); /* 輸入框跟泡泡同字級,打字所見即所得 */
 }
 textarea:focus { outline: 1px solid var(--cyan); }
 button.send {
@@ -306,7 +314,7 @@ button.send:hover { box-shadow: var(--shadow-neon-cyan); }
   footer { padding: 8px 10px 10px; }
   .gutter { width: 32px; }
   .avatar { width: 28px; height: 28px; }
-  .bubble { font-size: 13px; max-width: 85%; } /* 手機放寬,避免長文過窄 */
+  .bubble { font-size: calc(var(--bubble-font) - 2px); max-width: 85%; } /* 手機放寬,字級隨切換同步縮 2px */
   .meta.msg-count { display: none; }
   .meta.zero { display: none; } /* 手機空間緊:TASKS 為 0 才隱藏(桌面常駐) */
   .online-row { display: none; }

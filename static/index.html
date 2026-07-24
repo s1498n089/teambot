@@ -19,7 +19,8 @@
   <chat-header :room="room" :rooms="rooms" :status="status" :active-tasks="tasks.active"
                :msg-count="messages.length" :last-id="lastId" :online-members="onlineMembers"
                :focus-mode="focusMode"
-               @switch-room="switchRoom" @toggle-focus="toggleFocus" @open-member="openMember">
+               @switch-room="switchRoom" @toggle-focus="toggleFocus" @open-member="openMember"
+               @adjust-font="adjustFont">
   </chat-header>
 
   <div v-if="toast" class="toast mono" :class="{ ok: toastOk }">{{ toast }}</div>
