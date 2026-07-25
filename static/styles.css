@@ -81,7 +81,8 @@ main, .modal-body { scrollbar-width: thin; scrollbar-color: #00d4ff transparent;
 
 /* ═══════════ 4. Header ═══════════ */
 header {
-  display: flex; align-items: center; gap: 10px;
+  /* wrap 是保險絲:字級拉到 28px 或視窗窄到 390px 時,控制項寧可掉第二行也不撐出橫向捲軸 */
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
   padding: 10px 18px;
   border-bottom: 1px solid var(--border);
   background: rgba(18, 18, 26, 0.9);
@@ -96,6 +97,9 @@ header {
 select.room-switch {
   background: var(--bg); color: var(--cyan); border: 1px solid var(--border);
   font-family: var(--mono); font-size: var(--ui-md); padding: 3px 4px; border-radius: 2px;
+  /* select 的固有寬度 = 最長選項寬,房名一長就撐爆 header;
+     min-width:0 解除 flex 項目的預設不收縮,上限封頂後長房名以 … 收尾 */
+  min-width: 0; max-width: min(30vw, 260px); text-overflow: ellipsis;
 }
 .lamp { width: 9px; height: 9px; border-radius: 50%; flex: none; }
 .lamp.online { background: var(--green); box-shadow: 0 0 8px var(--green); }
@@ -226,7 +230,8 @@ footer {
 .reply-bar .x { cursor: pointer; color: var(--muted); }
 .reply-bar .x:hover { color: var(--red); }
 .reply-bar .hint { color: var(--muted); font-size: var(--ui-sm); }
-.input-row { display: flex; gap: 8px; align-items: stretch; }
+/* 同樣的保險絲:窄視窗+大字級時,輸入框寧可整條掉第二行,也不要被壓成一個字寬 */
+.input-row { display: flex; gap: 8px; align-items: stretch; flex-wrap: wrap; }
 /* MSG / TASK 兩態切換:選 TASK 就改走 A2A 協定門(不再是普通聊天訊息) */
 .mode-ctl { display: flex; flex-direction: column; gap: 2px; justify-content: center; }
 .mode-ctl button {
@@ -267,7 +272,8 @@ input.token {
 }
 input.token:focus { outline: 1px solid var(--amber); }
 textarea {
-  flex: 1; resize: none; height: 56px;
+  /* basis 14ch 是換行門檻:同列剩不到 14 個字寬就整條換行,而非繼續壓縮 */
+  flex: 1 1 14ch; min-width: 0; resize: none; height: 56px;
   font: inherit; color: var(--text); background: var(--bg);
   border: 1px solid var(--border); border-radius: 2px;
   padding: 8px 10px; font-size: var(--bubble-font); /* 輸入框跟泡泡同字級,打字所見即所得 */
