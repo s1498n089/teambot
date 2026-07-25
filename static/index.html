@@ -102,10 +102,19 @@
 </div>
 
 <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
-<!-- md.js 要先載入:app.js 會用到它提供的 parseMarkdownBlocks / parseTextOnly。
-     兩個檔案都是傳統的 script 標籤(不是 ES module),這樣不需要任何打包工具,
+<!-- 程式碼依「職責」拆成幾個檔案,載入順序由下往上依賴:
+       md.js         Markdown 解析(不依賴任何人)
+       util.js       小工具:顏色、頭像、時間格式
+       api.js        跟伺服器溝通
+       components.js 畫面上的五個零件(會用到上面三個)
+       app.js        共用狀態與整體編排,最後載入,由它啟動整個畫面
+
+     全部都是傳統的 script 標籤,不是 ES module —— 這樣不需要任何打包工具,
      而且 static/mdtest.html 可以直接用瀏覽器打開就跑測試。 -->
 <script src="/static/md.js"></script>
+<script src="/static/util.js"></script>
+<script src="/static/api.js"></script>
+<script src="/static/components.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>
