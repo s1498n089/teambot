@@ -512,7 +512,7 @@ createApp({
       modal: null,   // { type: 'member'|'task', ... }
       // 鏡頭目標:預設 ME(自己靠右,聊天慣例);舊版存的 "0" 對映到觀戰視角
       focusTarget: FOCUS_ME,
-      bubbleFont: parseInt(localStorage.getItem("a2a-font") || "18", 10), // 聊天字級 px,A-/A/A+ 調整
+      bubbleFont: parseInt(localStorage.getItem("a2a-font") || "20", 10), // 基準字級 px:整個 UI 依此等比縮放
       nowTick: Date.now(),  // 每分鐘跳動,驅動在線狀態的重新計算
     };
   },
@@ -792,9 +792,10 @@ createApp({
       this.focusTarget = target;
       if (this.modal && this.modal.type === "member") this.modal = null;
     },
-    /** 字級調整:delta ±2 步進、0 = 回預設 18;夾在 14~26 之間。 */
+    /** 字級調整:delta ±2 步進、0 = 回預設 20;夾在 14~28 之間。
+        改的是基準值,header/徽章/控制項全跟著等比縮放(styles.css 的 --ui-* 級距)。 */
     adjustFont(delta) {
-      this.bubbleFont = delta === 0 ? 18 : Math.min(26, Math.max(14, this.bubbleFont + delta));
+      this.bubbleFont = delta === 0 ? 20 : Math.min(28, Math.max(14, this.bubbleFont + delta));
       localStorage.setItem("a2a-font", String(this.bubbleFont));
       this.applyFont();
     },

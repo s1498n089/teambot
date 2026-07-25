@@ -20,12 +20,17 @@
   --mono: "Share Tech Mono", Consolas, monospace;
   --shadow-neon: 0 0 5px var(--green), 0 0 10px rgba(0, 255, 136, 0.25);
   --shadow-neon-cyan: 0 0 5px var(--cyan), 0 0 12px rgba(0, 212, 255, 0.35);
-  --bubble-font: 18px; /* 聊天本文字級(原 14px 偏小);A-/A/A+ 切換會覆寫,localStorage 記憶 */
+  --bubble-font: 20px; /* 聊天本文字級;A-/A/A+ 切換會覆寫,localStorage 記憶 */
+  /* UI 字級級距:一律相對本文字級 —— 調 A+ 時整個介面等比放大,不再只有泡泡變大。
+     ui-sm 給徽章/標籤、ui-md 給 metadata 與控制項、ui-lg 給標題與強調數字。 */
+  --ui-sm: calc(var(--bubble-font) * 0.62);
+  --ui-md: calc(var(--bubble-font) * 0.72);
+  --ui-lg: calc(var(--bubble-font) * 0.86);
 }
 
 /* ═══════════ 2. Utility 層 ═══════════ */
 .mono { font-family: var(--mono); }
-.mono-label { font-family: var(--mono); text-transform: uppercase; letter-spacing: 0.15em; font-size: 11px; }
+.mono-label { font-family: var(--mono); text-transform: uppercase; letter-spacing: 0.15em; font-size: var(--ui-md); }
 .chamfer { clip-path: polygon(0 8px, 8px 0, calc(100% - 8px) 0, 100% 8px,
            100% calc(100% - 8px), calc(100% - 8px) 100%, 8px 100%, 0 calc(100% - 8px)); }
 .chamfer-sm { clip-path: polygon(0 5px, 5px 0, calc(100% - 5px) 0, 100% 5px,
@@ -83,32 +88,32 @@ header {
   backdrop-filter: blur(4px);
 }
 .hdr-title {
-  font-size: 14px; letter-spacing: 1px; white-space: nowrap;
+  font-size: var(--ui-lg); letter-spacing: 1px; white-space: nowrap;
   /* 靜態 chromatic aberration:glitch 白名單外唯一允許的常駐色差(標題限定) */
   text-shadow: -1px 0 rgba(255, 0, 255, 0.45), 1px 0 rgba(0, 212, 255, 0.45);
 }
 .hdr-title:hover { animation: glitchShift 0.3s steps(2) 2; } /* glitch 白名單 1/3 */
 select.room-switch {
   background: var(--bg); color: var(--cyan); border: 1px solid var(--border);
-  font-family: var(--mono); font-size: 11px; padding: 3px 4px; border-radius: 2px;
+  font-family: var(--mono); font-size: var(--ui-md); padding: 3px 4px; border-radius: 2px;
 }
 .lamp { width: 9px; height: 9px; border-radius: 50%; flex: none; }
 .lamp.online { background: var(--green); box-shadow: 0 0 8px var(--green); }
 .lamp.connecting { background: var(--amber); }
 .lamp.reconnecting { background: var(--red); animation: lampPulse 1.2s ease-in-out infinite; }
-.lamp-text { font-size: 11px; color: var(--muted); letter-spacing: 1px; }
+.lamp-text { font-size: var(--ui-md); color: var(--muted); letter-spacing: 1px; }
 .lamp-text.glitching { color: var(--red); animation: glitchShift 0.4s steps(2) infinite; } /* 白名單 2/3 */
 .online-row { display: flex; gap: 4px; align-items: center; }
-.online-row img { width: 22px; height: 22px; cursor: pointer; border: 1px solid var(--border); }
+.online-row img { width: calc(var(--bubble-font) * 1.2); height: calc(var(--bubble-font) * 1.2); cursor: pointer; border: 1px solid var(--border); }
 .online-row img:hover { border-color: var(--green); }
 .online-row img.focused { border-width: 2px; }  /* 當前鏡頭主角:頭像描邊染其色相(inline style) */
 .spacer { flex: 1; }
-.meta { color: var(--muted); font-size: 11px; letter-spacing: 1px; white-space: nowrap; }
+.meta { color: var(--muted); font-size: var(--ui-md); letter-spacing: 1px; white-space: nowrap; }
 .task-counter { color: var(--amber); }
 .font-ctl { display: flex; gap: 2px; }
 .font-ctl button {
   background: none; border: 1px solid var(--border); color: var(--muted);
-  font-family: var(--mono); font-size: 10px; letter-spacing: 0;
+  font-family: var(--mono); font-size: var(--ui-sm); letter-spacing: 0;
   padding: 3px 6px; border-radius: 2px; cursor: pointer; min-width: 26px;
 }
 .font-ctl button:hover { color: var(--cyan); border-color: var(--cyan); }
@@ -118,30 +123,30 @@ main {
   flex: 1; overflow-y: auto; padding: 18px 18px 12px;
   display: flex; flex-direction: column; gap: 12px;
 }
-.empty { margin: auto; color: var(--muted); font-size: 13px; text-align: center; line-height: 2; }
-.datesep, .unread-sep { text-align: center; font-size: 11px; letter-spacing: 2px; user-select: none; }
+.empty { margin: auto; color: var(--muted); font-size: var(--ui-lg); text-align: center; line-height: 2; }
+.datesep, .unread-sep { text-align: center; font-size: var(--ui-md); letter-spacing: 2px; user-select: none; }
 .datesep { color: var(--muted); }
 .unread-sep { color: var(--green); text-shadow: 0 0 8px rgba(0, 255, 136, 0.4); }
-.loading-older { text-align: center; color: var(--muted); font-size: 11px; letter-spacing: 2px; }
+.loading-older { text-align: center; color: var(--muted); font-size: var(--ui-md); letter-spacing: 2px; }
 
 .msg { display: flex; gap: 10px; }
 .msg.grouped { margin-top: -8px; } /* 同人連續發言:頭像只出首則,後續緊排 */
-.gutter { width: 40px; flex: none; }
+.gutter { width: calc(var(--bubble-font) * 2.2); flex: none; }
 .avatar {
-  width: 34px; height: 34px; cursor: pointer;
+  width: calc(var(--bubble-font) * 1.9); height: calc(var(--bubble-font) * 1.9); cursor: pointer;
   border: 1.5px solid var(--border); image-rendering: pixelated;
 }
 .avatar:hover { box-shadow: var(--shadow-neon-cyan); }
 /* .msg-body 樣式合併為單一定義 */
 .msg-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; align-items: flex-start; }
 .msg.own .msg-body { align-items: flex-end; } /* FOCUS 模式下自己的泡泡貼右緣 */
-.msg-head { display: flex; align-items: baseline; gap: 8px; font-size: 11px; flex-wrap: wrap; }
-.pill { border: 1px solid; border-radius: 2px; padding: 0 6px; letter-spacing: 1px; font-size: 11px; }
+.msg-head { display: flex; align-items: baseline; gap: 8px; font-size: var(--ui-md); flex-wrap: wrap; }
+.pill { border: 1px solid; border-radius: 2px; padding: 0 6px; letter-spacing: 1px; font-size: var(--ui-md); }
 .pill.unreg { border-style: dashed; opacity: 0.85; }
-.unreg-tag { color: var(--muted); font-size: 10px; letter-spacing: 1px; animation: unregFlicker 4s steps(1) infinite; } /* 白名單 3/3 */
+.unreg-tag { color: var(--muted); font-size: var(--ui-sm); letter-spacing: 1px; animation: unregFlicker 4s steps(1) infinite; } /* 白名單 3/3 */
 .reply-chip { color: var(--cyan); cursor: pointer; letter-spacing: 1px; }
 .reply-chip:hover { text-shadow: 0 0 8px var(--cyan); }
-.task-badge { font-size: 10px; letter-spacing: 1px; border: 1px solid; border-radius: 2px; padding: 0 5px; cursor: pointer; }
+.task-badge { font-size: var(--ui-sm); letter-spacing: 1px; border: 1px solid; border-radius: 2px; padding: 0 5px; cursor: pointer; }
 .task-badge.open { color: var(--amber); border-color: var(--amber); animation: lampPulse 1.4s ease-in-out infinite; }
 .task-badge.done { color: var(--green); border-color: var(--green); }
 .task-badge.failed { color: var(--red); border-color: var(--red); }
@@ -151,7 +156,7 @@ main {
 .time:hover { color: var(--cyan); }
 .hover-btn {
   margin-left: 2px; background: none; border: none; color: var(--muted);
-  font-family: var(--mono); font-size: 10px; letter-spacing: 1px;
+  font-family: var(--mono); font-size: var(--ui-sm); letter-spacing: 1px;
   cursor: pointer; opacity: 0; transition: opacity 0.15s; padding: 2px 4px;
 }
 .msg:hover .hover-btn { opacity: 1; }
@@ -199,14 +204,14 @@ main {
 .newmsg-btn {
   position: absolute; left: 50%; transform: translateX(-50%); bottom: 118px;
   background: var(--panel-2); border: 1px solid var(--green); color: var(--green);
-  font-size: 11px; letter-spacing: 1px; border-radius: 2px; padding: 8px 14px;
+  font-size: var(--ui-md); letter-spacing: 1px; border-radius: 2px; padding: 8px 14px;
   cursor: pointer; box-shadow: 0 0 12px rgba(0, 255, 136, 0.25); z-index: 5;
 }
 .newmsg-btn:hover { box-shadow: 0 0 18px rgba(0, 255, 136, 0.5); }
 .toast {
   position: absolute; top: 56px; left: 50%; transform: translateX(-50%);
   background: var(--panel-2); border: 1px solid var(--red); color: var(--red);
-  font-size: 12px; letter-spacing: 1px; padding: 8px 14px; border-radius: 2px; z-index: 25;
+  font-size: var(--ui-md); letter-spacing: 1px; padding: 8px 14px; border-radius: 2px; z-index: 25;
 }
 .toast.ok { border-color: var(--cyan); color: var(--cyan); }
 
@@ -217,48 +222,48 @@ footer {
   border-top: 1px solid var(--border);
   background: rgba(18, 18, 26, 0.9);
 }
-.reply-bar { color: var(--cyan); font-size: 11px; letter-spacing: 1px; display: flex; align-items: center; gap: 8px; }
+.reply-bar { color: var(--cyan); font-size: var(--ui-md); letter-spacing: 1px; display: flex; align-items: center; gap: 8px; }
 .reply-bar .x { cursor: pointer; color: var(--muted); }
 .reply-bar .x:hover { color: var(--red); }
-.reply-bar .hint { color: var(--muted); font-size: 10px; }
+.reply-bar .hint { color: var(--muted); font-size: var(--ui-sm); }
 .input-row { display: flex; gap: 8px; align-items: stretch; }
 /* MSG / TASK 兩態切換:選 TASK 就改走 A2A 協定門(不再是普通聊天訊息) */
 .mode-ctl { display: flex; flex-direction: column; gap: 2px; justify-content: center; }
 .mode-ctl button {
   background: none; border: 1px solid var(--border); color: var(--muted);
-  font-family: var(--mono); font-size: 9px; letter-spacing: 1px;
+  font-family: var(--mono); font-size: var(--ui-sm); letter-spacing: 1px;
   padding: 2px 6px; border-radius: 2px; cursor: pointer; min-width: 44px;
 }
 .mode-ctl button.on { color: var(--amber); border-color: var(--amber); }
 /* 任務參數列:只在 TASK 模式出現,把「合約要素」攤在眼前 */
 .task-bar {
   display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
-  font-size: 11px; color: var(--muted); letter-spacing: 1px;
+  font-size: var(--ui-md); color: var(--muted); letter-spacing: 1px;
 }
 .task-bar .task-tag {
   color: var(--amber); border: 1px solid var(--amber);
-  border-radius: 2px; padding: 0 5px; font-size: 10px;
+  border-radius: 2px; padding: 0 5px; font-size: var(--ui-sm);
 }
 .task-bar select, .task-bar input.deadline {
   background: var(--bg); color: var(--text); border: 1px solid var(--border);
-  font-family: var(--mono); font-size: 11px; padding: 2px 4px; border-radius: 2px;
+  font-family: var(--mono); font-size: var(--ui-md); padding: 2px 4px; border-radius: 2px;
 }
 .task-bar input.deadline { width: 64px; }
 .task-bar .hint { color: var(--muted); opacity: 0.7; }
 button.send.task { border-color: var(--amber); color: var(--amber); }
 button.send.task:hover { box-shadow: 0 0 12px rgba(255, 184, 108, 0.4); }
 button.send:disabled { opacity: 0.4; cursor: not-allowed; box-shadow: none; }
-.prompt { display: flex; align-items: center; gap: 2px; color: var(--green); font-size: 12px; letter-spacing: 1px; white-space: nowrap; }
+.prompt { display: flex; align-items: center; gap: 2px; color: var(--green); font-size: var(--ui-md); letter-spacing: 1px; white-space: nowrap; }
 input.name {
   background: none; border: none; border-bottom: 1px dashed var(--border);
-  color: var(--green); font-family: var(--mono); font-size: 12px;
+  color: var(--green); font-family: var(--mono); font-size: var(--ui-md);
   text-align: right; padding: 2px 0; min-width: 3ch; /* ch 自適應寬度由 JS 綁定 */
 }
 input.name:focus { outline: none; border-bottom-color: var(--green); }
 input.token {
   width: 90px;
   background: var(--bg); border: 1px solid var(--border); border-radius: 2px;
-  color: var(--amber); font-size: 11px; padding: 4px 6px;
+  color: var(--amber); font-size: var(--ui-md); padding: 4px 6px;
 }
 input.token:focus { outline: 1px solid var(--amber); }
 textarea {
@@ -270,7 +275,7 @@ textarea {
 textarea:focus { outline: 1px solid var(--cyan); }
 button.send {
   background: none; border: 1px solid var(--cyan); color: var(--cyan);
-  font-family: var(--mono); font-size: 12px; letter-spacing: 2px;
+  font-family: var(--mono); font-size: var(--ui-md); letter-spacing: 2px;
   border-radius: 2px; padding: 0 16px; cursor: pointer;
 }
 button.send:hover { box-shadow: var(--shadow-neon-cyan); }
@@ -297,12 +302,12 @@ button.send:hover { box-shadow: var(--shadow-neon-cyan); }
 .modal .corner.bl { bottom: -2px; left: -2px; border-right: none; border-top: none; }
 .modal .corner.br { bottom: -2px; right: -2px; border-left: none; border-top: none; }
 .modal-head { display: flex; align-items: center; gap: 12px; }
-.modal-head img { width: 56px; height: 56px; border: 2px solid var(--border); image-rendering: pixelated; }
+.modal-head img { width: calc(var(--bubble-font) * 3.1); height: calc(var(--bubble-font) * 3.1); border: 2px solid var(--border); image-rendering: pixelated; }
 .modal-title { font-size: 15px; letter-spacing: 2px; }
-.modal-sub { font-size: 11px; color: var(--muted); letter-spacing: 1px; }
+.modal-sub { font-size: var(--ui-md); color: var(--muted); letter-spacing: 1px; }
 .modal-close {
   position: absolute; top: 10px; right: 12px; cursor: pointer;
-  color: var(--muted); font-family: var(--mono); font-size: 14px; background: none; border: none;
+  color: var(--muted); font-family: var(--mono); font-size: var(--ui-lg); background: none; border: none;
 }
 .modal-close:hover { color: var(--red); }
 .modal-body { overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }
@@ -311,20 +316,20 @@ button.send:hover { box-shadow: var(--shadow-neon-cyan); }
   background: rgba(10, 10, 15, 0.5); border: 1px solid var(--border);
   padding: 8px 10px; display: flex; flex-direction: column; gap: 2px;
 }
-.stat .k { font-size: 10px; color: var(--muted); letter-spacing: 1px; }
-.stat .v { font-size: 14px; color: var(--text); }
+.stat .k { font-size: var(--ui-sm); color: var(--muted); letter-spacing: 1px; }
+.stat .v { font-size: var(--ui-lg); color: var(--text); }
 /* presence 三態:亮綠=在場且活躍、半透明綠=在場但安靜(同屬「連線正常」家族)、灰=無連線 */
 .active-dot { color: var(--green); }
 .standby-dot { color: var(--green); opacity: 0.45; }
 .offline-dot { color: var(--muted); }
-.tl-item { display: flex; gap: 10px; font-size: 12px; align-items: baseline; }
-.tl-state { flex: none; letter-spacing: 1px; font-size: 11px; }
+.tl-item { display: flex; gap: 10px; font-size: var(--ui-md); align-items: baseline; }
+.tl-state { flex: none; letter-spacing: 1px; font-size: var(--ui-md); }
 .tl-msg {
   background: rgba(10, 10, 15, 0.5); border: 1px solid var(--border);
-  padding: 6px 10px; font-size: 12px; line-height: 1.6; flex: 1;
+  padding: 6px 10px; font-size: var(--ui-md); line-height: 1.6; flex: 1;
   white-space: pre-wrap; word-break: break-word;
 }
-.modal-link { color: var(--cyan); cursor: pointer; font-size: 11px; letter-spacing: 1px; }
+.modal-link { color: var(--cyan); cursor: pointer; font-size: var(--ui-md); letter-spacing: 1px; }
 .modal-link:hover { text-shadow: 0 0 8px var(--cyan); }
 
 /* ═══════════ 9. 動畫 ═══════════ */
