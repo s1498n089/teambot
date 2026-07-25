@@ -370,32 +370,64 @@ AI 之間那封「信」長什麼樣。
 
 **階段一:沒有 UI 的時候 —— 自己敲協定的門。**
 聊天室的發言走的是「聊天門」(`POST /api/rooms/main/messages`),
-派任務要走「協定門」(`POST /agents/<對方>/a2a`)。用 PowerShell 長這樣:
+派任務要走「協定門」(`POST /agents/<對方>/a2a`)。
 
-```powershell
-$target = "bob"                        # 交辦給誰
-$text   = "幫我查 XXX,一句話回覆"      # 任務內容
-$me     = "user"                       # 你是誰
+把下面這段存成 `send_task.py`,然後用 `uv run send_task.py` 執行
+(這個專案的 Python 一律用 uv 跑,見 README):
 
-$body = @{
-  jsonrpc = "2.0"; id = 1; method = "SendMessage"
-  params = @{
-    message = @{
-      role = "ROLE_USER"; parts = @(@{ text = $text })
-      messageId = [guid]::NewGuid().ToString(); contextId = "main"   # contextId = 房間名
-    }
-    configuration = @{ returnImmediately = $true }   # 不卡住等回覆
-    metadata = @{ senderName = $me; deadlineSeconds = 300 }
-  }
-} | ConvertTo-Json -Depth 10
+```python
+import json
+import urllib.request
+import uuid
 
-Invoke-RestMethod -Uri "http://127.0.0.1:8787/agents/$target/a2a" -Method Post `
-  -ContentType "application/json; charset=utf-8" -Body ([System.Text.Encoding]::UTF8.GetBytes($body))
+TARGET = "bob"                    # 交辦給誰
+TEXT = "幫我查 XXX,一句話回覆"    # 任務內容
+ME = "user"                       # 你是誰
+ROOM = "main"                     # 哪個房間
+
+body = {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "SendMessage",
+    "params": {
+        "message": {
+            "role": "ROLE_USER",
+            "parts": [{"text": TEXT}],
+            "messageId": str(uuid.uuid4()),   # 隨機編號,每則不同
+            "contextId": ROOM,                # contextId 就是房間名
+        },
+        "configuration": {"returnImmediately": True},   # 不卡住等回覆
+        "metadata": {"senderName": ME, "deadlineSeconds": 300},
+    },
+}
+
+# 中文要走這條路:ensure_ascii=False 保留原字,再自己編成 UTF-8
+data = json.dumps(body, ensure_ascii=False).encode("utf-8")
+
+request = urllib.request.Request(
+    f"http://127.0.0.1:8787/agents/{TARGET}/a2a",
+    data=data,
+    headers={"Content-Type": "application/json; charset=utf-8"},
+    method="POST",
+)
+
+with urllib.request.urlopen(request) as response:
+    result = json.load(response)
+
+print(json.dumps(result, ensure_ascii=False, indent=2))
 ```
 
-三個要點:`returnImmediately = $true` 讓你馬上拿到任務編號(設 `$false` 會**卡住**
-等對方回覆或逾時);中文要走 `UTF8.GetBytes` 否則亂碼;`deadlineSeconds` 是逾時保護,
-到點沒完成就自動 FAILED,你不會無限期空等。
+**三個要點**:
+
+1. `returnImmediately: True` 讓你馬上拿到任務編號。設成 `False` 會**卡住**,
+   一直等到對方回覆或逾時為止 —— 終端機就停在那裡不動了。
+2. **中文要走 `ensure_ascii=False` 再自己編 UTF-8**。少了這步中文會變成
+   `幫我` 那種轉義碼,或者直接在傳輸時亂掉。
+3. `deadlineSeconds` 是逾時保護,到點沒完成就自動標記 FAILED,
+   你不會無限期空等一個永遠不會回來的任務。
+
+> 這段刻意只用 Python 內建的東西(`json` / `urllib` / `uuid`),
+> 不需要 `pip install` 任何套件 —— 複製貼上就能跑。
 
 **階段二:有了 UI 之後 —— 那顆按鈕做的是同一件事。**
 輸入框左邊有 `MSG` / `TASK` 兩態切換:切到 **TASK** 會多出一列「交辦給誰 + 逾時秒數」,
