@@ -76,22 +76,119 @@ function mentionRegex() {
   }
   return _mentionCache.rx;
 }
-function tokenize(text) {
-  const out = [];
+/** 裸文字 → link / mention / text(markdown 語法之外的最後一關,永遠是它收尾)。
+    mods 是「繼承下來的字體修飾」,見 inlineTokens 的扁平化說明。 */
+function plainTokens(text, mods, out) {
   for (const chunk of text.split(URL_RE)) {
     if (!chunk) continue;
     if (/^https?:\/\//.test(chunk)) {
       const m = chunk.match(URL_TRAIL_RE);
-      out.push({ t: "link", v: m[1] });
-      if (m[2]) out.push({ t: "text", v: m[2] });
+      out.push({ t: "link", v: m[1], href: m[1], ...mods });
+      if (m[2]) out.push({ t: "text", v: m[2], ...mods });
       continue;
     }
     for (const p of chunk.split(mentionRegex())) {
       if (!p) continue;
-      out.push({ t: p.startsWith("@") && p.length > 1 ? "mention" : "text", v: p });
+      out.push({ t: p.startsWith("@") && p.length > 1 ? "mention" : "text", v: p, ...mods });
     }
   }
+}
+
+/* ── Markdown(受限子集)──────────────────────────────────────────────
+   為什麼自己寫而不用 marked + DOMPurify:渲染 markdown 等於把「別人發的文字」
+   變成「在我瀏覽器裡跑的 HTML」,而 localStorage 裡放著 token。這裡的 renderer
+   只吐**資料結構**,模板全程走 Vue 插值({{ }} 自動 escape、絕不 v-html)——
+   於是 XSS 不是「被過濾掉」,而是**沒有產生 HTML 的路徑可走**。
+   代價是功能只做子集;parser 有 bug 最慘是排版跑掉,不會變成執行別人的 script。
+   附帶好處:零外部依賴,沒有外網的區網機器照樣渲染得出來。 */
+
+// 行內語法,左優先:code 先吃(其內不再解析)、strong 先於 em(避免 ** 被拆成兩個 *)。
+// strong/em 兩端都要求非空白字元,"5 * 3 * 2" 這種算式才不會被誤判成斜體。
+const INLINE_RE = /(`[^`\n]+`)|(\*\*\S(?:[^*]*\S)?\*\*)|(\*\S(?:[^*\n]*\S)?\*)|(\[[^\]\n]*\]\([^)\s]+\))/;
+const MD_LINK_RE = /^\[([^\]\n]*)\]\(([^)\s]+)\)$/;
+const SAFE_HREF_RE = /^https?:\/\//i;  // scheme 白名單:擋 javascript: / data:
+
+/** 行內解析。刻意輸出**扁平**陣列而非巢狀樹:粗體/斜體改用 token 上的 b/i 旗標表示,
+    於是「**粗體裡有 `code`**」也只是一顆帶 b 的 code token。扁平換來三件事 ——
+    模板不必遞迴、沒有深度炸彈、渲染分支一眼看完。 */
+function inlineTokens(text, mods) {
+  mods = mods || {};
+  const out = [];
+  let rest = text, m;
+  while ((m = INLINE_RE.exec(rest))) {
+    if (m.index) plainTokens(rest.slice(0, m.index), mods, out);
+    const raw = m[0];
+    if (m[1]) {
+      out.push({ t: "code", v: raw.slice(1, -1), ...mods });          // `code`:內容原樣,不再解析
+    } else if (m[2]) {
+      out.push(...inlineTokens(raw.slice(2, -2), { ...mods, b: true }));
+    } else if (m[3]) {
+      out.push(...inlineTokens(raw.slice(1, -1), { ...mods, i: true }));
+    } else {
+      const md = raw.match(MD_LINK_RE);
+      if (md && SAFE_HREF_RE.test(md[2])) {
+        out.push({ t: "link", v: md[1] || md[2], href: md[2], ...mods });
+      } else {
+        plainTokens(raw, mods, out);  // scheme 不合白名單 → 當普通文字,不生連結
+      }
+    }
+    rest = rest.slice(m.index + raw.length);
+  }
+  if (rest) plainTokens(rest, mods, out);
   return out;
+}
+
+const FENCE_RE = /^\s*```(.*)$/;
+const LIST_RE = /^\s*(?:[-*+]|\d+\.)\s+(.*)$/;
+const QUOTE_RE = /^\s*>\s?(.*)$/;
+
+/** 塊解析。刻意**不做 # 標題** —— 聊天室裡打 "# xxx" 十次有九次是在貼 shell 註解,
+    渲染成超大字是幫倒忙(bob 的觀察)。
+    段落內的單換行**就是換行**(lines 陣列):標準 markdown 會把它吃掉,
+    但聊天訊息裡按 Enter 就是要換行,照標準做反而是老闆說的「黏在一起」。 */
+function parseBlocks(text) {
+  const lines = String(text).split("\n");
+  const blocks = [];
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    const fence = line.match(FENCE_RE);
+    if (fence) {                                   // ``` 圍籬:內容原樣,不解析任何語法
+      const lang = fence[1].trim();
+      const body = [];
+      i++;
+      while (i < lines.length && !FENCE_RE.test(lines[i])) body.push(lines[i++]);
+      i++;                                         // 吃掉收尾的 ```(沒有就是讀到結尾,一樣收工)
+      blocks.push({ t: "code", lang, v: body.join("\n") });
+    } else if (LIST_RE.test(line)) {
+      const ordered = /^\s*\d+\./.test(line);
+      const items = [];
+      while (i < lines.length && LIST_RE.test(lines[i])) {
+        items.push(inlineTokens(lines[i].match(LIST_RE)[1]));
+        i++;
+      }
+      blocks.push({ t: "list", ordered, items });
+    } else if (QUOTE_RE.test(line) && line.trim().startsWith(">")) {
+      const rows = [];
+      while (i < lines.length && lines[i].trim().startsWith(">")) {
+        rows.push(inlineTokens(lines[i].match(QUOTE_RE)[1]));
+        i++;
+      }
+      blocks.push({ t: "quote", rows });
+    } else if (!line.trim()) {
+      i++;                                         // 空行只負責分段,不留痕跡
+    } else {
+      const rows = [];
+      while (i < lines.length && lines[i].trim()
+             && !FENCE_RE.test(lines[i]) && !LIST_RE.test(lines[i])
+             && !lines[i].trim().startsWith(">")) {
+        rows.push(inlineTokens(lines[i]));
+        i++;
+      }
+      blocks.push({ t: "p", rows });
+    }
+  }
+  return blocks;
 }
 
 function fmtTime(ts) { return new Date(ts).toLocaleTimeString("en-GB", { hour12: false }); }
@@ -356,14 +453,22 @@ const ChatHeader = {
   </header>`,
 };
 
+/** 行內 token 的渲染器。因為 inlineTokens 吐的是扁平陣列,這裡不需要遞迴自我引用 ——
+    粗體/斜體是 token 上的旗標,不是巢狀結構。每個分支都用 {{ }} 插值(Vue 自動 escape)。 */
+const MdInline = {
+  props: ["ts"],
+  template: `<template v-for="(p, i) in ts" :key="i"><span v-if="p.t === 'mention'" class="mention" :class="{ 'md-b': p.b, 'md-i': p.i }">{{ p.v }}</span><a v-else-if="p.t === 'link'" :href="p.href" target="_blank" rel="noopener noreferrer" :class="{ 'md-b': p.b, 'md-i': p.i }">{{ p.v }}</a><code v-else-if="p.t === 'code'" class="md-code-inline" :class="{ 'md-b': p.b, 'md-i': p.i }">{{ p.v }}</code><span v-else :class="{ 'md-b': p.b, 'md-i': p.i }">{{ p.v }}</span></template>`,
+};
+
 const MessageItem = {
+  components: { "md-inline": MdInline },
   props: ["m", "grouped", "me", "focusName", "taskInfo"],
   emits: ["reply", "jump", "open-member", "open-task", "copy", "anchor"],
   computed: {
     /** 靠右的是「鏡頭主角」而非固定的自己 — focusName 由 root 解析(ME/具名/null)。 */
     isFocused() { return !!this.focusName && this.m.from === this.focusName; },
-    /** tokenize 內部讀 rt.mentionPattern(reactive)→ config 熱替換會觸發重算 */
-    tokens() { return tokenize(this.m.text); },
+    /** 內部讀 rt.mentionPattern(reactive)→ config 熱替換會觸發重算 */
+    blocks() { return parseBlocks(this.m.text); },
     senderColor() { return colorHexOf(this.m.from); },
     registered() { return this.m.from in rt.palette; },
     /** 綠邊永遠關於「我」:警示不因換鏡頭而失效(語意色獨占鐵律)。 */
@@ -399,7 +504,7 @@ const MessageItem = {
         <button class="hover-btn mono" @click="$emit('copy', m.text)">⧉ COPY</button>
         <button class="hover-btn mono" @click="$emit('reply', m.id)">⟲ REPLY</button>
       </div>
-      <div class="bubble chamfer-sm"><template v-for="(p, i) in tokens" :key="i"><span v-if="p.t === 'mention'" class="mention">{{ p.v }}</span><a v-else-if="p.t === 'link'" :href="p.v" target="_blank" rel="noopener noreferrer">{{ p.v }}</a><span v-else>{{ p.v }}</span></template></div>
+      <div class="bubble chamfer-sm"><template v-for="(b, bi) in blocks" :key="bi"><pre v-if="b.t === 'code'" class="md-code"><code>{{ b.v }}</code></pre><component v-else-if="b.t === 'list'" :is="b.ordered ? 'ol' : 'ul'" class="md-list"><li v-for="(it, ii) in b.items" :key="ii"><md-inline :ts="it"></md-inline></li></component><blockquote v-else-if="b.t === 'quote'" class="md-quote"><template v-for="(r, ri) in b.rows" :key="ri"><br v-if="ri"><md-inline :ts="r"></md-inline></template></blockquote><p v-else class="md-p"><template v-for="(r, ri) in b.rows" :key="ri"><br v-if="ri"><md-inline :ts="r"></md-inline></template></p></template></div>
     </div>
   </div>`,
 };

@@ -173,10 +173,36 @@ main {
   border-left: 2px solid var(--sender, var(--border)); /* sender 色相描邊 */
   padding: 9px 12px;
   font-size: var(--bubble-font); line-height: 1.7;
-  white-space: pre-wrap; word-break: break-word;
+  /* 不能用 white-space: pre-wrap —— 內容改走塊模型(段落/清單/code)後,
+     模板本身的縮排空白會被 pre-wrap 一併顯示出來。換行改由 <br> 負責。 */
+  word-break: break-word;
   width: fit-content;            /* LINE 感:泡泡貼合內容 */
   max-width: min(600px, 72%);    /* 呼吸感上限 */
 }
+
+/* ── Markdown 塊(受限子集;renderer 在 app.js,只吐資料不吐 HTML)── */
+.bubble > :last-child { margin-bottom: 0; }   /* 泡泡底部不留多餘空隙 */
+.md-p, .md-list, .md-code, .md-quote { margin: 0 0 0.65em; }
+.md-list { padding-left: 1.5em; }
+.md-list li { margin: 0.15em 0; }
+.md-quote {
+  border-left: 2px solid var(--border); padding-left: 0.8em;
+  color: var(--muted); font-style: italic;
+}
+.md-code {
+  background: var(--bg); border: 1px solid var(--border); border-radius: 2px;
+  padding: 8px 10px; overflow-x: auto;          /* 超寬 code 自己捲,不撐爆泡泡 */
+  font-family: var(--mono); font-size: calc(var(--bubble-font) * 0.85);
+  white-space: pre-wrap; word-break: break-word;  /* 保留縮排,長行仍折回來 */
+}
+.md-code code { font: inherit; }
+.md-code-inline {
+  background: var(--bg); border: 1px solid var(--border); border-radius: 2px;
+  padding: 0.05em 0.35em; font-family: var(--mono);
+  font-size: calc(var(--bubble-font) * 0.88); color: var(--cyan);
+}
+.md-b { font-weight: bold; }
+.md-i { font-style: italic; }
 /* 被點名的訊息:左緣語意綠 glow(clip-path 內只能用 inset shadow,外部 glow 會被切掉) */
 /* 鏡頭主角被點名:用主角色相標記,不搶語意綠 — 綠永遠只代表「關於我」。
    寫在 ping-me 之前:同一則訊息若兩者皆中,綠(關於我)覆蓋主角色相。 */
