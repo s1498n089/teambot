@@ -40,7 +40,7 @@
 <script src="md.js"></script>
 <script>
 // 測試時用的 @某人 規則,跟伺服器預設值一致
-var MENTION_PATTERN = "(?<![A-Za-z0-9_@.-])(@[\\w一-鿿-]+)";
+const MENTION_PATTERN = "(?<![A-Za-z0-9_@.-])(@[\\w一-鿿-]+)";
 
 /**
  * 把解析結果攤平成一串文字,方便檢查「有沒有把某段字原封不動保留下來」。
@@ -48,17 +48,17 @@ var MENTION_PATTERN = "(?<![A-Za-z0-9_@.-])(@[\\w一-鿿-]+)";
  * @returns {string} 所有文字接起來
  */
 function flattenText(blocks) {
-  var result = "";
+  let result = "";
 
-  for (var i = 0; i < blocks.length; i++) {
-    var block = blocks[i];
+  for (let i = 0; i < blocks.length; i++) {
+    const block = blocks[i];
 
     if (block.type === "code") {
       result = result + block.text;
       continue;
     }
 
-    var groups = [];
+    let groups = [];
     if (block.type === "paragraph" || block.type === "quote") {
       groups = block.lines;
     } else if (block.type === "list") {
@@ -69,8 +69,8 @@ function flattenText(blocks) {
       groups = block.header.concat.apply(block.header, block.rows);
     }
 
-    for (var j = 0; j < groups.length; j++) {
-      for (var k = 0; k < groups[j].length; k++) {
+    for (let j = 0; j < groups.length; j++) {
+      for (let k = 0; k < groups[j].length; k++) {
         result = result + groups[j][k].text;
       }
     }
@@ -80,11 +80,11 @@ function flattenText(blocks) {
 
 /** 把所有行內元素收集成一個陣列,方便逐顆檢查。 */
 function collectTokens(blocks) {
-  var tokens = [];
+  const tokens = [];
 
-  for (var i = 0; i < blocks.length; i++) {
-    var block = blocks[i];
-    var groups = [];
+  for (let i = 0; i < blocks.length; i++) {
+    const block = blocks[i];
+    let groups = [];
 
     if (block.type === "paragraph" || block.type === "quote") {
       groups = block.lines;
@@ -96,8 +96,8 @@ function collectTokens(blocks) {
       groups = block.header.concat.apply(block.header, block.rows);
     }
 
-    for (var j = 0; j < groups.length; j++) {
-      for (var k = 0; k < groups[j].length; k++) {
+    for (let j = 0; j < groups.length; j++) {
+      for (let k = 0; k < groups[j].length; k++) {
         tokens.push(groups[j][k]);
       }
     }
@@ -107,8 +107,8 @@ function collectTokens(blocks) {
 
 /** 這串元素裡有沒有連結?ok */
 function hasLinkTo(blocks, url) {
-  var tokens = collectTokens(blocks);
-  for (var i = 0; i < tokens.length; i++) {
+  const tokens = collectTokens(blocks);
+  for (let i = 0; i < tokens.length; i++) {
     if (tokens[i].type === "link" && tokens[i].href === url) {
       return true;
     }
@@ -118,8 +118,8 @@ function hasLinkTo(blocks, url) {
 
 /** 有沒有任何連結? */
 function hasAnyLink(blocks) {
-  var tokens = collectTokens(blocks);
-  for (var i = 0; i < tokens.length; i++) {
+  const tokens = collectTokens(blocks);
+  for (let i = 0; i < tokens.length; i++) {
     if (tokens[i].type === "link") {
       return true;
     }
@@ -129,7 +129,7 @@ function hasAnyLink(blocks) {
 
 // ── 檢查項目清單 ──────────────────────────────────────────────────────
 // 每一項:name(名稱)、input(輸入的文字)、run(檢查函式,回傳 true 代表通過)
-var checks = [
+const checks = [
 
   // ---- 安全:這幾項是最重要的,一旦失守就會出大事 ----
   {
@@ -169,7 +169,7 @@ var checks = [
     input: "![外部圖](https://example.com/x.png)",
     note: "驚嘆號要吃掉;絕不能產生會自動載圖的東西",
     run: function (blocks) {
-      var tokens = collectTokens(blocks);
+      const tokens = collectTokens(blocks);
       return tokens.length === 1
         && tokens[0].type === "link"
         && tokens[0].text === "外部圖"
@@ -199,9 +199,9 @@ var checks = [
     name: "@某人 仍然被認出來",
     input: "麻煩 @bob 看一下",
     run: function (blocks) {
-      var tokens = collectTokens(blocks);
-      var found = false;
-      for (var i = 0; i < tokens.length; i++) {
+      const tokens = collectTokens(blocks);
+      let found = false;
+      for (let i = 0; i < tokens.length; i++) {
         if (tokens[i].type === "mention" && tokens[i].text === "@bob") {
           found = true;
         }
@@ -230,7 +230,7 @@ var checks = [
     input: "5 * 3 * 2 = 30",
     note: "星號兩側是空白就不算語法",
     run: function (blocks) {
-      var tokens = collectTokens(blocks);
+      const tokens = collectTokens(blocks);
       return tokens.length === 1 && tokens[0].italic === false;
     }
   },
@@ -268,9 +268,9 @@ var checks = [
     input: "**粗體裡有 `code` 喔**",
     note: "粗體與斜體是開關不是巢狀,所以 code 這顆自己會帶著 bold",
     run: function (blocks) {
-      var tokens = collectTokens(blocks);
-      var codeToken = null;
-      for (var i = 0; i < tokens.length; i++) {
+      const tokens = collectTokens(blocks);
+      let codeToken = null;
+      for (let i = 0; i < tokens.length; i++) {
         if (tokens[i].type === "code") {
           codeToken = tokens[i];
         }
@@ -369,10 +369,10 @@ var checks = [
     input: "「**粗體**」與(`code`)相鄰",
     note: "中文標點不能吃掉語法邊界",
     run: function (blocks) {
-      var tokens = collectTokens(blocks);
-      var hasBold = false;
-      var hasCode = false;
-      for (var i = 0; i < tokens.length; i++) {
+      const tokens = collectTokens(blocks);
+      let hasBold = false;
+      let hasCode = false;
+      for (let i = 0; i < tokens.length; i++) {
         if (tokens[i].bold === true) { hasBold = true; }
         if (tokens[i].type === "code") { hasCode = true; }
       }
@@ -386,9 +386,9 @@ var checks = [
     input: "**這裡不該變粗體**",
     note: "parseTextOnly 只認 @某人 與網址",
     run: function () {
-      var tokens = parseTextOnly("**這裡不該變粗體**", MENTION_PATTERN);
-      var allPlain = true;
-      for (var i = 0; i < tokens.length; i++) {
+      const tokens = parseTextOnly("**這裡不該變粗體**", MENTION_PATTERN);
+      let allPlain = true;
+      for (let i = 0; i < tokens.length; i++) {
         if (tokens[i].bold === true) { allPlain = false; }
       }
       return allPlain;
@@ -398,10 +398,10 @@ var checks = [
     name: "原文模式仍然保留 @某人 與網址",
     input: "@bob 看 https://example.com",
     run: function () {
-      var tokens = parseTextOnly("@bob 看 https://example.com", MENTION_PATTERN);
-      var hasMention = false;
-      var hasLink = false;
-      for (var i = 0; i < tokens.length; i++) {
+      const tokens = parseTextOnly("@bob 看 https://example.com", MENTION_PATTERN);
+      let hasMention = false;
+      let hasLink = false;
+      for (let i = 0; i < tokens.length; i++) {
         if (tokens[i].type === "mention") { hasMention = true; }
         if (tokens[i].type === "link") { hasLink = true; }
       }
@@ -411,17 +411,17 @@ var checks = [
 ];
 
 // ── 執行所有檢查並把結果畫出來 ────────────────────────────────────────
-var passedCount = 0;
-var failedCount = 0;
-var rowsHtml = "";
+let passedCount = 0;
+let failedCount = 0;
+let rowsHtml = "";
 
-for (var i = 0; i < checks.length; i++) {
-  var check = checks[i];
-  var passed = false;
-  var errorMessage = "";
+for (let i = 0; i < checks.length; i++) {
+  const check = checks[i];
+  let passed = false;
+  let errorMessage = "";
 
   try {
-    var blocks = parseMarkdownBlocks(check.input, MENTION_PATTERN);
+    const blocks = parseMarkdownBlocks(check.input, MENTION_PATTERN);
     passed = check.run(blocks) === true;
   } catch (error) {
     passed = false;
@@ -434,9 +434,9 @@ for (var i = 0; i < checks.length; i++) {
     failedCount = failedCount + 1;
   }
 
-  var resultClass = passed ? "pass" : "fail";
-  var resultText = passed ? "PASS" : "FAIL";
-  var note = check.note === undefined ? "" : check.note;
+  const resultClass = passed ? "pass" : "fail";
+  const resultText = passed ? "PASS" : "FAIL";
+  const note = check.note === undefined ? "" : check.note;
 
   // 這一頁只顯示我們自己寫死的測試資料,不處理外來輸入,所以直接組字串
   rowsHtml = rowsHtml
@@ -448,7 +448,7 @@ for (var i = 0; i < checks.length; i++) {
 
 document.getElementById("rows").innerHTML = rowsHtml;
 
-var summary = document.getElementById("summary");
+const summary = document.getElementById("summary");
 if (failedCount === 0) {
   summary.className = "summary all-pass";
   summary.textContent = "全部通過:" + passedCount + " 項";

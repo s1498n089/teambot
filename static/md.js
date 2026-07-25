@@ -50,10 +50,10 @@
    ─────────────────────────────────────────────────────────────────────── */
 
 // 網址。只吃 ASCII 字元,所以中文和全形標點會自然成為網址的結尾。
-var URL_PATTERN = /(https?:\/\/[A-Za-z0-9\-._~:/?#@!$&*+;=%()\[\]]+)/g;
+const URL_PATTERN = /(https?:\/\/[A-Za-z0-9\-._~:/?#@!$&*+;=%()\[\]]+)/g;
 
 // 把網址結尾的標點剝回一般文字。例如「請看 https://a.com。」的句號不屬於網址。
-var URL_TRAILING_PUNCTUATION = /^(.*?)([.,;:!?)\]]*)$/;
+const URL_TRAILING_PUNCTUATION = /^(.*?)([.,;:!?)\]]*)$/;
 
 // 行內語法。放在同一條規則裡用「或」串起來,誰先出現就先處理誰。
 // 順序有意義:
@@ -61,7 +61,7 @@ var URL_TRAILING_PUNCTUATION = /^(.*?)([.,;:!?)\]]*)$/;
 //   2. **粗體** 要排在 *斜體* 前面 —— 否則 ** 會被當成兩個單獨的 *
 //   3. 粗體與斜體的前後都要求「非空白字元」,這樣「5 * 3 * 2」這種算式
 //      才不會被誤認成斜體
-var INLINE_SYNTAX = new RegExp(
+const INLINE_SYNTAX = new RegExp(
   "(`[^`\\n]+`)" +                      // 群組 1:`程式碼`
   "|(\\*\\*\\S(?:[^*]*\\S)?\\*\\*)" +   // 群組 2:**粗體**
   "|(\\*\\S(?:[^*\\n]*\\S)?\\*)" +      // 群組 3:*斜體*
@@ -69,24 +69,24 @@ var INLINE_SYNTAX = new RegExp(
 );
 
 // 把 [文字](網址) 拆成「文字」和「網址」兩部分。開頭的驚嘆號(圖片語法)一起吃掉。
-var LINK_PARTS = /^!?\[([^\]\n]*)\]\(([^)\s]+)\)$/;
+const LINK_PARTS = /^!?\[([^\]\n]*)\]\(([^)\s]+)\)$/;
 
 // 允許變成連結的網址開頭。只允許 http 與 https:
 // 像 javascript: 開頭的網址點下去會執行程式碼,絕對不能放行。
-var SAFE_URL_PREFIX = /^https?:\/\//i;
+const SAFE_URL_PREFIX = /^https?:\/\//i;
 
 // 整行才成立的語法(必須從行首開始,前面最多只能有空白)
-var CODE_FENCE = /^\s*```(.*)$/;                    // ``` 開始或結束一段程式碼
-var HEADING = /^\s*(#{1,6})\s+(.*)$/;               // # 標題,井字號數量就是層級
-var LIST_ITEM = /^\s*(?:[-*+]|\d+\.)\s+(.*)$/;      // - 項目 或 1. 項目
-var QUOTE_LINE = /^\s*>\s?(.*)$/;                   // > 引用
-var TABLE_ROW = /^\s*\|(.*)\|\s*$/;                 // | 欄 | 欄 |
-var TABLE_SEPARATOR = /^\s*\|[\s:|-]+\|\s*$/;       // |---|---| 這種分隔線
+const CODE_FENCE = /^\s*```(.*)$/;                    // ``` 開始或結束一段程式碼
+const HEADING = /^\s*(#{1,6})\s+(.*)$/;               // # 標題,井字號數量就是層級
+const LIST_ITEM = /^\s*(?:[-*+]|\d+\.)\s+(.*)$/;      // - 項目 或 1. 項目
+const QUOTE_LINE = /^\s*>\s?(.*)$/;                   // > 引用
+const TABLE_ROW = /^\s*\|(.*)\|\s*$/;                 // | 欄 | 欄 |
+const TABLE_SEPARATOR = /^\s*\|[\s:|-]+\|\s*$/;       // |---|---| 這種分隔線
 
 // 建立 @某人 的比對規則會花一點時間,所以把上一次的結果存起來重複使用。
 // 只有規則字串真的變了(伺服器換設定)才重新建立。
-var cachedMentionSource = null;
-var cachedMentionRegex = null;
+let cachedMentionSource = null;
+let cachedMentionRegex = null;
 
 /**
  * 取得「@某人」的比對規則。
@@ -124,7 +124,7 @@ function getMentionRegex(mentionPattern) {
  * @returns {object} 一顆行內元素
  */
 function makeInlineToken(type, text, styles, href) {
-  var token = {};
+  const token = {};
   token.type = type;
   token.text = text;
   token.bold = styles.bold === true;
@@ -143,7 +143,7 @@ function makeInlineToken(type, text, styles, href) {
  * @returns {object} 新的一份樣式開關
  */
 function withStyleTurnedOn(styles, name) {
-  var copy = {};
+  const copy = {};
   copy.bold = styles.bold === true;
   copy.italic = styles.italic === true;
   copy[name] = true;
@@ -167,10 +167,10 @@ function withStyleTurnedOn(styles, name) {
  */
 function appendPlainText(text, styles, mentionPattern, output) {
   // 用網址規則把文字切開。因為規則有括號,切開後網址本身也會留在結果裡。
-  var pieces = text.split(URL_PATTERN);
+  const pieces = text.split(URL_PATTERN);
 
-  for (var i = 0; i < pieces.length; i++) {
-    var piece = pieces[i];
+  for (let i = 0; i < pieces.length; i++) {
+    const piece = pieces[i];
 
     if (piece === "" || piece === undefined) {
       continue;
@@ -179,9 +179,9 @@ function appendPlainText(text, styles, mentionPattern, output) {
     // 這一段是不是網址?
     if (/^https?:\/\//.test(piece)) {
       // 把結尾的標點剝掉,例如「https://a.com。」的句號不屬於網址
-      var parts = piece.match(URL_TRAILING_PUNCTUATION);
-      var urlText = parts[1];
-      var trailingPunctuation = parts[2];
+      const parts = piece.match(URL_TRAILING_PUNCTUATION);
+      const urlText = parts[1];
+      const trailingPunctuation = parts[2];
 
       output.push(makeInlineToken("link", urlText, styles, urlText));
 
@@ -192,16 +192,16 @@ function appendPlainText(text, styles, mentionPattern, output) {
     }
 
     // 不是網址,再看看裡面有沒有 @某人
-    var subPieces = piece.split(getMentionRegex(mentionPattern));
+    const subPieces = piece.split(getMentionRegex(mentionPattern));
 
-    for (var j = 0; j < subPieces.length; j++) {
-      var subPiece = subPieces[j];
+    for (let j = 0; j < subPieces.length; j++) {
+      const subPiece = subPieces[j];
 
       if (subPiece === "" || subPiece === undefined) {
         continue;
       }
 
-      var isMention = subPiece.charAt(0) === "@" && subPiece.length > 1;
+      const isMention = subPiece.charAt(0) === "@" && subPiece.length > 1;
 
       if (isMention) {
         output.push(makeInlineToken("mention", subPiece, styles));
@@ -231,19 +231,19 @@ function parseInline(text, styles, mentionPattern) {
     styles = {};
   }
 
-  var output = [];
-  var remaining = text;
+  const output = [];
+  let remaining = text;
 
   while (true) {
-    var found = INLINE_SYNTAX.exec(remaining);
+    const found = INLINE_SYNTAX.exec(remaining);
 
     // 找不到任何語法就結束,剩下的全部當普通文字
     if (found === null) {
       break;
     }
 
-    var matchedText = found[0];
-    var matchedAt = found.index;
+    const matchedText = found[0];
+    const matchedAt = found.index;
 
     // 語法前面那段普通文字先處理掉
     if (matchedAt > 0) {
@@ -252,32 +252,32 @@ function parseInline(text, styles, mentionPattern) {
 
     if (found[1] !== undefined) {
       // 情況一:`程式碼`。裡面的內容原封不動,不再往下解析。
-      var codeText = matchedText.slice(1, matchedText.length - 1);
+      const codeText = matchedText.slice(1, matchedText.length - 1);
       output.push(makeInlineToken("code", codeText, styles));
 
     } else if (found[2] !== undefined) {
       // 情況二:**粗體**。把裡面的內容再解析一次,並且把粗體開關打開。
-      var boldInner = matchedText.slice(2, matchedText.length - 2);
-      var boldStyles = withStyleTurnedOn(styles, "bold");
-      var boldTokens = parseInline(boldInner, boldStyles, mentionPattern);
-      for (var b = 0; b < boldTokens.length; b++) {
+      const boldInner = matchedText.slice(2, matchedText.length - 2);
+      const boldStyles = withStyleTurnedOn(styles, "bold");
+      const boldTokens = parseInline(boldInner, boldStyles, mentionPattern);
+      for (let b = 0; b < boldTokens.length; b++) {
         output.push(boldTokens[b]);
       }
 
     } else if (found[3] !== undefined) {
       // 情況三:*斜體*。同上,打開斜體開關。
-      var italicInner = matchedText.slice(1, matchedText.length - 1);
-      var italicStyles = withStyleTurnedOn(styles, "italic");
-      var italicTokens = parseInline(italicInner, italicStyles, mentionPattern);
-      for (var k = 0; k < italicTokens.length; k++) {
+      const italicInner = matchedText.slice(1, matchedText.length - 1);
+      const italicStyles = withStyleTurnedOn(styles, "italic");
+      const italicTokens = parseInline(italicInner, italicStyles, mentionPattern);
+      for (let k = 0; k < italicTokens.length; k++) {
         output.push(italicTokens[k]);
       }
 
     } else {
       // 情況四:[文字](網址)。
-      var linkParts = matchedText.match(LINK_PARTS);
-      var linkLabel = linkParts[1];
-      var linkUrl = linkParts[2];
+      const linkParts = matchedText.match(LINK_PARTS);
+      let linkLabel = linkParts[1];
+      const linkUrl = linkParts[2];
 
       if (SAFE_URL_PREFIX.test(linkUrl)) {
         // 沒有寫文字時就直接顯示網址本身
@@ -317,12 +317,12 @@ function parseInline(text, styles, mentionPattern) {
  * @returns {Array} 每一格的行內元素陣列
  */
 function parseTableRow(line, mentionPattern) {
-  var inside = line.match(TABLE_ROW)[1];
-  var rawCells = inside.split("|");
-  var cells = [];
+  const inside = line.match(TABLE_ROW)[1];
+  const rawCells = inside.split("|");
+  const cells = [];
 
-  for (var i = 0; i < rawCells.length; i++) {
-    var cellText = rawCells[i].trim();
+  for (let i = 0; i < rawCells.length; i++) {
+    const cellText = rawCells[i].trim();
     cells.push(parseInline(cellText, {}, mentionPattern));
   }
 
@@ -346,7 +346,7 @@ function parseTableRow(line, mentionPattern) {
  * @returns {boolean} 這一行是不是某一塊的開頭
  */
 function startsNewBlock(lines, index) {
-  var line = lines[index];
+  const line = lines[index];
 
   if (CODE_FENCE.test(line)) {
     return true;
@@ -383,18 +383,18 @@ function startsNewBlock(lines, index) {
  * @returns {Array} 一串塊
  */
 function parseMarkdownBlocks(text, mentionPattern) {
-  var lines = String(text).split("\n");
-  var blocks = [];
-  var index = 0;
+  const lines = String(text).split("\n");
+  const blocks = [];
+  let index = 0;
 
   while (index < lines.length) {
-    var line = lines[index];
+    const line = lines[index];
 
     // ── 情況一:``` 程式碼區塊 ──
     // 裡面的內容完全不解析,原封不動保留(所以在裡面寫 # 不會變成標題)
     if (CODE_FENCE.test(line)) {
-      var language = line.match(CODE_FENCE)[1].trim();
-      var codeLines = [];
+      const language = line.match(CODE_FENCE)[1].trim();
+      const codeLines = [];
       index = index + 1;
 
       while (index < lines.length && !CODE_FENCE.test(lines[index])) {
@@ -410,9 +410,9 @@ function parseMarkdownBlocks(text, mentionPattern) {
 
     // ── 情況二:# 標題 ──
     if (HEADING.test(line)) {
-      var headingParts = line.match(HEADING);
-      var level = headingParts[1].length;   // 幾個井字號就是第幾層
-      var headingText = headingParts[2];
+      const headingParts = line.match(HEADING);
+      const level = headingParts[1].length;   // 幾個井字號就是第幾層
+      const headingText = headingParts[2];
 
       blocks.push({
         type: "heading",
@@ -425,15 +425,15 @@ function parseMarkdownBlocks(text, mentionPattern) {
 
     // ── 情況三:表格 ──
     // 必須「表頭 + 分隔線」都在才算表格,否則句子裡出現的直線會被誤判
-    var looksLikeTable = TABLE_ROW.test(line)
+    const looksLikeTable = TABLE_ROW.test(line)
       && index + 1 < lines.length
       && TABLE_SEPARATOR.test(lines[index + 1]);
 
     if (looksLikeTable) {
-      var header = parseTableRow(line, mentionPattern);
+      const header = parseTableRow(line, mentionPattern);
       index = index + 2;                    // 跳過表頭與分隔線
 
-      var tableRows = [];
+      const tableRows = [];
       while (index < lines.length && TABLE_ROW.test(lines[index])) {
         tableRows.push(parseTableRow(lines[index], mentionPattern));
         index = index + 1;
@@ -445,11 +445,11 @@ function parseMarkdownBlocks(text, mentionPattern) {
 
     // ── 情況四:清單 ──
     if (LIST_ITEM.test(line)) {
-      var isOrdered = /^\s*\d+\./.test(line);
-      var items = [];
+      const isOrdered = /^\s*\d+\./.test(line);
+      const items = [];
 
       while (index < lines.length && LIST_ITEM.test(lines[index])) {
-        var itemText = lines[index].match(LIST_ITEM)[1];
+        const itemText = lines[index].match(LIST_ITEM)[1];
         items.push(parseInline(itemText, {}, mentionPattern));
         index = index + 1;
       }
@@ -460,10 +460,10 @@ function parseMarkdownBlocks(text, mentionPattern) {
 
     // ── 情況五:> 引用 ──
     if (line.trim().charAt(0) === ">") {
-      var quoteLines = [];
+      const quoteLines = [];
 
       while (index < lines.length && lines[index].trim().charAt(0) === ">") {
-        var quoteText = lines[index].match(QUOTE_LINE)[1];
+        const quoteText = lines[index].match(QUOTE_LINE)[1];
         quoteLines.push(parseInline(quoteText, {}, mentionPattern));
         index = index + 1;
       }
@@ -483,7 +483,7 @@ function parseMarkdownBlocks(text, mentionPattern) {
     // 一路吃到空行或另一塊的開頭為止。
     // 段落裡的單一換行**就是換行** —— 標準 markdown 會把它吃掉,但在聊天室
     // 裡按 Enter 就是想換行,照標準做反而會讓訊息全部黏在一起。
-    var paragraphLines = [];
+    const paragraphLines = [];
 
     while (index < lines.length
            && lines[index].trim() !== ""
@@ -507,7 +507,7 @@ function parseMarkdownBlocks(text, mentionPattern) {
  * @returns {Array} 一串行內元素
  */
 function parseTextOnly(text, mentionPattern) {
-  var output = [];
+  const output = [];
   appendPlainText(String(text), {}, mentionPattern, output);
   return output;
 }
