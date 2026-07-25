@@ -10,60 +10,185 @@
    注意:colorHexOf 會去讀共用狀態 rt.palette(定義在 app.js)。
    函式裡面的東西是「被呼叫的時候」才去找,而呼叫一定發生在畫面開始跑之後,
    那時 app.js 早就載入完了,所以載入順序不會出問題。
+
+   寫法約定同 md.js:不用展開運算子與解構、不寫巢狀三元、一行只做一件事、
+   名字寫完整。字串樣板(`${}`)保留,因為它比一段一段相加更好讀。
    ═══════════════════════════════════════════════════════════════════════ */
 
-/* ═══════════ 純函式 helpers ═══════════ */
 
-/** FNV-1a:名字 → 穩定 hash(頭像與未註冊名字的色相種子)。 */
+/* ───────────────────────────────────────────────────────────────────────
+   第一部分:名字 → 顏色
+   ─────────────────────────────────────────────────────────────────────── */
+
+/**
+ * 把名字算成一個固定的數字(這種做法叫 hash)。
+ *
+ * 用途:同一個名字每次都要得到同一個顏色、同一張頭像,所以需要一個
+ * 「看起來很隨機、但同樣輸入永遠同樣輸出」的數字。這裡用的是 FNV-1a 演算法。
+ *
+ * @param {string} name 名字
+ * @returns {number} 0 到 42 億之間的整數,同一個名字永遠得到同一個值
+ */
 function hashName(name) {
-  let h = 2166136261;
-  for (const c of name) { h ^= c.codePointAt(0); h = Math.imul(h, 16777619); }
-  return h >>> 0;
+  let hash = 2166136261;                 // FNV-1a 的起始值,照演算法規定
+
+  for (const character of name) {
+    // 逐字把「這個字的編號」揉進 hash 裡
+    hash = hash ^ character.codePointAt(0);
+    hash = Math.imul(hash, 16777619);    // imul 是「32 位元的乘法」,溢位行為才正確
+  }
+
+  // >>> 0 的作用是把結果轉成「非負整數」(位元運算會產生負數)
+  return hash >>> 0;
 }
 
-/** 名字 → 色相:已註冊走 config 下發的 palette,未知名字用 hash 產生穩定 HSL。 */
+/**
+ * 名字 → 顏色。
+ *
+ * 已經註冊的成員,顏色由伺服器指定(存在 rt.palette 裡);
+ * 沒註冊過的名字沒人指定顏色,就用 hash 生一個 —— 這樣同一個名字
+ * 每次進來都是同一個顏色,看久了能認人。
+ *
+ * @param {string} name 名字
+ * @returns {string} CSS 顏色字串
+ */
 function colorHexOf(name) {
-  if (rt.palette[name]) return rt.palette[name];
-  return `hsl(${hashName(name) % 360} 60% 62%)`;
+  const assignedColor = rt.palette[name];
+
+  if (assignedColor) {
+    return assignedColor;
+  }
+
+  const hue = hashName(name) % 360;      // 色相環是 0~359 度
+  return `hsl(${hue} 60% 62%)`;
 }
 
-/* 頭像:名字 hash → 5x5 鏡射像素 identicon(SVG data-uri,零外部依賴)。
-   cache key 帶色相 — config 晚到會改變 agent 顏色,舊快取不能沿用。 */
+
+/* ───────────────────────────────────────────────────────────────────────
+   第二部分:名字 → 頭像
+
+   頭像是「用名字算出來的小圖」,不需要任何外部圖檔或服務:
+   把名字變成數字,再用那個數字決定 5x5 方格裡哪些格子要塗色,
+   左右鏡射一下就成了一張看起來像人臉的小圖(這種圖叫 identicon)。
+   ─────────────────────────────────────────────────────────────────────── */
+
+// 算過的頭像存起來重複使用。key 帶著顏色,是因為伺服器的設定晚一步送到時
+// 會改變成員顏色,那時舊的圖就不能再用了。
 const avatarCache = {};
+
+/**
+ * 產生一個「每次呼叫都吐出 0~1 之間數字」的小工具。
+ *
+ * 為什麼不用 Math.random():那個每次結果都不一樣,頭像會一直變。
+ * 這裡用的是 xorshift —— 給同一個起始值,吐出來的序列永遠相同。
+ *
+ * @param {number} seed 起始值
+ * @returns {function} 呼叫一次得到一個 0~1 的數字
+ */
+function makeStableRandom(seed) {
+  let state = seed;
+
+  return function nextRandom() {
+    state = state ^ (state << 13);
+    state = state ^ (state >>> 17);
+    state = state ^ (state << 5);
+    return (state >>> 0) / 4294967296;   // 除以 2 的 32 次方,壓到 0~1
+  };
+}
+
+/**
+ * 名字 → 頭像圖(SVG 格式的 data 網址,可以直接放進 img 的 src)。
+ * @param {string} name 名字
+ * @returns {string} 可以當作圖片網址的字串
+ */
 function avatarOf(name) {
   const color = colorHexOf(name);
-  const key = `${name}|${color}`;
-  if (avatarCache[key]) return avatarCache[key];
-  let h = hashName(name) || 1;
-  const rnd = () => { h ^= h << 13; h ^= h >>> 17; h ^= h << 5; return (h >>> 0) / 4294967296; };
-  let rects = "";
-  for (let y = 0; y < 5; y++) for (let x = 0; x < 3; x++) {
-    if (rnd() > 0.48) {
-      rects += `<rect x="${x}" y="${y}" width="1" height="1"/>`;
-      if (x < 2) rects += `<rect x="${4 - x}" y="${y}" width="1" height="1"/>`; // 左右鏡射
+  const cacheKey = `${name}|${color}`;
+
+  if (avatarCache[cacheKey]) {
+    return avatarCache[cacheKey];
+  }
+
+  // hashName 有可能算出 0,而 0 會讓 xorshift 永遠吐 0(整張圖變空白),所以換成 1
+  let seed = hashName(name);
+  if (seed === 0) {
+    seed = 1;
+  }
+  const nextRandom = makeStableRandom(seed);
+
+  // 只決定左邊三欄,右邊兩欄用鏡射複製過去 —— 對稱的圖比較好看
+  let squares = "";
+
+  for (let y = 0; y < 5; y++) {
+    for (let x = 0; x < 3; x++) {
+      if (nextRandom() > 0.48) {
+        squares = squares + `<rect x="${x}" y="${y}" width="1" height="1"/>`;
+
+        if (x < 2) {
+          const mirroredX = 4 - x;
+          squares = squares + `<rect x="${mirroredX}" y="${y}" width="1" height="1"/>`;
+        }
+      }
     }
   }
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="-0.7 -0.7 6.4 6.4" shape-rendering="crispEdges">` +
-    `<rect x="-0.7" y="-0.7" width="6.4" height="6.4" fill="#0d0d14"/><g fill="${color}">${rects}</g></svg>`;
-  return (avatarCache[key] = "data:image/svg+xml," + encodeURIComponent(svg));
+
+  const svg =
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="-0.7 -0.7 6.4 6.4" shape-rendering="crispEdges">` +
+    `<rect x="-0.7" y="-0.7" width="6.4" height="6.4" fill="#0d0d14"/>` +
+    `<g fill="${color}">${squares}</g>` +
+    `</svg>`;
+
+  const dataUrl = "data:image/svg+xml," + encodeURIComponent(svg);
+  avatarCache[cacheKey] = dataUrl;
+  return dataUrl;
 }
 
-/* Markdown 與斷詞的解析全部搬到 md.js(先載入,見 index.html)。
-   這裡只留兩個進入點的用法備忘:
-     parseMarkdownBlocks(文字, mention規則) — Markdown 模式,回傳一串「塊」
-     parseTextOnly(文字, mention規則)      — 原文模式,只認 @某人 與網址
-   兩者都是純函式,mention 規則用參數傳進去(不再讓 md.js 去讀全域狀態),
-   所以可以被 static/mdtest.html 直接測試。 */
 
-function fmtTime(ts) { return new Date(ts).toLocaleTimeString("en-GB", { hour12: false }); }
-function fmtFull(ts) { return new Date(ts).toLocaleString("en-GB", { hour12: false }); }
-function dayOf(ts) {
-  const d = new Date(ts);
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+/* ───────────────────────────────────────────────────────────────────────
+   第三部分:時間格式
+   ─────────────────────────────────────────────────────────────────────── */
+
+/**
+ * 時間戳 → 只有時分秒,例如 "14:05:32"。訊息旁邊顯示用。
+ * @param {string} timestamp ISO 格式的時間字串
+ * @returns {string}
+ */
+function fmtTime(timestamp) {
+  const date = new Date(timestamp);
+  return date.toLocaleTimeString("en-GB", { hour12: false });
 }
 
-/* task 狀態的單一事實來源:CSS class 與縮寫都查這張表,
-   REJECTED / INPUT_REQUIRED 上線時只加表項。null(蒸發 task)→ 誠實的灰。 */
+/**
+ * 時間戳 → 完整日期加時間。滑鼠移上去才顯示的那種提示用。
+ * @param {string} timestamp ISO 格式的時間字串
+ * @returns {string}
+ */
+function fmtFull(timestamp) {
+  const date = new Date(timestamp);
+  return date.toLocaleString("en-GB", { hour12: false });
+}
+
+/**
+ * 時間戳 → 只有日期,例如 "2026-07-25"。
+ * 用途:判斷兩則訊息是不是同一天,不同天就插一條日期分隔線。
+ * @param {string} timestamp ISO 格式的時間字串
+ * @returns {string} YYYY-MM-DD
+ */
+function dayOf(timestamp) {
+  const date = new Date(timestamp);
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");  // 月份從 0 開始算,要加 1
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+
+/* ───────────────────────────────────────────────────────────────────────
+   第四部分:任務狀態 → 顯示樣式
+   ─────────────────────────────────────────────────────────────────────── */
+
+/* 任務狀態的單一對照表:CSS class 與顯示用的縮寫都查這裡。
+   將來多出新狀態,只要在這張表加一列,畫面那邊完全不用改。 */
 const STATE_META = {
   TASK_STATE_SUBMITTED: { cls: "open", short: "SUBMITTED" },
   TASK_STATE_WORKING: { cls: "open", short: "WORKING" },
@@ -72,5 +197,21 @@ const STATE_META = {
   TASK_STATE_REJECTED: { cls: "failed", short: "REJECTED" },
   TASK_STATE_CANCELED: { cls: "canceled", short: "CANCELED" },
 };
+
+// 查不到狀態時用的預設值。會查不到,是因為伺服器重開之前的任務已經沒了 ——
+// 與其假裝它還在,不如誠實顯示成灰色的「已消失」。
 const STATE_GONE = { cls: "gone", short: "EVAPORATED" };
-function stateMeta(state) { return STATE_META[state] || STATE_GONE; }
+
+/**
+ * 任務狀態 → 該怎麼顯示。
+ * @param {string} state 任務狀態字串,可能是 null
+ * @returns {object} { cls: CSS class, short: 顯示用的縮寫 }
+ */
+function stateMeta(state) {
+  const meta = STATE_META[state];
+
+  if (meta) {
+    return meta;
+  }
+  return STATE_GONE;
+}
