@@ -421,8 +421,10 @@ print(json.dumps(result, ensure_ascii=False, indent=2))
 
 1. `returnImmediately: True` 讓你馬上拿到任務編號。設成 `False` 會**卡住**,
    一直等到對方回覆或逾時為止 —— 終端機就停在那裡不動了。
-2. **中文要走 `ensure_ascii=False` 再自己編 UTF-8**。少了這步中文會變成
-   `幫我` 那種轉義碼,或者直接在傳輸時亂掉。
+2. **中文要走 `ensure_ascii=False` 再自己編 UTF-8**。少了這步,
+   `json.dumps("幫我")` 會吐出 `"\u5e6b\u6211"` —— 中文被換成了一串轉義碼。
+   雖然多數程式解得回來,但只要中間有一環沒處理好就會變亂碼,而且你打開來
+   除錯時根本讀不懂自己送了什麼。
 3. `deadlineSeconds` 是逾時保護,到點沒完成就自動標記 FAILED,
    你不會無限期空等一個永遠不會回來的任務。
 
