@@ -17,7 +17,7 @@
 <!-- 根模板:只有結構,樣式在 styles.css、邏輯在 app.js -->
 <div id="app" v-cloak>
   <chat-header :room="room" :rooms="rooms" :status="status" :active-tasks="tasks.active"
-               :msg-count="messages.length" :last-id="lastId" :online-members="onlineMembers"
+               :online-members="onlineMembers"
                :focus-target="focusTarget" :focus-name="focusName"
                @switch-room="switchRoom" @open-member="openMember"
                @set-focus="setFocus" @adjust-font="adjustFont">

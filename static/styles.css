@@ -349,7 +349,6 @@ button.send:hover { box-shadow: var(--shadow-neon-cyan); }
   .gutter { width: 32px; }
   .avatar { width: 28px; height: 28px; }
   .bubble { font-size: calc(var(--bubble-font) - 2px); max-width: 85%; } /* 手機放寬,字級隨切換同步縮 2px */
-  .meta.msg-count { display: none; }
   .meta.zero { display: none; } /* 手機空間緊:TASKS 為 0 才隱藏(桌面常駐) */
   .online-row { display: none; }
   button.send { min-height: 44px; }

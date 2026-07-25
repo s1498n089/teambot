@@ -322,7 +322,7 @@ const HoloModal = {
 
 const ChatHeader = {
   data() { return { FOCUS_ME }; },  // 樣板要讀得到鏡頭常數
-  props: ["room", "rooms", "status", "activeTasks", "msgCount", "lastId", "onlineMembers",
+  props: ["room", "rooms", "status", "activeTasks", "onlineMembers",
           "focusTarget", "focusName"],
   emits: ["switch-room", "open-member", "set-focus", "adjust-font"],
   computed: {
@@ -353,7 +353,6 @@ const ChatHeader = {
       <button class="mono" @click="$emit('adjust-font', 2)">A+</button>
     </span>
     <span class="meta mono" :class="{ 'task-counter': activeTasks, zero: !activeTasks }">TASKS:{{ activeTasks }}</span>
-    <span class="meta mono msg-count">MSG:{{ msgCount }} LAST:#{{ lastId }}</span>
   </header>`,
 };
 
