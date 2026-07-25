@@ -304,6 +304,33 @@ class TestBellState:
         state.on_message(2)
         assert len(rings) == 2  # 新落後配額重來
 
+    def _log_after_ring(self, tmp_path, monkeypatch, ring_fn) -> str:
+        """把 log 導到 tmp,敲一次鈴,回傳落檔內容。"""
+        monkeypatch.setattr(bell_mod, "LOG_PATH", tmp_path / "bell.log")
+        cursor_file = tmp_path / "cursor-x.txt"
+        cursor_file.write_text("0", encoding="utf-8")
+        bell_mod.BellState(cursor_file, ring_fn).on_message(1)
+        return (tmp_path / "bell.log").read_text(encoding="utf-8")
+
+    def test_failed_ring_is_logged(self, tmp_path, monkeypatch):
+        """鈴送不進去要留下案底 —— 否則「agent 沒反應」時分不清是沒敲還是沒聽。"""
+        assert "WARN" in self._log_after_ring(tmp_path, monkeypatch, lambda: False)
+
+    def test_silent_ring_fn_is_not_a_failure(self, tmp_path, monkeypatch):
+        """只有明確的 False 算失敗:不回報的 ring_fn(回 None)不該被誣告。"""
+        assert "WARN" not in self._log_after_ring(tmp_path, monkeypatch, lambda: None)
+
+    def test_failed_ring_still_counts_toward_cap(self, tmp_path, monkeypatch):
+        """送不進去也計數 —— pty 已死時若不計數就會無限重敲刷 log。"""
+        monkeypatch.setattr(bell_mod, "LOG_PATH", tmp_path / "bell.log")
+        monkeypatch.setattr(bell_mod, "RE_RING_SECONDS", 0)
+        cursor_file = tmp_path / "cursor-x.txt"
+        cursor_file.write_text("0", encoding="utf-8")
+        state = bell_mod.BellState(cursor_file, lambda: False)
+        for _ in range(10):
+            state.on_message(1)
+        assert state.rings_this_gap == bell_mod.MAX_RINGS  # 照樣封頂
+
     def test_max_rings_then_warn_once(self, tmp_path, monkeypatch):
         state, rings, _ = self._make(tmp_path, cursor=0)
         monkeypatch.setattr(bell_mod, "RE_RING_SECONDS", 0)  # 讓重敲窗立即過期

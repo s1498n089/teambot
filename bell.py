@@ -76,6 +76,12 @@ def guarded_write(write_fn, payload, lock) -> bool:
     退出瞬間殘留在終端機緩衝的按鍵、或剛好撞上的鈴聲。isalive() 擋不住這個空檔
     (檢查與寫入之間子行程就死了),所以退出時噴 EOFError('Pty is closed') 堆疊
     其實是「正常終局被當成錯誤」。回傳是否真的寫進去了。
+
+    但「吞」的安全性有前提,講清楚免得後人誤以為吞本身無害(bob 驗收時點破的因果):
+    子行程還活著時的罕見暫時性寫失敗也會被吞,那一次鈴聲就此蒸發。之所以不會變成
+    「永久聾掉」,是因為 BellState 的重敲機制兜底 —— 90 秒內 cursor 沒推進就再敲、
+    三次未果就喊人。最壞情況是鈴晚到一輪,不是叫不醒。
+    換句話說:要動重敲機制之前,先回來看這段 —— 拆了它,吞就不再安全。
     """
     with lock:
         try:
@@ -128,10 +134,14 @@ class BellState:
                 return
             if self.rings_this_gap and now - self.last_ring_at < RE_RING_SECONDS:
                 return  # 敲過了,還在等待窗內,不騷擾
-            self.ring_fn()
-            self.rings_this_gap += 1
+            delivered = self.ring_fn()
+            self.rings_this_gap += 1  # 送不進去也計數:pty 已死時才不會無限重敲刷 log
             self.last_ring_at = now
-            log(f"叮咚 #{self.rings_this_gap}(room={self.known_last_id} cursor={cursor})")
+            if delivered is False:  # 只認明確的 False;回 None 的 ring_fn 視為沒回報
+                log(f"WARN 鈴聲沒送進子行程 #{self.rings_this_gap}"
+                    f"(room={self.known_last_id} cursor={cursor})— pty 可能已關,靠重敲兜底")
+            else:
+                log(f"叮咚 #{self.rings_this_gap}(room={self.known_last_id} cursor={cursor})")
 
 
 def sse_watch(server: str, room: str, state: BellState, child_alive) -> None:
@@ -210,8 +220,8 @@ def run_windows(cmd: list[str], state_factory) -> int:
     proc = PtyProcess.spawn(cmd, dimensions=(rows, cols), cwd=str(BASE))
     write_lock = threading.Lock()  # 鈴聲(SSE 執行緒)與打字(輸入執行緒)不互插
 
-    def safe_write(text: str) -> None:
-        guarded_write(proc.write, text, write_lock)
+    def safe_write(text: str) -> bool:
+        return guarded_write(proc.write, text, write_lock)  # 回傳透傳給鈴聲,失敗才有案可查
 
     state: BellState = state_factory(safe_write)
 
@@ -296,8 +306,8 @@ def run_posix(cmd: list[str], state_factory) -> int:
 
     write_lock = threading.Lock()  # 同 Windows:鈴聲與打字不互插
 
-    def safe_write(data: bytes) -> None:
-        guarded_write(lambda payload: os.write(master, payload), data, write_lock)
+    def safe_write(data: bytes) -> bool:
+        return guarded_write(lambda payload: os.write(master, payload), data, write_lock)
 
     state: BellState = state_factory(lambda text: safe_write(text.encode("utf-8")))
     alive = lambda: True  # 以 EOF 判終,見下方讀迴圈
