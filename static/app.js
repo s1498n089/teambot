@@ -65,160 +65,12 @@ function avatarOf(name) {
   return (avatarCache[key] = "data:image/svg+xml," + encodeURIComponent(svg));
 }
 
-/* 斷詞:URL 只吃 ASCII 字元(中文與全形標點自然截斷),結尾 ASCII 標點剝回文字;
-   mention 規則從 rt 讀(reactive 依賴)。regex 依 pattern 字串快取,不必每次重編。 */
-const URL_RE = /(https?:\/\/[A-Za-z0-9\-._~:/?#@!$&*+;=%()\[\]]+)/g;
-const URL_TRAIL_RE = /^(.*?)([.,;:!?)\]]*)$/;
-let _mentionCache = { src: null, rx: null };
-function mentionRegex() {
-  if (_mentionCache.src !== rt.mentionPattern) {
-    _mentionCache = { src: rt.mentionPattern, rx: new RegExp(rt.mentionPattern, "g") };
-  }
-  return _mentionCache.rx;
-}
-/** 裸文字 → link / mention / text(markdown 語法之外的最後一關,永遠是它收尾)。
-    mods 是「繼承下來的字體修飾」,見 inlineTokens 的扁平化說明。 */
-function plainTokens(text, mods, out) {
-  for (const chunk of text.split(URL_RE)) {
-    if (!chunk) continue;
-    if (/^https?:\/\//.test(chunk)) {
-      const m = chunk.match(URL_TRAIL_RE);
-      out.push({ t: "link", v: m[1], href: m[1], ...mods });
-      if (m[2]) out.push({ t: "text", v: m[2], ...mods });
-      continue;
-    }
-    for (const p of chunk.split(mentionRegex())) {
-      if (!p) continue;
-      out.push({ t: p.startsWith("@") && p.length > 1 ? "mention" : "text", v: p, ...mods });
-    }
-  }
-}
-
-/* ── Markdown(受限子集)──────────────────────────────────────────────
-   為什麼自己寫而不用 marked + DOMPurify:渲染 markdown 等於把「別人發的文字」
-   變成「在我瀏覽器裡跑的 HTML」,而 localStorage 裡放著 token。這裡的 renderer
-   只吐**資料結構**,模板全程走 Vue 插值({{ }} 自動 escape、絕不 v-html)——
-   於是 XSS 不是「被過濾掉」,而是**沒有產生 HTML 的路徑可走**。
-   代價是功能只做子集;parser 有 bug 最慘是排版跑掉,不會變成執行別人的 script。
-   附帶好處:零外部依賴,沒有外網的區網機器照樣渲染得出來。 */
-
-// 行內語法,左優先:code 先吃(其內不再解析)、strong 先於 em(避免 ** 被拆成兩個 *)。
-// strong/em 兩端都要求非空白字元,"5 * 3 * 2" 這種算式才不會被誤判成斜體。
-const INLINE_RE = /(`[^`\n]+`)|(\*\*\S(?:[^*]*\S)?\*\*)|(\*\S(?:[^*\n]*\S)?\*)|(!?\[[^\]\n]*\]\([^)\s]+\))/;
-// 圖片語法 ![alt](url) 一併吃下,但**只渲染成連結、絕不載圖**。兩個理由:
-// (1) 自動載外圖 = 把每個觀戰者的 IP 送給第三方,圖片 URL 可以是追蹤像素;
-// (2) <img src> 對「不是圖片」的 URL 一樣會發出 GET —— 等於一個無聲的跨站請求
-//     發射器,誰貼一則訊息就能讓全房的瀏覽器去打某個會改狀態的端點(bob 補的)。
-// 想看圖的人自己點連結。
-const MD_LINK_RE = /^!?\[([^\]\n]*)\]\(([^)\s]+)\)$/;
-const SAFE_HREF_RE = /^https?:\/\//i;  // scheme 白名單:擋 javascript: / data:
-
-/** 行內解析。刻意輸出**扁平**陣列而非巢狀樹:粗體/斜體改用 token 上的 b/i 旗標表示,
-    於是「**粗體裡有 `code`**」也只是一顆帶 b 的 code token。扁平換來三件事 ——
-    模板不必遞迴、沒有深度炸彈、渲染分支一眼看完。 */
-function inlineTokens(text, mods) {
-  mods = mods || {};
-  const out = [];
-  let rest = text, m;
-  while ((m = INLINE_RE.exec(rest))) {
-    if (m.index) plainTokens(rest.slice(0, m.index), mods, out);
-    const raw = m[0];
-    if (m[1]) {
-      out.push({ t: "code", v: raw.slice(1, -1), ...mods });          // `code`:內容原樣,不再解析
-    } else if (m[2]) {
-      out.push(...inlineTokens(raw.slice(2, -2), { ...mods, b: true }));
-    } else if (m[3]) {
-      out.push(...inlineTokens(raw.slice(1, -1), { ...mods, i: true }));
-    } else {
-      const md = raw.match(MD_LINK_RE);
-      if (md && SAFE_HREF_RE.test(md[2])) {
-        out.push({ t: "link", v: md[1] || md[2], href: md[2], ...mods });
-      } else {
-        plainTokens(raw, mods, out);  // scheme 不合白名單 → 當普通文字,不生連結
-      }
-    }
-    rest = rest.slice(m.index + raw.length);
-  }
-  if (rest) plainTokens(rest, mods, out);
-  return out;
-}
-
-const FENCE_RE = /^\s*```(.*)$/;
-const LIST_RE = /^\s*(?:[-*+]|\d+\.)\s+(.*)$/;
-const QUOTE_RE = /^\s*>\s?(.*)$/;
-const HEAD_RE = /^\s*(#{1,6})\s+(.*)$/;
-const ROW_RE = /^\s*\|(.*)\|\s*$/;              // 表格列:前後都要有 |
-const SEP_RE = /^\s*\|[\s:|-]+\|\s*$/;          // 分隔列:只由 | - : 空白組成
-
-/** "| a | b |" → ["a", "b"](前後的空欄去掉,不支援跳脫的 \| ,子集) */
-function tableCells(line) {
-  return line.match(ROW_RE)[1].split("|").map((c) => inlineTokens(c.trim()));
-}
-
-/** 塊解析。
-    標題:原本刻意不做(顧慮聊天室裡的 "# xxx" 多半是 shell 註解,變超大字幫倒忙),
-    但老闆實際用了之後回報「缺標題」——**使用者的實際體驗勝過我們的事前推測**,故補上。
-    顧慮用兩件事化解:``` 區塊與行內 `code` 內不解析任何語法(shell 註解通常就在那裡),
-    且標題字級刻意克制(最大只到本文的 1.25 倍)——泡泡不是文件,不需要巨無霸大字。
-    段落內的單換行**就是換行**(rows 陣列):標準 markdown 會把它吃掉,
-    但聊天訊息裡按 Enter 就是要換行,照標準做反而是老闆說的「黏在一起」。 */
-function parseBlocks(text) {
-  const lines = String(text).split("\n");
-  const blocks = [];
-  let i = 0;
-  while (i < lines.length) {
-    const line = lines[i];
-    const fence = line.match(FENCE_RE);
-    if (fence) {                                   // ``` 圍籬:內容原樣,不解析任何語法
-      const lang = fence[1].trim();
-      const body = [];
-      i++;
-      while (i < lines.length && !FENCE_RE.test(lines[i])) body.push(lines[i++]);
-      i++;                                         // 吃掉收尾的 ```(沒有就是讀到結尾,一樣收工)
-      blocks.push({ t: "code", lang, v: body.join("\n") });
-    } else if (HEAD_RE.test(line)) {
-      const h = line.match(HEAD_RE);
-      blocks.push({ t: "h", level: h[1].length, inline: inlineTokens(h[2]) });
-      i++;
-    } else if (ROW_RE.test(line) && i + 1 < lines.length && SEP_RE.test(lines[i + 1])) {
-      const head = tableCells(line);                // 表格必須有表頭 + 分隔列才算數,
-      i += 2;                                       // 否則單獨一行 |a|b| 只是普通文字
-      const rows = [];
-      while (i < lines.length && ROW_RE.test(lines[i])) rows.push(tableCells(lines[i++]));
-      blocks.push({ t: "table", head, rows });
-    } else if (LIST_RE.test(line)) {
-      const ordered = /^\s*\d+\./.test(line);
-      const items = [];
-      while (i < lines.length && LIST_RE.test(lines[i])) {
-        items.push(inlineTokens(lines[i].match(LIST_RE)[1]));
-        i++;
-      }
-      blocks.push({ t: "list", ordered, items });
-    } else if (QUOTE_RE.test(line) && line.trim().startsWith(">")) {
-      const rows = [];
-      while (i < lines.length && lines[i].trim().startsWith(">")) {
-        rows.push(inlineTokens(lines[i].match(QUOTE_RE)[1]));
-        i++;
-      }
-      blocks.push({ t: "quote", rows });
-    } else if (!line.trim()) {
-      i++;                                         // 空行只負責分段,不留痕跡
-    } else {
-      const rows = [];
-      // 段落一路吃到「空行或另一種塊開頭」為止 —— 每加一種塊型,這裡就要讓一次路,
-      // 否則新塊會被段落吞掉(表格判斷含下一行,故一併看 i+1)
-      while (i < lines.length && lines[i].trim()
-             && !FENCE_RE.test(lines[i]) && !LIST_RE.test(lines[i])
-             && !HEAD_RE.test(lines[i]) && !lines[i].trim().startsWith(">")
-             && !(ROW_RE.test(lines[i]) && i + 1 < lines.length && SEP_RE.test(lines[i + 1]))) {
-        rows.push(inlineTokens(lines[i]));
-        i++;
-      }
-      blocks.push({ t: "p", rows });
-    }
-  }
-  return blocks;
-}
+/* Markdown 與斷詞的解析全部搬到 md.js(先載入,見 index.html)。
+   這裡只留兩個進入點的用法備忘:
+     parseMarkdownBlocks(文字, mention規則) — Markdown 模式,回傳一串「塊」
+     parseTextOnly(文字, mention規則)      — 原文模式,只認 @某人 與網址
+   兩者都是純函式,mention 規則用參數傳進去(不再讓 md.js 去讀全域狀態),
+   所以可以被 static/mdtest.html 直接測試。 */
 
 function fmtTime(ts) { return new Date(ts).toLocaleTimeString("en-GB", { hour12: false }); }
 function fmtFull(ts) { return new Date(ts).toLocaleString("en-GB", { hour12: false }); }
@@ -482,11 +334,13 @@ const ChatHeader = {
   </header>`,
 };
 
-/** 行內 token 的渲染器。因為 inlineTokens 吐的是扁平陣列,這裡不需要遞迴自我引用 ——
-    粗體/斜體是 token 上的旗標,不是巢狀結構。每個分支都用 {{ }} 插值(Vue 自動 escape)。 */
+/** 畫出一串「行內元素」(md.js 產出的那種)。
+    因為 md.js 吐的是平的陣列 —— 粗體/斜體只是元素上的開關,不是巢狀結構 ——
+    所以這裡一個迴圈就畫得完,不需要遞迴呼叫自己。
+    每一種都用 {{ }} 插值,Vue 會自動把特殊符號轉成純文字(這就是不會被注入的原因)。 */
 const MdInline = {
-  props: ["ts"],
-  template: `<template v-for="(p, i) in ts" :key="i"><span v-if="p.t === 'mention'" class="mention" :class="{ 'md-b': p.b, 'md-i': p.i }">{{ p.v }}</span><a v-else-if="p.t === 'link'" :href="p.href" target="_blank" rel="noopener noreferrer" :class="{ 'md-b': p.b, 'md-i': p.i }">{{ p.v }}</a><code v-else-if="p.t === 'code'" class="md-code-inline" :class="{ 'md-b': p.b, 'md-i': p.i }">{{ p.v }}</code><span v-else :class="{ 'md-b': p.b, 'md-i': p.i }">{{ p.v }}</span></template>`,
+  props: ["tokens"],
+  template: `<template v-for="(token, index) in tokens" :key="index"><span v-if="token.type === 'mention'" class="mention" :class="{ 'md-b': token.bold, 'md-i': token.italic }">{{ token.text }}</span><a v-else-if="token.type === 'link'" :href="token.href" target="_blank" rel="noopener noreferrer" :class="{ 'md-b': token.bold, 'md-i': token.italic }">{{ token.text }}</a><code v-else-if="token.type === 'code'" class="md-code-inline" :class="{ 'md-b': token.bold, 'md-i': token.italic }">{{ token.text }}</code><span v-else :class="{ 'md-b': token.bold, 'md-i': token.italic }">{{ token.text }}</span></template>`,
 };
 
 const MessageItem = {
@@ -501,16 +355,17 @@ const MessageItem = {
   computed: {
     /** 靠右的是「鏡頭主角」而非固定的自己 — focusName 由 root 解析(ME/具名/null)。 */
     isFocused() { return !!this.focusName && this.m.from === this.focusName; },
-    /** Markdown 模式:切成塊(段落/清單/表格/程式碼…)。
-        內部讀 rt.mentionPattern(reactive)→ config 熱替換會觸發重算 */
-    blocks() { return parseBlocks(this.m.text); },
+    /** Markdown 模式:把訊息切成一塊一塊(段落、標題、清單、表格…)。
+        這裡明確讀一次 rt.mentionPattern,是為了讓 Vue 知道「這個計算結果跟
+        mention 規則有關」—— 伺服器換設定時才會重新算。 */
+    blocks() {
+      return parseMarkdownBlocks(this.m.text, rt.mentionPattern);
+    },
 
-    /** 原文模式:不解析任何 markdown 語法,只做 @mention 高亮與裸 URL 連結
+    /** 原文模式:不解析任何 markdown 語法,只認 @某人 與網址
         —— 也就是加 markdown 之前泡泡本來的樣子。換行交給 CSS 的 pre-wrap。 */
     rawTokens() {
-      const out = [];
-      plainTokens(this.m.text, {}, out);
-      return out;
+      return parseTextOnly(this.m.text, rt.mentionPattern);
     },
     senderColor() { return colorHexOf(this.m.from); },
     registered() { return this.m.from in rt.palette; },
@@ -549,8 +404,75 @@ const MessageItem = {
         <button class="hover-btn mono" @click="$emit('copy', m.text)">⧉ COPY</button>
         <button class="hover-btn mono" @click="$emit('reply', m.id)">⟲ REPLY</button>
       </div>
-      <div v-if="!showMarkdown" class="bubble chamfer-sm bubble-raw"><md-inline :ts="rawTokens"></md-inline></div>
-      <div v-else class="bubble chamfer-sm"><template v-for="(b, bi) in blocks" :key="bi"><pre v-if="b.t === 'code'" class="md-code"><code>{{ b.v }}</code></pre><div v-else-if="b.t === 'h'" class="md-h" :class="'md-h' + b.level"><md-inline :ts="b.inline"></md-inline></div><div v-else-if="b.t === 'table'" class="md-table-wrap"><table class="md-table"><thead><tr><th v-for="(c, ci) in b.head" :key="ci"><md-inline :ts="c"></md-inline></th></tr></thead><tbody><tr v-for="(r, ri) in b.rows" :key="ri"><td v-for="(c, ci) in r" :key="ci"><md-inline :ts="c"></md-inline></td></tr></tbody></table></div><component v-else-if="b.t === 'list'" :is="b.ordered ? 'ol' : 'ul'" class="md-list"><li v-for="(it, ii) in b.items" :key="ii"><md-inline :ts="it"></md-inline></li></component><blockquote v-else-if="b.t === 'quote'" class="md-quote"><template v-for="(r, ri) in b.rows" :key="ri"><br v-if="ri"><md-inline :ts="r"></md-inline></template></blockquote><p v-else class="md-p"><template v-for="(r, ri) in b.rows" :key="ri"><br v-if="ri"><md-inline :ts="r"></md-inline></template></p></template></div>
+      <!-- 原文模式:整則訊息就是一段文字,換行交給 CSS 的 pre-wrap -->
+      <div v-if="!showMarkdown" class="bubble chamfer-sm bubble-raw">
+        <md-inline :tokens="rawTokens"></md-inline>
+      </div>
+
+      <!-- Markdown 模式:md.js 切好的塊,一塊一塊畫出來 -->
+      <div v-else class="bubble chamfer-sm">
+        <template v-for="(block, blockIndex) in blocks" :key="blockIndex">
+
+          <!-- 程式碼區塊。這一行刻意不換行縮排,否則多出來的空白會被顯示出來 -->
+          <pre v-if="block.type === 'code'" class="md-code"><code>{{ block.text }}</code></pre>
+
+          <!-- 標題。level 是 1 到 6,對應 md-h1 ~ md-h6 -->
+          <div v-else-if="block.type === 'heading'" class="md-h" :class="'md-h' + block.level">
+            <md-inline :tokens="block.content"></md-inline>
+          </div>
+
+          <!-- 表格。外面包一層,是為了讓太寬的表格自己橫向捲動而不撐爆泡泡 -->
+          <div v-else-if="block.type === 'table'" class="md-table-wrap">
+            <table class="md-table">
+              <thead>
+                <tr>
+                  <th v-for="(cell, cellIndex) in block.header" :key="cellIndex">
+                    <md-inline :tokens="cell"></md-inline>
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="(row, rowIndex) in block.rows" :key="rowIndex">
+                  <td v-for="(cell, cellIndex) in row" :key="cellIndex">
+                    <md-inline :tokens="cell"></md-inline>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <!-- 有序清單(1. 2. 3.) -->
+          <ol v-else-if="block.type === 'list' && block.ordered" class="md-list">
+            <li v-for="(item, itemIndex) in block.items" :key="itemIndex">
+              <md-inline :tokens="item"></md-inline>
+            </li>
+          </ol>
+
+          <!-- 無序清單(- 或 *)。跟上面幾乎一樣,但寫成兩段比用一行動態決定標籤名好讀 -->
+          <ul v-else-if="block.type === 'list'" class="md-list">
+            <li v-for="(item, itemIndex) in block.items" :key="itemIndex">
+              <md-inline :tokens="item"></md-inline>
+            </li>
+          </ul>
+
+          <!-- 引用。每一行之間插一個換行 -->
+          <blockquote v-else-if="block.type === 'quote'" class="md-quote">
+            <template v-for="(line, lineIndex) in block.lines" :key="lineIndex">
+              <br v-if="lineIndex > 0">
+              <md-inline :tokens="line"></md-inline>
+            </template>
+          </blockquote>
+
+          <!-- 普通段落。段落裡的單一換行也是換行 -->
+          <p v-else class="md-p">
+            <template v-for="(line, lineIndex) in block.lines" :key="lineIndex">
+              <br v-if="lineIndex > 0">
+              <md-inline :tokens="line"></md-inline>
+            </template>
+          </p>
+
+        </template>
+      </div>
     </div>
   </div>`,
 };

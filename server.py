@@ -497,7 +497,14 @@ def create_app(port: int | None = None, host: str | None = None,
 
     @app.get("/")
     async def index():
-        return FileResponse(BASE / "static" / "index.html")
+        # 這一頁不准快取。原因:index.html 決定要載入哪些 js 檔,瀏覽器若拿到
+        # 舊版的它,就會少載新加的檔案 —— 畫面會整個壞掉,而且使用者按重整
+        # 也救不回來(要按 Ctrl+F5 才行)。每次只有一份小小的 HTML,不值得為
+        # 它冒這個險;js 與 css 本身仍可照常被快取。
+        return FileResponse(
+            BASE / "static" / "index.html",
+            headers={"Cache-Control": "no-cache, must-revalidate"},
+        )
 
     @app.get("/api/config")
     async def get_config():

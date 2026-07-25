@@ -102,6 +102,10 @@
 </div>
 
 <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+<!-- md.js 要先載入:app.js 會用到它提供的 parseMarkdownBlocks / parseTextOnly。
+     兩個檔案都是傳統的 script 標籤(不是 ES module),這樣不需要任何打包工具,
+     而且 static/mdtest.html 可以直接用瀏覽器打開就跑測試。 -->
+<script src="/static/md.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>

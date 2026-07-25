@@ -1,0 +1,462 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<title>md.js 自我檢查</title>
+<style>
+  body { background: #12121a; color: #d8d8e0; font-family: Consolas, monospace;
+         padding: 24px; line-height: 1.6; }
+  h1 { color: #00d4ff; font-size: 20px; }
+  .summary { font-size: 18px; margin: 16px 0 20px; padding: 10px 14px;
+             border: 1px solid #2a2a3a; border-radius: 3px; }
+  .all-pass { color: #00ff88; border-color: #00ff88; }
+  .has-fail { color: #ff5555; border-color: #ff5555; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { border: 1px solid #2a2a3a; padding: 6px 10px; text-align: left;
+           vertical-align: top; font-size: 13px; }
+  th { background: #0d0d14; color: #00d4ff; }
+  .pass { color: #00ff88; font-weight: bold; }
+  .fail { color: #ff5555; font-weight: bold; }
+  .why { color: #8a8a9a; }
+  pre { margin: 0; white-space: pre-wrap; word-break: break-all; }
+</style>
+</head>
+<body>
+
+<h1>md.js 自我檢查</h1>
+<p class="why">
+  這一頁不需要安裝任何東西,用瀏覽器打開就會跑。<br>
+  改過 md.js 之後請重新整理這一頁,確認全部都是 PASS 再送出。
+</p>
+
+<div id="summary" class="summary">執行中…</div>
+<table>
+  <thead>
+    <tr><th style="width:34%">檢查項目</th><th style="width:8%">結果</th><th>說明</th></tr>
+  </thead>
+  <tbody id="rows"></tbody>
+</table>
+
+<script src="md.js"></script>
+<script>
+// 測試時用的 @某人 規則,跟伺服器預設值一致
+var MENTION_PATTERN = "(?<![A-Za-z0-9_@.-])(@[\\w一-鿿-]+)";
+
+/**
+ * 把解析結果攤平成一串文字,方便檢查「有沒有把某段字原封不動保留下來」。
+ * @param {Array} blocks parseMarkdownBlocks 的結果
+ * @returns {string} 所有文字接起來
+ */
+function flattenText(blocks) {
+  var result = "";
+
+  for (var i = 0; i < blocks.length; i++) {
+    var block = blocks[i];
+
+    if (block.type === "code") {
+      result = result + block.text;
+      continue;
+    }
+
+    var groups = [];
+    if (block.type === "paragraph" || block.type === "quote") {
+      groups = block.lines;
+    } else if (block.type === "list") {
+      groups = block.items;
+    } else if (block.type === "heading") {
+      groups = [block.content];
+    } else if (block.type === "table") {
+      groups = block.header.concat.apply(block.header, block.rows);
+    }
+
+    for (var j = 0; j < groups.length; j++) {
+      for (var k = 0; k < groups[j].length; k++) {
+        result = result + groups[j][k].text;
+      }
+    }
+  }
+  return result;
+}
+
+/** 把所有行內元素收集成一個陣列,方便逐顆檢查。 */
+function collectTokens(blocks) {
+  var tokens = [];
+
+  for (var i = 0; i < blocks.length; i++) {
+    var block = blocks[i];
+    var groups = [];
+
+    if (block.type === "paragraph" || block.type === "quote") {
+      groups = block.lines;
+    } else if (block.type === "list") {
+      groups = block.items;
+    } else if (block.type === "heading") {
+      groups = [block.content];
+    } else if (block.type === "table") {
+      groups = block.header.concat.apply(block.header, block.rows);
+    }
+
+    for (var j = 0; j < groups.length; j++) {
+      for (var k = 0; k < groups[j].length; k++) {
+        tokens.push(groups[j][k]);
+      }
+    }
+  }
+  return tokens;
+}
+
+/** 這串元素裡有沒有連結?ok */
+function hasLinkTo(blocks, url) {
+  var tokens = collectTokens(blocks);
+  for (var i = 0; i < tokens.length; i++) {
+    if (tokens[i].type === "link" && tokens[i].href === url) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** 有沒有任何連結? */
+function hasAnyLink(blocks) {
+  var tokens = collectTokens(blocks);
+  for (var i = 0; i < tokens.length; i++) {
+    if (tokens[i].type === "link") {
+      return true;
+    }
+  }
+  return false;
+}
+
+// ── 檢查項目清單 ──────────────────────────────────────────────────────
+// 每一項:name(名稱)、input(輸入的文字)、run(檢查函式,回傳 true 代表通過)
+var checks = [
+
+  // ---- 安全:這幾項是最重要的,一旦失守就會出大事 ----
+  {
+    name: "安全:script 標籤只能是文字",
+    input: "<script>alert(1)</scr" + "ipt>",
+    note: "整段原封不動保留成文字,不能有任何連結或特殊處理",
+    run: function (blocks) {
+      return flattenText(blocks).indexOf("<script>alert(1)") === 0 && !hasAnyLink(blocks);
+    }
+  },
+  {
+    name: "安全:img onerror 只能是文字",
+    input: '<img src=x onerror="steal()">',
+    note: "同上,原封不動",
+    run: function (blocks) {
+      return flattenText(blocks) === '<img src=x onerror="steal()">';
+    }
+  },
+  {
+    name: "安全:javascript: 不可成為連結",
+    input: "[點我](javascript:alert(1))",
+    note: "網址開頭不在白名單就不做連結",
+    run: function (blocks) {
+      return !hasAnyLink(blocks);
+    }
+  },
+  {
+    name: "安全:data: 不可成為連結",
+    input: "[點我](data:text/html,hello)",
+    note: "同上",
+    run: function (blocks) {
+      return !hasAnyLink(blocks);
+    }
+  },
+  {
+    name: "安全:圖片語法只做成連結",
+    input: "![外部圖](https://example.com/x.png)",
+    note: "驚嘆號要吃掉;絕不能產生會自動載圖的東西",
+    run: function (blocks) {
+      var tokens = collectTokens(blocks);
+      return tokens.length === 1
+        && tokens[0].type === "link"
+        && tokens[0].text === "外部圖"
+        && tokens[0].href === "https://example.com/x.png";
+    }
+  },
+  {
+    name: "安全:正常 https 連結要成立",
+    input: "[Anthropic](https://anthropic.com)",
+    note: "白名單內的網址要正常運作,不能矯枉過正",
+    run: function (blocks) {
+      return hasLinkTo(blocks, "https://anthropic.com");
+    }
+  },
+
+  // ---- 不可退化:沒有語法的訊息要跟以前長得一樣 ----
+  {
+    name: "純文字訊息維持一段",
+    input: "這是一句普通的話,沒有任何語法。",
+    run: function (blocks) {
+      return blocks.length === 1
+        && blocks[0].type === "paragraph"
+        && blocks[0].lines.length === 1;
+    }
+  },
+  {
+    name: "@某人 仍然被認出來",
+    input: "麻煩 @bob 看一下",
+    run: function (blocks) {
+      var tokens = collectTokens(blocks);
+      var found = false;
+      for (var i = 0; i < tokens.length; i++) {
+        if (tokens[i].type === "mention" && tokens[i].text === "@bob") {
+          found = true;
+        }
+      }
+      return found;
+    }
+  },
+  {
+    name: "裸網址仍然自動變連結",
+    input: "看這裡 https://example.com 就懂了",
+    run: function (blocks) {
+      return hasLinkTo(blocks, "https://example.com");
+    }
+  },
+  {
+    name: "網址後面的句號不算網址的一部分",
+    input: "請看 https://example.com。",
+    run: function (blocks) {
+      return hasLinkTo(blocks, "https://example.com");
+    }
+  },
+
+  // ---- 不可誤判:正常文字不該被當成語法 ----
+  {
+    name: "算式不會被當成斜體",
+    input: "5 * 3 * 2 = 30",
+    note: "星號兩側是空白就不算語法",
+    run: function (blocks) {
+      var tokens = collectTokens(blocks);
+      return tokens.length === 1 && tokens[0].italic === false;
+    }
+  },
+  {
+    name: "單獨一行直線不算表格",
+    input: "| 這不是表格 | 因為沒有分隔線 |",
+    note: "沒有分隔線就只是普通句子",
+    run: function (blocks) {
+      return blocks.length === 1 && blocks[0].type === "paragraph";
+    }
+  },
+  {
+    name: "程式碼區塊裡的 # 不會變標題",
+    input: "```sh\n# 這是註解\nls\n```",
+    note: "區塊內完全不解析,這是刻意的",
+    run: function (blocks) {
+      return blocks.length === 1
+        && blocks[0].type === "code"
+        && blocks[0].text === "# 這是註解\nls";
+    }
+  },
+
+  // ---- 語法本身要正確 ----
+  {
+    name: "標題層級正確",
+    input: "## 第二層標題",
+    run: function (blocks) {
+      return blocks.length === 1
+        && blocks[0].type === "heading"
+        && blocks[0].level === 2;
+    }
+  },
+  {
+    name: "粗體裡面的行內程式碼也是粗的",
+    input: "**粗體裡有 `code` 喔**",
+    note: "粗體與斜體是開關不是巢狀,所以 code 這顆自己會帶著 bold",
+    run: function (blocks) {
+      var tokens = collectTokens(blocks);
+      var codeToken = null;
+      for (var i = 0; i < tokens.length; i++) {
+        if (tokens[i].type === "code") {
+          codeToken = tokens[i];
+        }
+      }
+      return codeToken !== null && codeToken.bold === true;
+    }
+  },
+  {
+    name: "沒收尾的程式碼區塊吃到結尾",
+    input: "```python\nwhile True:\n    pass",
+    run: function (blocks) {
+      return blocks.length === 1
+        && blocks[0].type === "code"
+        && blocks[0].language === "python";
+    }
+  },
+  {
+    name: "單一換行就是換行",
+    input: "第一行\n第二行",
+    note: "標準 markdown 會吃掉,但聊天室按 Enter 就是要換行",
+    run: function (blocks) {
+      return blocks.length === 1
+        && blocks[0].type === "paragraph"
+        && blocks[0].lines.length === 2;
+    }
+  },
+  {
+    name: "空行分出兩個段落",
+    input: "第一段\n\n第二段",
+    run: function (blocks) {
+      return blocks.length === 2
+        && blocks[0].type === "paragraph"
+        && blocks[1].type === "paragraph";
+    }
+  },
+  {
+    name: "無序清單",
+    input: "- 甲\n- 乙",
+    run: function (blocks) {
+      return blocks.length === 1
+        && blocks[0].type === "list"
+        && blocks[0].ordered === false
+        && blocks[0].items.length === 2;
+    }
+  },
+  {
+    name: "有序清單",
+    input: "1. 甲\n2. 乙",
+    run: function (blocks) {
+      return blocks.length === 1
+        && blocks[0].type === "list"
+        && blocks[0].ordered === true;
+    }
+  },
+  {
+    name: "引用",
+    input: "> 有人說\n> 兩行",
+    run: function (blocks) {
+      return blocks.length === 1
+        && blocks[0].type === "quote"
+        && blocks[0].lines.length === 2;
+    }
+  },
+  {
+    name: "表格:表頭與內容都正確",
+    input: "| 甲 | 乙 |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |",
+    run: function (blocks) {
+      return blocks.length === 1
+        && blocks[0].type === "table"
+        && blocks[0].header.length === 2
+        && blocks[0].rows.length === 2;
+    }
+  },
+  {
+    name: "標題後面接段落會分成兩塊",
+    input: "# 標題\n接著的段落",
+    note: "段落不可以把標題吃掉",
+    run: function (blocks) {
+      return blocks.length === 2
+        && blocks[0].type === "heading"
+        && blocks[1].type === "paragraph";
+    }
+  },
+  {
+    name: "段落後面接表格會分成兩塊",
+    input: "說明文字\n| 甲 | 乙 |\n|---|---|\n| 1 | 2 |",
+    note: "同上,段落要讓路給表格",
+    run: function (blocks) {
+      return blocks.length === 2
+        && blocks[0].type === "paragraph"
+        && blocks[1].type === "table";
+    }
+  },
+  {
+    name: "全形標點與語法符號相鄰",
+    input: "「**粗體**」與(`code`)相鄰",
+    note: "中文標點不能吃掉語法邊界",
+    run: function (blocks) {
+      var tokens = collectTokens(blocks);
+      var hasBold = false;
+      var hasCode = false;
+      for (var i = 0; i < tokens.length; i++) {
+        if (tokens[i].bold === true) { hasBold = true; }
+        if (tokens[i].type === "code") { hasCode = true; }
+      }
+      return hasBold && hasCode;
+    }
+  },
+
+  // ---- 原文模式 ----
+  {
+    name: "原文模式不解析 markdown",
+    input: "**這裡不該變粗體**",
+    note: "parseTextOnly 只認 @某人 與網址",
+    run: function () {
+      var tokens = parseTextOnly("**這裡不該變粗體**", MENTION_PATTERN);
+      var allPlain = true;
+      for (var i = 0; i < tokens.length; i++) {
+        if (tokens[i].bold === true) { allPlain = false; }
+      }
+      return allPlain;
+    }
+  },
+  {
+    name: "原文模式仍然保留 @某人 與網址",
+    input: "@bob 看 https://example.com",
+    run: function () {
+      var tokens = parseTextOnly("@bob 看 https://example.com", MENTION_PATTERN);
+      var hasMention = false;
+      var hasLink = false;
+      for (var i = 0; i < tokens.length; i++) {
+        if (tokens[i].type === "mention") { hasMention = true; }
+        if (tokens[i].type === "link") { hasLink = true; }
+      }
+      return hasMention && hasLink;
+    }
+  }
+];
+
+// ── 執行所有檢查並把結果畫出來 ────────────────────────────────────────
+var passedCount = 0;
+var failedCount = 0;
+var rowsHtml = "";
+
+for (var i = 0; i < checks.length; i++) {
+  var check = checks[i];
+  var passed = false;
+  var errorMessage = "";
+
+  try {
+    var blocks = parseMarkdownBlocks(check.input, MENTION_PATTERN);
+    passed = check.run(blocks) === true;
+  } catch (error) {
+    passed = false;
+    errorMessage = " (程式出錯:" + error.message + ")";
+  }
+
+  if (passed) {
+    passedCount = passedCount + 1;
+  } else {
+    failedCount = failedCount + 1;
+  }
+
+  var resultClass = passed ? "pass" : "fail";
+  var resultText = passed ? "PASS" : "FAIL";
+  var note = check.note === undefined ? "" : check.note;
+
+  // 這一頁只顯示我們自己寫死的測試資料,不處理外來輸入,所以直接組字串
+  rowsHtml = rowsHtml
+    + "<tr><td>" + check.name + "</td>"
+    + '<td class="' + resultClass + '">' + resultText + "</td>"
+    + '<td><pre>' + check.input.replace(/</g, "&lt;") + "</pre>"
+    + '<span class="why">' + note + errorMessage + "</span></td></tr>";
+}
+
+document.getElementById("rows").innerHTML = rowsHtml;
+
+var summary = document.getElementById("summary");
+if (failedCount === 0) {
+  summary.className = "summary all-pass";
+  summary.textContent = "全部通過:" + passedCount + " 項";
+} else {
+  summary.className = "summary has-fail";
+  summary.textContent = "有 " + failedCount + " 項失敗(通過 " + passedCount + " 項)";
+}
+</script>
+
+</body>
+</html>
