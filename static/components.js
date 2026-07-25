@@ -532,14 +532,17 @@ const ChatComposer = {
     </div>
 
     <div class="input-row">
-      <span class="mode-ctl">
-        <button class="mono" :class="{ on: !isTask }" @click="mode = 'msg'">MSG</button>
-        <button class="mono" :class="{ on: isTask }" @click="mode = 'task'">TASK</button>
-      </span>
+      <!-- 身分區:上面一列是「我是誰、在哪個房間」,下面一列是「這則要走哪道門」 -->
+      <span class="identity">
+        <span class="prompt mono">
+          <input class="name" :value="name" :style="{ width: nameWidth }"
+                 @input="$emit('update:name', $event.target.value)">@{{ room }} &gt;_
+        </span>
 
-      <span class="prompt mono">
-        <input class="name" :value="name" :style="{ width: nameWidth }"
-               @input="$emit('update:name', $event.target.value)">@{{ room }} &gt;_
+        <span class="mode-ctl">
+          <button class="mono" :class="{ on: !isTask }" @click="mode = 'msg'">MSG</button>
+          <button class="mono" :class="{ on: isTask }" @click="mode = 'task'">TASK</button>
+        </span>
       </span>
 
       <input v-if="authEnabled" class="token mono" type="password" :value="token"

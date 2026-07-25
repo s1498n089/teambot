@@ -273,8 +273,12 @@ footer {
 .reply-bar .hint { color: var(--muted); font-size: var(--ui-sm); }
 /* 同樣的保險絲:窄視窗+大字級時,輸入框寧可整條掉第二行,也不要被壓成一個字寬 */
 .input-row { display: flex; gap: 8px; align-items: stretch; flex-wrap: wrap; }
+/* 身分區:第一列「我是誰@哪個房間」、第二列 MSG / TASK 兩顆並排。
+   分兩列是為了讓「身分」與「這則走哪道門」各佔一行,不再擠成一條。 */
+.identity { display: flex; flex-direction: column; gap: 5px; justify-content: center; }
+
 /* MSG / TASK 兩態切換:選 TASK 就改走 A2A 協定門(不再是普通聊天訊息) */
-.mode-ctl { display: flex; flex-direction: column; gap: 2px; justify-content: center; }
+.mode-ctl { display: flex; flex-direction: row; gap: 3px; }
 .mode-ctl button {
   background: none; border: 1px solid var(--border); color: var(--muted);
   font-family: var(--mono); font-size: var(--ui-sm); letter-spacing: 1px;
@@ -299,10 +303,12 @@ footer {
 button.send.task { border-color: var(--amber); color: var(--amber); }
 button.send.task:hover { box-shadow: 0 0 12px rgba(255, 184, 108, 0.4); }
 button.send:disabled { opacity: 0.4; cursor: not-allowed; box-shadow: none; }
-.prompt { display: flex; align-items: center; gap: 2px; color: var(--green); font-size: var(--ui-md); letter-spacing: 1px; white-space: nowrap; }
+/* 身分那一列刻意用大一級的字:它是「你現在以誰的身分、在哪個房間發言」,
+   是送出前最該看清楚的一件事,值得比周邊控制項更有份量 */
+.prompt { display: flex; align-items: center; gap: 2px; color: var(--green); font-size: var(--ui-lg); letter-spacing: 1px; white-space: nowrap; }
 input.name {
   background: none; border: none; border-bottom: 1px dashed var(--border);
-  color: var(--green); font-family: var(--mono); font-size: var(--ui-md);
+  color: var(--green); font-family: var(--mono); font-size: var(--ui-lg);
   text-align: right; padding: 2px 0; min-width: 3ch; /* ch 自適應寬度由 JS 綁定 */
 }
 input.name:focus { outline: none; border-bottom-color: var(--green); }
@@ -322,7 +328,8 @@ textarea {
 textarea:focus { outline: 1px solid var(--cyan); }
 button.send {
   background: none; border: 1px solid var(--cyan); color: var(--cyan);
-  font-family: var(--mono); font-size: var(--ui-md); letter-spacing: 2px;
+  /* 跟身分那一列同一級:兩者是輸入區的兩個主角(我是誰 / 送出去) */
+  font-family: var(--mono); font-size: var(--ui-lg); letter-spacing: 2px;
   border-radius: 2px; padding: 0 16px; cursor: pointer;
 }
 button.send:hover { box-shadow: var(--shadow-neon-cyan); }

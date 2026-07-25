@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -512,14 +512,38 @@ def create_app(port: int | None = None, host: str | None = None,
 
     # ---------- 可視化層 REST(協定見 AGENT_GUIDE.md)----------
 
+    STATIC_REF_RE = re.compile(r'"/static/([^"?]+\.(?:js|css))"')
+
+    def stamp_static_urls(html: str) -> str:
+        """把 index.html 裡的 js / css 網址接上「這個檔案的修改時間」。
+
+        為什麼要這樣做:瀏覽器會把 js 與 css 快取起來,所以改了樣式或程式碼之後,
+        使用者按重整**仍然看到舊的**,要按 Ctrl+F5 才會更新 —— 這種「明明改好了
+        對方卻看不到」的狀況我們已經踩過兩次。
+
+        接上修改時間之後,檔案一改網址就變(/static/app.js?v=1753...),
+        瀏覽器認得那是新網址,自然會重新下載;檔案沒改時網址不變,快取照樣有效。
+        兩全其美,而且不需要任何打包工具。
+        """
+        def add_version(match: re.Match) -> str:
+            filename = match.group(1)
+            file_path = BASE / "static" / filename
+            version = 0
+            if file_path.exists():
+                version = int(file_path.stat().st_mtime)
+            return f'"/static/{filename}?v={version}"'
+
+        return STATIC_REF_RE.sub(add_version, html)
+
     @app.get("/")
     async def index():
         # 這一頁不准快取。原因:index.html 決定要載入哪些 js 檔,瀏覽器若拿到
         # 舊版的它,就會少載新加的檔案 —— 畫面會整個壞掉,而且使用者按重整
         # 也救不回來(要按 Ctrl+F5 才行)。每次只有一份小小的 HTML,不值得為
-        # 它冒這個險;js 與 css 本身仍可照常被快取。
-        return FileResponse(
-            BASE / "static" / "index.html",
+        # 它冒這個險;js 與 css 由上面的 stamp_static_urls 負責換網址。
+        html = (BASE / "static" / "index.html").read_text(encoding="utf-8")
+        return HTMLResponse(
+            stamp_static_urls(html),
             headers={"Cache-Control": "no-cache, must-revalidate"},
         )
 
