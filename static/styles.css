@@ -180,6 +180,9 @@ main {
   max-width: min(600px, 72%);    /* 呼吸感上限 */
 }
 
+/* 原文模式:不跑 markdown 排版,換行由 pre-wrap 負責 —— 就是加 markdown 之前的樣子 */
+.bubble-raw { white-space: pre-wrap; }
+
 /* ── Markdown 塊(受限子集;renderer 在 app.js,只吐資料不吐 HTML)── */
 .bubble > :last-child { margin-bottom: 0; }   /* 泡泡底部不留多餘空隙 */
 .md-p, .md-list, .md-code, .md-quote, .md-h, .md-table-wrap { margin: 0 0 0.65em; }

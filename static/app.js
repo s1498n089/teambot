@@ -493,11 +493,25 @@ const MessageItem = {
   components: { "md-inline": MdInline },
   props: ["m", "grouped", "me", "focusName", "taskInfo"],
   emits: ["reply", "jump", "open-member", "open-task", "copy", "anchor"],
+  data: function () {
+    // 每則訊息各自記住自己的顯示模式,互不影響。
+    // 預設 false = 先看原文(老闆的要求:發現某則是 markdown 時再切過去)。
+    return { showMarkdown: false };
+  },
   computed: {
     /** 靠右的是「鏡頭主角」而非固定的自己 — focusName 由 root 解析(ME/具名/null)。 */
     isFocused() { return !!this.focusName && this.m.from === this.focusName; },
-    /** 內部讀 rt.mentionPattern(reactive)→ config 熱替換會觸發重算 */
+    /** Markdown 模式:切成塊(段落/清單/表格/程式碼…)。
+        內部讀 rt.mentionPattern(reactive)→ config 熱替換會觸發重算 */
     blocks() { return parseBlocks(this.m.text); },
+
+    /** 原文模式:不解析任何 markdown 語法,只做 @mention 高亮與裸 URL 連結
+        —— 也就是加 markdown 之前泡泡本來的樣子。換行交給 CSS 的 pre-wrap。 */
+    rawTokens() {
+      const out = [];
+      plainTokens(this.m.text, {}, out);
+      return out;
+    },
     senderColor() { return colorHexOf(this.m.from); },
     registered() { return this.m.from in rt.palette; },
     /** 綠邊永遠關於「我」:警示不因換鏡頭而失效(語意色獨占鐵律)。 */
@@ -530,10 +544,13 @@ const MessageItem = {
         <span v-if="m.reply_to" class="reply-chip" @click="$emit('jump', m.reply_to)">&gt;&gt; #{{ m.reply_to }}</span>
         <span class="time" :title="fmtFull(m.ts)" @click="$emit('anchor', m.id)">#{{ m.id }} · {{ fmtTime(m.ts) }}</span>
         <span class="head-spacer"></span>
+        <button class="hover-btn mono" @click="showMarkdown = !showMarkdown"
+                :title="showMarkdown ? '切回原文' : '以 Markdown 排版顯示'">⇄ {{ showMarkdown ? 'RAW' : 'MD' }}</button>
         <button class="hover-btn mono" @click="$emit('copy', m.text)">⧉ COPY</button>
         <button class="hover-btn mono" @click="$emit('reply', m.id)">⟲ REPLY</button>
       </div>
-      <div class="bubble chamfer-sm"><template v-for="(b, bi) in blocks" :key="bi"><pre v-if="b.t === 'code'" class="md-code"><code>{{ b.v }}</code></pre><div v-else-if="b.t === 'h'" class="md-h" :class="'md-h' + b.level"><md-inline :ts="b.inline"></md-inline></div><div v-else-if="b.t === 'table'" class="md-table-wrap"><table class="md-table"><thead><tr><th v-for="(c, ci) in b.head" :key="ci"><md-inline :ts="c"></md-inline></th></tr></thead><tbody><tr v-for="(r, ri) in b.rows" :key="ri"><td v-for="(c, ci) in r" :key="ci"><md-inline :ts="c"></md-inline></td></tr></tbody></table></div><component v-else-if="b.t === 'list'" :is="b.ordered ? 'ol' : 'ul'" class="md-list"><li v-for="(it, ii) in b.items" :key="ii"><md-inline :ts="it"></md-inline></li></component><blockquote v-else-if="b.t === 'quote'" class="md-quote"><template v-for="(r, ri) in b.rows" :key="ri"><br v-if="ri"><md-inline :ts="r"></md-inline></template></blockquote><p v-else class="md-p"><template v-for="(r, ri) in b.rows" :key="ri"><br v-if="ri"><md-inline :ts="r"></md-inline></template></p></template></div>
+      <div v-if="!showMarkdown" class="bubble chamfer-sm bubble-raw"><md-inline :ts="rawTokens"></md-inline></div>
+      <div v-else class="bubble chamfer-sm"><template v-for="(b, bi) in blocks" :key="bi"><pre v-if="b.t === 'code'" class="md-code"><code>{{ b.v }}</code></pre><div v-else-if="b.t === 'h'" class="md-h" :class="'md-h' + b.level"><md-inline :ts="b.inline"></md-inline></div><div v-else-if="b.t === 'table'" class="md-table-wrap"><table class="md-table"><thead><tr><th v-for="(c, ci) in b.head" :key="ci"><md-inline :ts="c"></md-inline></th></tr></thead><tbody><tr v-for="(r, ri) in b.rows" :key="ri"><td v-for="(c, ci) in r" :key="ci"><md-inline :ts="c"></md-inline></td></tr></tbody></table></div><component v-else-if="b.t === 'list'" :is="b.ordered ? 'ol' : 'ul'" class="md-list"><li v-for="(it, ii) in b.items" :key="ii"><md-inline :ts="it"></md-inline></li></component><blockquote v-else-if="b.t === 'quote'" class="md-quote"><template v-for="(r, ri) in b.rows" :key="ri"><br v-if="ri"><md-inline :ts="r"></md-inline></template></blockquote><p v-else class="md-p"><template v-for="(r, ri) in b.rows" :key="ri"><br v-if="ri"><md-inline :ts="r"></md-inline></template></p></template></div>
     </div>
   </div>`,
 };
