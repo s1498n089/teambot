@@ -57,9 +57,7 @@
         <div class="modal-title mono" :style="{ color: colorOf(modal.member.name) }">{{ modal.member.name.toUpperCase() }}</div>
         <div class="modal-sub mono">
           {{ isRegistered(modal.member.name) ? 'REGISTERED' : 'UNREGISTERED' }} ·
-          <span :class="isOnline(modal.member) ? 'online-dot' : 'offline-dot'">
-            {{ isOnline(modal.member) ? '● ONLINE' : '○ OFFLINE' }}
-          </span>
+          <span :class="presenceOf(modal.member) + '-dot'">{{ presenceLabel(modal.member) }}</span>
         </div>
       </div>
     </template>
@@ -70,7 +68,6 @@
         <div class="stat"><span class="k mono">FIRST SEEN</span><span class="v mono">{{ modal.member.firstSeen ? fmtFull(modal.member.firstSeen) : '—' }}</span></div>
         <div class="stat"><span class="k mono">LAST SEEN</span><span class="v mono">{{ modal.member.lastSeen ? fmtFull(modal.member.lastSeen) : '—' }}</span></div>
       </div>
-      <span class="modal-link mono" @click="setFocus(modal.member.name)">&gt;&gt; 以此視角檢視</span>
       <span v-if="isRegistered(modal.member.name) && modal.member.name !== 'user'" class="modal-link mono"
             @click="openAgentCard(modal.member.name)">&gt;&gt; AGENT CARD</span>
     </template>

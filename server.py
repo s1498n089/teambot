@@ -333,9 +333,14 @@ class RateLimiter:
 
 @dataclass(eq=False)  # eq=False 保留預設身分 hash — 訂閱者要放進 set,且本來就該以身分區分
 class Subscription:
-    """一個 SSE 訂閱者(取代對 asyncio.Queue 的 monkey-patch)。"""
+    """一個 SSE 訂閱者(取代對 asyncio.Queue 的 monkey-patch)。
+
+    watcher = 訂閱者自報的身分(agent 的 bell、瀏覽器的使用者);None 為匿名。
+    這是 presence 的第一手事實:連線開著 = 這個人在場,不必拿「最近有沒有發言」去猜。
+    """
     queue: asyncio.Queue = field(default_factory=lambda: asyncio.Queue(maxsize=SUBSCRIBER_QUEUE_MAXSIZE))
     dead: bool = False   # backpressure:queue 滿了標記,產生器見狀自行收尾
+    watcher: str | None = None
 
 
 class EventBus:
@@ -344,10 +349,14 @@ class EventBus:
     def __init__(self):
         self.subs: dict[str, set[Subscription]] = {}
 
-    def subscribe(self, room: str) -> Subscription:
-        sub = Subscription()
+    def subscribe(self, room: str, watcher: str | None = None) -> Subscription:
+        sub = Subscription(watcher=watcher)
         self.subs.setdefault(room, set()).add(sub)
         return sub
+
+    def watchers(self, room: str) -> set[str]:
+        """當前在場者(具名且連線未死)— presence 的唯一事實來源。"""
+        return {s.watcher for s in self.subs.get(room, set()) if s.watcher and not s.dead}
 
     def unsubscribe(self, room: str, sub: Subscription) -> None:
         self.subs.get(room, set()).discard(sub)
@@ -506,6 +515,11 @@ def create_app(port: int | None = None, host: str | None = None,
     async def rooms_index():
         return {"rooms": store.rooms_index()}
 
+    @app.get("/api/rooms/{room}/presence")
+    async def get_presence(room: str):
+        """在場名單:誰的 SSE 連線正開著(bell 或瀏覽器)。"""
+        return {"room": room, "present": sorted(bus.watchers(room))}
+
     @app.get("/api/rooms/{room}/members")
     async def get_members(room: str):
         return {"members": store.members(room)}
@@ -554,12 +568,24 @@ def create_app(port: int | None = None, host: str | None = None,
     # curl 等待路線退場)— 需要考古的話看 git 歷史 🚀 fa0c64b 前後。
 
     @app.get("/api/rooms/{room}/stream")
-    async def stream(room: str, request: Request, since_id: int = 0):
-        """觀戰 SSE。送 id: 欄位,瀏覽器斷線重連自帶 Last-Event-ID 無縫補齊。"""
+    async def stream(room: str, request: Request, since_id: int = 0,
+                     watcher: str | None = None):
+        """觀戰 SSE。送 id: 欄位,瀏覽器斷線重連自帶 Last-Event-ID 無縫補齊。
+
+        watcher=<名字> 讓訂閱者自報身分以計入 presence;AUTH=on 時驗不過就
+        降級為匿名(串流照給,只是不計入在場名單)— 與 reader= 同一套模式,
+        否則任何人都能假裝別人在線。
+        """
         last_event_id = request.headers.get("last-event-id")
         if last_event_id and last_event_id.isdigit():
             since_id = int(last_event_id)
-        sub = bus.subscribe(room)
+        name = sanitize_sender(watcher) if watcher else None
+        if name and auth_enabled:
+            try:
+                check_writer(name, request)
+            except ApiError:
+                name = None  # 冒名者只當匿名觀眾
+        sub = bus.subscribe(room, watcher=name)
 
         def sse(msg: dict) -> str:
             return f"id: {msg['id']}\ndata: {json.dumps(msg, ensure_ascii=False)}\n\n"

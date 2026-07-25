@@ -193,3 +193,90 @@ class TestSSE:
             bus.publish("r", {"id": i})
         bus.publish("r", {"id": "overflow"})
         assert sub.dead is True
+
+
+# ---------- presence(在場判定:SSE 訂閱者名單)----------
+
+class TestPresence:
+    """在場 = SSE 連線開著,而非「最近有沒有發言」——
+    事件驅動的 agent 安靜待命時仍該算在場。"""
+
+    def test_empty_when_nobody_watching(self, client):
+        assert client.get("/api/rooms/p/presence").json()["present"] == []
+
+    def test_named_watcher_appears_while_connected(self, client):
+        """訂閱中 → 在場;連線結束 → 不在場。"""
+        async def flow():
+            seen_during, seen_after = [], []
+            done = asyncio.Event()
+
+            async def receive():
+                await done.wait()
+                return {"type": "http.disconnect"}
+
+            async def send(message):
+                if message["type"] == "http.response.body":
+                    seen_during.append(client.get("/api/rooms/p/presence").json()["present"])
+                    done.set()
+
+            scope = {"type": "http", "http_version": "1.1", "method": "GET", "scheme": "http",
+                     "path": "/api/rooms/p/stream", "root_path": "",
+                     "query_string": b"since_id=0&watcher=alice", "headers": [],
+                     "client": ("test", 1), "server": ("test", 80)}
+            await asyncio.wait_for(client.app(scope, receive, send), timeout=5)
+            seen_after.append(client.get("/api/rooms/p/presence").json()["present"])
+            return seen_during, seen_after
+
+        during, after = asyncio.run(flow())
+        assert during and "alice" in during[0]   # 連線期間在場
+        assert after[0] == []                    # 連線結束即離場
+
+    def test_anonymous_watcher_not_counted(self, client):
+        """不報名字的訂閱者(純觀眾)不計入在場名單。"""
+        async def flow():
+            names = []
+            done = asyncio.Event()
+
+            async def receive():
+                await done.wait()
+                return {"type": "http.disconnect"}
+
+            async def send(message):
+                if message["type"] == "http.response.body":
+                    names.append(client.get("/api/rooms/p/presence").json()["present"])
+                    done.set()
+
+            scope = {"type": "http", "http_version": "1.1", "method": "GET", "scheme": "http",
+                     "path": "/api/rooms/p/stream", "root_path": "",
+                     "query_string": b"since_id=0", "headers": [],
+                     "client": ("test", 1), "server": ("test", 80)}
+            await asyncio.wait_for(client.app(scope, receive, send), timeout=5)
+            return names
+
+        assert asyncio.run(flow())[0] == []
+
+    def test_impersonation_downgraded_under_auth(self, make_app, isolated_base):
+        """AUTH=on 時冒名 watcher 降級為匿名 —— 否則誰都能假裝別人在線。"""
+        app = make_app(AUTH="on")
+        with TestClient(app) as c:
+            async def flow():
+                names = []
+                done = asyncio.Event()
+
+                async def receive():
+                    await done.wait()
+                    return {"type": "http.disconnect"}
+
+                async def send(message):
+                    if message["type"] == "http.response.body":
+                        names.append(c.get("/api/rooms/p/presence").json()["present"])
+                        done.set()
+
+                scope = {"type": "http", "http_version": "1.1", "method": "GET", "scheme": "http",
+                         "path": "/api/rooms/p/stream", "root_path": "",
+                         "query_string": b"since_id=0&watcher=alice", "headers": [],
+                         "client": ("test", 1), "server": ("test", 80)}
+                await asyncio.wait_for(app(scope, receive, send), timeout=5)
+                return names
+
+            assert asyncio.run(flow())[0] == []  # 無 token 冒名 → 不計入

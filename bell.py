@@ -109,7 +109,8 @@ def sse_watch(server: str, room: str, state: BellState, child_alive) -> None:
     重連自帶 since_id=cursor — 斷線期間漏的事件靠這裡補,對帳鐵則 wrapper 版。"""
     backoff = 1
     while child_alive():
-        url = f"{server}/api/rooms/{room}/stream?since_id={state.read_cursor()}"
+        url = (f"{server}/api/rooms/{room}/stream?since_id={state.read_cursor()}"
+               f"&watcher={state.name}")  # 報上身分 → hub 據此判定 agent 在場(presence)
         try:
             req = urllib.request.Request(url, headers={"Accept": "text/event-stream"})
             with urllib.request.urlopen(req, timeout=SSE_READ_TIMEOUT) as resp:
@@ -303,6 +304,7 @@ def main() -> int:
 
     def state_factory(write_fn) -> BellState:
         state = BellState(cursor_path, lambda: write_fn(BELL_TEXT + BELL_SUBMIT))
+        state.name = args.name
         state.server = args.server.rstrip("/")
         state.room = args.room
         return state

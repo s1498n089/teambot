@@ -11,7 +11,8 @@ const { createApp, reactive, computed } = Vue;
 /* ═══════════ 常數(魔數集中地)═══════════ */
 const PAGE = 100;                    // 初載與懶載的每頁訊息數
 const GROUP_WINDOW_MS = 300000;      // 同人連續發言的 grouping 視窗(5 分鐘)
-const ONLINE_WINDOW_MS = 600000;     // lastSeen 在此窗內視為在線(10 分鐘)
+const ACTIVE_WINDOW_MS = 600000;     // 近期發言窗:在場者再細分「活躍/待命」(10 分鐘)
+const PRESENCE_POLL_MS = 15000;      // 在場名單輪詢間隔(輕量,只回名字陣列)
 const TOAST_MS = 3500;
 const FLASH_MS = 2000;               // 跳轉脈衝動畫的 class 存留時間
 const API_FAIL_TOAST_THRESHOLD = 3;  // 連續失敗達此數才吵使用者
@@ -142,6 +143,7 @@ function createApi(notify) {
     rooms: () => request("/api/rooms"),
     members: (room) => request(`/api/rooms/${room}/members`),
     tasks: (room) => request(`/api/rooms/${room}/tasks`),
+    presence: (room) => request(`/api/rooms/${room}/presence`),
     messages: (room, qs) => request(`/api/rooms/${room}/messages?${qs}`),
     /** 發言例外:4xx 的 detail 是要給使用者看的,不走 throw,回 {ok, status, data}。
         token 有值時附 Authorization(AUTH=on 的寫入守門,roadmap ③)。 */
@@ -292,7 +294,8 @@ const ChatHeader = {
           "focusTarget", "focusName"],
   emits: ["switch-room", "toggle-focus", "open-member", "set-focus", "adjust-font"],
   computed: {
-    statusText() { return { connecting: "CONNECTING", online: "ONLINE", reconnecting: "RECONNECT" }[this.status]; },
+    /** 這顆燈講的是「本頁與 server 的連線」— 主詞寫明,別跟成員在場狀態混淆。 */
+    statusText() { return { connecting: "SERVER…", online: "SERVER", reconnecting: "SERVER ✕" }[this.status]; },
     /** 鏡頭狀態:ME(跟著名字欄)/ 具名(以他人為第一人稱)/ OFF(全員靠左)。 */
     focusLabel() {
       if (this.focusTarget === FOCUS_NONE) return "FOCUS: OFF";
@@ -436,6 +439,7 @@ createApp({
     return {
       messages: [],
       members: [],
+      present: [],   // 在場名單(SSE 連線開著的人)— presence 的事實來源
       rooms: [],
       lastId: 0,
       name: localStorage.getItem("a2a-name") || "user",
@@ -463,7 +467,11 @@ createApp({
       return this.focusTarget === FOCUS_ME ? this.myName : this.focusTarget;
     },
     authOn() { return rt.authEnabled; },  // 模板需要 reactive 依賴,包一層 computed
-    onlineMembers() { return this.members.filter((m) => this.isOnline(m)).slice(0, 6); },
+    /** 頭像列 = 在場者(含安靜待命的);離線者不佔位。 */
+    onlineMembers() {
+      return this.present.map((name) => this.members.find((m) => m.name === name) || { name })
+        .slice(0, 6);
+    },
     /** timeline 的顯示列:日期分隔線 + ── NEW ── 未讀線 + 訊息(含 grouping 判定)。 */
     rows() {
       const out = [];
@@ -506,11 +514,11 @@ createApp({
     } catch (e) { this.showToast(">> 初始載入失敗,請重整", false); }
 
     if (this.unread.afterId >= this.lastId) this.unread.afterId = 0; // 沒有未讀就不畫線
-    await Promise.all([this.tasks.load(), this.loadMembers(), this.loadRooms()]);
+    await Promise.all([this.tasks.load(), this.loadMembers(), this.loadRooms(), this.loadPresence()]);
     this.scrollToBottom();
 
     this.stream = useStream({
-      url: `/api/rooms/${this.room}/stream?since_id=${this.lastId}`,
+      url: `/api/rooms/${this.room}/stream?since_id=${this.lastId}&watcher=${encodeURIComponent(this.myName)}`,
       onMessage: (m) => this.handleIncoming(m),
       onOpen: () => (this.status = "online"),
       onError: () => (this.status = "reconnecting"),
@@ -519,6 +527,7 @@ createApp({
 
     this.unread.markRead(this.lastId);
     setInterval(() => (this.nowTick = Date.now()), 60000);
+    setInterval(() => this.loadPresence(), PRESENCE_POLL_MS);  // 在場名單:輕量輪詢即可
     addEventListener("keydown", (e) => { // Esc:彈窗優先,其次取消引用
       if (e.key !== "Escape") return;
       if (this.modal) this.modal = null;
@@ -538,9 +547,21 @@ createApp({
     stateCls(state) { return stateMeta(state).cls; },
     stateShort(state) { return stateMeta(state).short; },
     isRegistered(name) { return name in rt.palette; },
-    isOnline(member) {
-      return member.messageCount > 0 && member.lastSeen
-        && this.nowTick - new Date(member.lastSeen).getTime() < ONLINE_WINDOW_MS;
+    /** 三態 presence:● 活躍(在場且近期發言)/ ◐ 待命(在場但安靜)/ ○ 離線(無連線)。
+        在場 = SSE 連線開著(bell 或瀏覽器),不再拿「最近有沒有發言」猜在不在。 */
+    presenceOf(member) {
+      const name = typeof member === "string" ? member : member.name;
+      if (!this.present.includes(name)) return "offline";
+      const seen = (typeof member === "object" && member.lastSeen)
+        ? new Date(member.lastSeen).getTime() : 0;
+      return this.nowTick - seen < ACTIVE_WINDOW_MS ? "active" : "standby";
+    },
+    presenceLabel(member) {
+      return { active: "● ACTIVE", standby: "◐ STANDBY", offline: "○ OFFLINE" }[this.presenceOf(member)];
+    },
+    async loadPresence() {
+      try { this.present = (await this.api.presence(this.room)).present; }
+      catch (e) { /* request 已記錄;維持上次名單 */ }
     },
 
     /* ── SSE 進訊息:具名 handler 鏈(一步一責)── */

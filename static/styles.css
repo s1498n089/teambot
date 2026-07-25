@@ -293,7 +293,9 @@ button.send:hover { box-shadow: var(--shadow-neon-cyan); }
 }
 .stat .k { font-size: 10px; color: var(--muted); letter-spacing: 1px; }
 .stat .v { font-size: 14px; color: var(--text); }
-.online-dot { color: var(--green); }
+/* presence 三態:亮綠=在場且活躍、半透明綠=在場但安靜(同屬「連線正常」家族)、灰=無連線 */
+.active-dot { color: var(--green); }
+.standby-dot { color: var(--green); opacity: 0.45; }
 .offline-dot { color: var(--muted); }
 .tl-item { display: flex; gap: 10px; font-size: 12px; align-items: baseline; }
 .tl-state { flex: none; letter-spacing: 1px; font-size: 11px; }
