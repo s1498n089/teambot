@@ -112,6 +112,12 @@ const STATE_META = {
 const STATE_GONE = { cls: "gone", short: "EVAPORATED" };
 function stateMeta(state) { return STATE_META[state] || STATE_GONE; }
 
+/* 鏡頭(FOCUS):決定「這面牆以誰為第一人稱」——靠右的那位。
+   FOCUS_ME 跟著名字欄動(改名字不會把鏡頭釘在舊名字)、FOCUS_NONE 是全員靠左的觀戰視角、
+   其餘值為具名主角(以他人視角回顧)。發言身分(名字欄)與觀看視角在此分離。 */
+const FOCUS_ME = "@me";
+const FOCUS_NONE = "none";
+
 /* ═══════════ ChatApi(Repository:HTTP 唯一出入口)═══════════ */
 
 function createApi(notify) {
@@ -281,12 +287,26 @@ const HoloModal = {
 };
 
 const ChatHeader = {
-  props: ["room", "rooms", "status", "activeTasks", "msgCount", "lastId", "onlineMembers", "focusMode"],
-  emits: ["switch-room", "toggle-focus", "open-member", "adjust-font"],
+  data() { return { FOCUS_ME, FOCUS_NONE }; },  // 樣板要讀得到鏡頭常數
+  props: ["room", "rooms", "status", "activeTasks", "msgCount", "lastId", "onlineMembers",
+          "focusTarget", "focusName"],
+  emits: ["switch-room", "toggle-focus", "open-member", "set-focus", "adjust-font"],
   computed: {
     statusText() { return { connecting: "CONNECTING", online: "ONLINE", reconnecting: "RECONNECT" }[this.status]; },
+    /** 鏡頭狀態:ME(跟著名字欄)/ 具名(以他人為第一人稱)/ OFF(全員靠左)。 */
+    focusLabel() {
+      if (this.focusTarget === FOCUS_NONE) return "FOCUS: OFF";
+      if (this.focusTarget === FOCUS_ME) return "FOCUS: ME";
+      return "FOCUS: " + String(this.focusTarget).toUpperCase();
+    },
+    /** 鏡頭鈕染上主角色相 — 一眼看出「現在用誰的眼睛在看」。 */
+    focusStyle() {
+      if (!this.focusName) return {};
+      const c = colorHexOf(this.focusName);
+      return { color: c, borderColor: c };
+    },
   },
-  methods: { avatarOf },
+  methods: { avatarOf, colorHexOf },
   template: `
   <header>
     <span class="hdr-title mono">&gt;&gt; ROOM_{{ room.toUpperCase() }}</span>
@@ -297,8 +317,11 @@ const ChatHeader = {
     <span class="lamp" :class="status"></span>
     <span class="lamp-text mono" :class="{ glitching: status === 'reconnecting' }">{{ statusText }}</span>
     <span class="online-row">
-      <img v-for="m in onlineMembers" :key="m.name" :src="avatarOf(m.name)" :title="m.name"
-           @click="$emit('open-member', m.name)">
+      <img v-for="m in onlineMembers" :key="m.name" :src="avatarOf(m.name)"
+           :title="'以 ' + m.name + ' 的視角檢視(再點一次交回自己)'"
+           :class="{ focused: m.name === focusName && focusTarget !== FOCUS_ME }"
+           :style="m.name === focusName ? { borderColor: colorHexOf(m.name) } : {}"
+           @click="$emit('set-focus', focusTarget === m.name ? FOCUS_ME : m.name)">
     </span>
     <span class="spacer"></span>
     <span class="font-ctl" title="聊天字級">
@@ -306,29 +329,38 @@ const ChatHeader = {
       <button class="mono" @click="$emit('adjust-font', 0)">A</button>
       <button class="mono" @click="$emit('adjust-font', 2)">A+</button>
     </span>
-    <button class="focus-toggle mono" :class="{ on: focusMode }" @click="$emit('toggle-focus')">FOCUS</button>
+    <button class="focus-toggle mono" :class="{ on: !!focusName }" :style="focusStyle"
+            @click="$emit('toggle-focus')">{{ focusLabel }}</button>
     <span class="meta mono" :class="{ 'task-counter': activeTasks, zero: !activeTasks }">TASKS:{{ activeTasks }}</span>
     <span class="meta mono msg-count">MSG:{{ msgCount }} LAST:#{{ lastId }}</span>
   </header>`,
 };
 
 const MessageItem = {
-  props: ["m", "grouped", "me", "focusMode", "taskInfo"],
+  props: ["m", "grouped", "me", "focusName", "taskInfo"],
   emits: ["reply", "jump", "open-member", "open-task", "copy", "anchor"],
   computed: {
-    isOwn() { return this.m.from === this.me; },
+    /** 靠右的是「鏡頭主角」而非固定的自己 — focusName 由 root 解析(ME/具名/null)。 */
+    isFocused() { return !!this.focusName && this.m.from === this.focusName; },
     /** tokenize 內部讀 rt.mentionPattern(reactive)→ config 熱替換會觸發重算 */
     tokens() { return tokenize(this.m.text); },
     senderColor() { return colorHexOf(this.m.from); },
     registered() { return this.m.from in rt.palette; },
+    /** 綠邊永遠關於「我」:警示不因換鏡頭而失效(語意色獨占鐵律)。 */
     pingMe() { return (this.m.mentions || []).includes(this.me); },
+    /** 主角被點名:用主角自己的色相標記,不搶語意綠 — 兩個資訊同框不打架。 */
+    pingFocus() {
+      return !!this.focusName && this.focusName !== this.me
+        && (this.m.mentions || []).includes(this.focusName);
+    },
+    focusColor() { return this.focusName ? colorHexOf(this.focusName) : "transparent"; },
     badge() { return stateMeta(this.taskInfo ? this.taskInfo.state : null); },
   },
   methods: { avatarOf, fmtTime, fmtFull },
   template: `
   <div class="msg" :id="'msg-' + m.id"
-       :class="{ grouped, own: focusMode && isOwn, 'ping-me': pingMe }"
-       :style="{ '--sender': senderColor }">
+       :class="{ grouped, own: isFocused, 'ping-me': pingMe, 'ping-focus': pingFocus }"
+       :style="{ '--sender': senderColor, '--focus-color': focusColor }">
     <div class="gutter">
       <img v-if="!grouped" class="avatar" :src="avatarOf(m.from)" :style="{ borderColor: senderColor }"
            :title="m.from" @click="$emit('open-member', m.from)">
@@ -416,13 +448,20 @@ createApp({
       toast: null,
       toastOk: false,
       modal: null,   // { type: 'member'|'task', ... }
-      focusMode: localStorage.getItem("a2a-focus") !== "0", // 預設開(自己靠右,聊天慣例)
+      // 鏡頭目標:預設 ME(自己靠右,聊天慣例);舊版存的 "0" 對映到觀戰視角
+      focusTarget: localStorage.getItem("a2a-focus") === "0"
+        ? FOCUS_NONE : (localStorage.getItem("a2a-focus") || FOCUS_ME),
       bubbleFont: parseInt(localStorage.getItem("a2a-font") || "18", 10), // 聊天字級 px,A-/A/A+ 調整
       nowTick: Date.now(),  // 每分鐘跳動,驅動在線狀態的重新計算
     };
   },
   computed: {
     myName() { return this.name.trim() || "user"; },
+    /** 鏡頭目標解析成實際名字:ME → 我、具名 → 該人、OFF → null(全員靠左)。 */
+    focusName() {
+      if (this.focusTarget === FOCUS_NONE) return null;
+      return this.focusTarget === FOCUS_ME ? this.myName : this.focusTarget;
+    },
     authOn() { return rt.authEnabled; },  // 模板需要 reactive 依賴,包一層 computed
     onlineMembers() { return this.members.filter((m) => this.isOnline(m)).slice(0, 6); },
     /** timeline 的顯示列:日期分隔線 + ── NEW ── 未讀線 + 訊息(含 grouping 判定)。 */
@@ -630,9 +669,21 @@ createApp({
 
     /* ── 偏好 ── */
     switchRoom(room) { location.href = `?room=${encodeURIComponent(room)}`; },
+    /** 鏡頭鈕 = 回家鍵:看著別人時一鍵歸位;已在自己時切換觀戰視角(全員靠左)。 */
     toggleFocus() {
-      this.focusMode = !this.focusMode;
-      localStorage.setItem("a2a-focus", this.focusMode ? "1" : "0");
+      if (this.focusTarget !== FOCUS_ME && this.focusTarget !== FOCUS_NONE) {
+        return this.setFocus(FOCUS_ME);
+      }
+      this.setFocus(this.focusTarget === FOCUS_ME ? FOCUS_NONE : FOCUS_ME);
+    },
+    /** 持久化分級:ME/OFF 是長期偏好(記住),具名是臨時檢視(關頁即忘)——
+        否則明天打開會發現自己的話在左邊、別人在右邊,一頭霧水。 */
+    setFocus(target) {
+      this.focusTarget = target;
+      if (target === FOCUS_ME || target === FOCUS_NONE) {
+        localStorage.setItem("a2a-focus", target);
+      }
+      if (this.modal && this.modal.type === "member") this.modal = null;  // 從彈窗切換即關窗
     },
     /** 字級調整:delta ±2 步進、0 = 回預設 18;夾在 14~26 之間。 */
     adjustFont(delta) {

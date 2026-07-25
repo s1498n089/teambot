@@ -101,6 +101,7 @@ select.room-switch {
 .online-row { display: flex; gap: 4px; align-items: center; }
 .online-row img { width: 22px; height: 22px; cursor: pointer; border: 1px solid var(--border); }
 .online-row img:hover { border-color: var(--green); }
+.online-row img.focused { border-width: 2px; }  /* 當前鏡頭主角:頭像描邊染其色相(inline style) */
 .spacer { flex: 1; }
 .meta { color: var(--muted); font-size: 11px; letter-spacing: 1px; white-space: nowrap; }
 .task-counter { color: var(--amber); }
@@ -174,6 +175,17 @@ main {
   max-width: min(600px, 72%);    /* 呼吸感上限 */
 }
 /* 被點名的訊息:左緣語意綠 glow(clip-path 內只能用 inset shadow,外部 glow 會被切掉) */
+/* 鏡頭主角被點名:用主角色相標記,不搶語意綠 — 綠永遠只代表「關於我」。
+   寫在 ping-me 之前:同一則訊息若兩者皆中,綠(關於我)覆蓋主角色相。 */
+.msg.ping-focus .bubble {
+  border-left: 2px solid var(--focus-color);
+  box-shadow: inset 4px 0 14px -8px var(--focus-color);
+}
+.msg.own.ping-focus .bubble {
+  border-left: 1px solid var(--border);
+  border-right: 2px solid var(--focus-color);
+  box-shadow: inset -4px 0 14px -8px var(--focus-color);
+}
 .msg.ping-me .bubble {
   border-left: 2px solid var(--green);
   box-shadow: inset 4px 0 14px -8px var(--green);

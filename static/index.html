@@ -18,9 +18,9 @@
 <div id="app" v-cloak>
   <chat-header :room="room" :rooms="rooms" :status="status" :active-tasks="tasks.active"
                :msg-count="messages.length" :last-id="lastId" :online-members="onlineMembers"
-               :focus-mode="focusMode"
+               :focus-target="focusTarget" :focus-name="focusName"
                @switch-room="switchRoom" @toggle-focus="toggleFocus" @open-member="openMember"
-               @adjust-font="adjustFont">
+               @set-focus="setFocus" @adjust-font="adjustFont">
   </chat-header>
 
   <div v-if="toast" class="toast mono" :class="{ ok: toastOk }">{{ toast }}</div>
@@ -33,7 +33,7 @@
     <template v-for="r in rows" :key="r.key">
       <div v-if="r.type === 'sep'" class="datesep mono">── {{ r.date }} ──</div>
       <div v-else-if="r.type === 'unread'" class="unread-sep mono">── NEW ──</div>
-      <message-item v-else :m="r.m" :grouped="r.grouped" :me="myName" :focus-mode="focusMode"
+      <message-item v-else :m="r.m" :grouped="r.grouped" :me="myName" :focus-name="focusName"
                     :task-info="tasks.map[r.m.task_id]"
                     @reply="setReply" @jump="jumpTo" @open-member="openMember"
                     @open-task="openTask" @copy="copyText" @anchor="anchorLink">
@@ -70,6 +70,7 @@
         <div class="stat"><span class="k mono">FIRST SEEN</span><span class="v mono">{{ modal.member.firstSeen ? fmtFull(modal.member.firstSeen) : '—' }}</span></div>
         <div class="stat"><span class="k mono">LAST SEEN</span><span class="v mono">{{ modal.member.lastSeen ? fmtFull(modal.member.lastSeen) : '—' }}</span></div>
       </div>
+      <span class="modal-link mono" @click="setFocus(modal.member.name)">&gt;&gt; 以此視角檢視</span>
       <span v-if="isRegistered(modal.member.name) && modal.member.name !== 'user'" class="modal-link mono"
             @click="openAgentCard(modal.member.name)">&gt;&gt; AGENT CARD</span>
     </template>
