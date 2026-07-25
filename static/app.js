@@ -172,7 +172,7 @@ function createApi(notify) {
     },
     /** 發任務:走 A2A 正門而非聊天門。UI 一律 returnImmediately —
         阻塞版會讓畫面卡到對方回覆或逾時。 */
-    async sendTask(target, { text, sender, deadlineSeconds, token }) {
+    async sendTask(target, { room, text, sender, deadlineSeconds, token }) {
       const headers = { "Content-Type": "application/json" };
       if (token) headers["Authorization"] = `Bearer ${token}`;
       const res = await fetch(`/agents/${target}/a2a`, {
@@ -181,7 +181,7 @@ function createApi(notify) {
           jsonrpc: "2.0", id: 1, method: "SendMessage",
           params: {
             message: { role: "ROLE_USER", parts: [{ text }],
-                       messageId: crypto.randomUUID(), contextId: "main" },
+                       messageId: crypto.randomUUID(), contextId: room },  // = 當前房間
             configuration: { returnImmediately: true },
             metadata: { senderName: sender, deadlineSeconds },
           },
@@ -706,7 +706,8 @@ createApp({
       const sender = this.myName;
       localStorage.setItem("a2a-name", sender);
       const res = await this.api.sendTask(target, {
-        text, sender, deadlineSeconds, token: this.authOn ? this.token : null });
+        room: this.room, text, sender, deadlineSeconds,
+        token: this.authOn ? this.token : null });
       if (!res.ok) {
         const err = res.data.error || res.data;
         this.showToast(`>> 任務發送失敗:${err.message || err.detail || "unknown"}`, false);
