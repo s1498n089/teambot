@@ -194,7 +194,10 @@ class Task:
         history = self.history
         if history_length is not None:
             n = max(0, int(history_length))
-            history = history[-n:] if n else []
+            if n:
+                history = history[-n:]      # 只留最後 n 筆
+            else:
+                history = []                # 要 0 筆就是不要
         status: dict = {"state": self.state, "timestamp": self.state_ts}
         if self.state_message is not None:
             status["message"] = self.state_message
@@ -277,7 +280,9 @@ class TaskRegistry:
 
     def by_feed(self, room: str, feed_mid: int) -> Task | None:
         tid = self._by_feed.get((room, feed_mid))
-        return self._by_id.get(tid) if tid else None
+        if not tid:
+            return None
+        return self._by_id.get(tid)
 
     def in_room(self, room: str) -> list[Task]:
         return [self._by_id[t] for t in self._by_room.get(room, [])]
@@ -377,7 +382,10 @@ class A2ALayer:
         (否則 deadline 形同橡皮筋)。
         """
         try:
-            await asyncio.sleep(seconds if seconds is not None else task.deadline_seconds)
+            wait_seconds = seconds
+            if wait_seconds is None:
+                wait_seconds = task.deadline_seconds
+            await asyncio.sleep(wait_seconds)
         except asyncio.CancelledError:
             return  # 正常完成時被取消
         task.metadata["failureReason"] = f"deadline {task.deadline_seconds}s exceeded"
@@ -516,9 +524,16 @@ class A2ALayer:
 
     async def _list_tasks(self, agent: str, params: dict) -> dict:
         context = params.get("contextId")
-        tasks = self.registry.in_room(context) if context else \
-            [self.registry.get(t) for t in self.registry.all_ids()]
-        return {"tasks": [t.to_spec(params.get("historyLength")) for t in tasks]}
+
+        if context:
+            tasks = self.registry.in_room(context)      # 只要這個房間的
+        else:
+            tasks = []                                   # 沒指定房間就全部
+            for task_id in self.registry.all_ids():
+                tasks.append(self.registry.get(task_id))
+
+        history_length = params.get("historyLength")
+        return {"tasks": [t.to_spec(history_length) for t in tasks]}
 
     async def _cancel_task(self, agent: str, params: dict) -> dict:
         task = self._require_task(params)

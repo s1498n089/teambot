@@ -52,7 +52,9 @@ now_iso = a2a_mod.now_iso  # 時戳格式的單一定義在 a2a.py(UTC RFC3339 �
 def sanitize_sender(raw: str) -> str | None:
     """名字消毒:strip 後過白名單,不合法回 None(呼叫端決定 422 或 fallback)。"""
     name = (raw or "").strip()
-    return name if SENDER_RE.match(name) else None
+    if SENDER_RE.match(name):
+        return name
+    return None
 
 
 # ---------- 自訂例外(409/422 例外化,B 清單)----------
@@ -178,8 +180,11 @@ class MessageStore:
                 print(f"[store] WARN skip bad line {lineno}: {exc}", file=sys.stderr)
 
     def last_id(self, room: str) -> int:
+        """這個房間最新一則訊息的編號。空房間回 0。"""
         msgs = self.rooms.get(room, [])
-        return msgs[-1]["id"] if msgs else 0
+        if not msgs:
+            return 0
+        return msgs[-1]["id"]
 
     def count(self, room: str) -> int:
         """訊息數(補齊封裝,路由不再直摸內部 dict)。"""
@@ -197,17 +202,26 @@ class MessageStore:
         """三種查詢模式:agent 用 since_id(+mentioned 輕量預檢)向前撈;
         UI 用 tail=N 撈最近、before_id+tail 向上懶載。回傳 (訊息, 房間最新 id)。"""
         msgs = self.rooms.get(room, [])
-        last = msgs[-1]["id"] if msgs else 0
+        last = self.last_id(room)
+
+        # 模式一:UI 往上捲,要「某則之前」的那一批
         if before_id is not None:
-            sel = [m for m in msgs if m["id"] < before_id][-(tail or 100):]
-        elif tail is not None:
-            sel = msgs[-tail:]
-        else:
-            sel = [m for m in msgs if m["id"] > since_id]
-            if mentioned is not None:
-                sel = [m for m in sel if mentioned in m.get("mentions", [])]
-            sel = sel[:limit]
-        return sel, last
+            older = [m for m in msgs if m["id"] < before_id]
+            page_size = tail
+            if page_size is None:
+                page_size = 100
+            sel = older[-page_size:]          # 取最後 N 則 = 離 before_id 最近的 N 則
+            return sel, last
+
+        # 模式二:UI 開頁,要最新的 N 則
+        if tail is not None:
+            return msgs[-tail:], last
+
+        # 模式三:agent 對帳,要「我的游標之後」的所有訊息
+        sel = [m for m in msgs if m["id"] > since_id]
+        if mentioned is not None:
+            sel = [m for m in sel if mentioned in m.get("mentions", [])]
+        return sel[:limit], last
 
     def append(self, room: str, sender: str, text: str, mentions: list[str],
                reply_to: int | None = None, task_id: str | None = None) -> dict:
@@ -229,8 +243,11 @@ class MessageStore:
         return msg
 
     def rooms_index(self) -> list[dict]:
-        return [{"name": r, "count": len(msgs), "last_id": msgs[-1]["id"] if msgs else 0}
-                for r, msgs in sorted(self.rooms.items())]
+        """所有房間的一覽:名字、訊息數、最新編號(給 UI 的房間下拉選單用)。"""
+        index = []
+        for name, msgs in sorted(self.rooms.items()):
+            index.append({"name": name, "count": len(msgs), "last_id": self.last_id(name)})
+        return index
 
     def members(self, room: str) -> list[dict]:
         """成員統計,全從歷史推導、零新狀態。lastSeen 只在「發言」時更新,
@@ -586,7 +603,9 @@ def create_app(port: int | None = None, host: str | None = None,
         last_event_id = request.headers.get("last-event-id")
         if last_event_id and last_event_id.isdigit():
             since_id = int(last_event_id)
-        name = sanitize_sender(watcher) if watcher else None
+        name = None
+        if watcher:
+            name = sanitize_sender(watcher)
         if name and auth_enabled:
             try:
                 check_writer(name, request)
@@ -657,7 +676,10 @@ def create_app(port: int | None = None, host: str | None = None,
                                    "description": body.description,
                                    "skills": body.skills})
         # AUTH=on 時隨註冊發一次性 token(明文僅此一次;勿貼進聊天室)
-        token = token_store.issue(name) if auth_enabled else None
+        # 只有開了認證才需要發鑰匙;沒開認證時發了也沒人會驗
+        token = None
+        if auth_enabled:
+            token = token_store.issue(name)
         return {"agentCard": a2a_layer.agent_card(name), "token": token}
 
     @app.get("/agents/{name}/.well-known/agent-card.json")

@@ -281,10 +281,16 @@ def run_windows(cmd: list[str], state_factory) -> int:
                 except (EOFError, OSError):
                     return  # 同 guarded_write:子行程剛走,調整視窗已無意義
 
+    def watch_room() -> None:
+        """背景執行緒:盯著 hub 的直播,有新訊息就敲鈴。"""
+        sse_watch(state.server, state.room, state, alive)
+
+    def keep_ringing() -> None:
+        """背景執行緒:敲了沒反應就再敲(節拍器)。"""
+        re_ring_loop(state, alive)
+
     try:
-        for fn in (pump_input, watch_resize,
-                   lambda: sse_watch(state.server, state.room, state, alive),
-                   lambda: re_ring_loop(state, alive)):
+        for fn in (pump_input, watch_resize, watch_room, keep_ringing):
             threading.Thread(target=fn, daemon=True).start()
         pump_output()  # 主執行緒守輸出;子行程退出即結束
         return proc.exitstatus or 0
@@ -306,15 +312,33 @@ def run_posix(cmd: list[str], state_factory) -> int:
 
     write_lock = threading.Lock()  # 同 Windows:鈴聲與打字不互插
 
+    def write_to_child(payload: bytes) -> None:
+        os.write(master, payload)
+
     def safe_write(data: bytes) -> bool:
-        return guarded_write(lambda payload: os.write(master, payload), data, write_lock)
+        return guarded_write(write_to_child, data, write_lock)
 
-    state: BellState = state_factory(lambda text: safe_write(text.encode("utf-8")))
-    alive = lambda: True  # 以 EOF 判終,見下方讀迴圈
+    def ring(text: str) -> bool:
+        """鈴聲是字串,但 pty 收的是位元組,所以在這裡轉一次。"""
+        return safe_write(text.encode("utf-8"))
 
-    threading.Thread(target=lambda: sse_watch(state.server, state.room, state, alive),
-                     daemon=True).start()
-    threading.Thread(target=lambda: re_ring_loop(state, alive), daemon=True).start()
+    def alive() -> bool:
+        """POSIX 這邊不查子行程狀態,改以「讀到 EOF」判定結束(見下方讀迴圈),
+        所以這裡永遠回 True —— 執行緒都是 daemon,主迴圈收工就一起走。"""
+        return True
+
+    state: BellState = state_factory(ring)
+
+    def watch_room() -> None:
+        """背景執行緒:盯著 hub 的直播,有新訊息就敲鈴。"""
+        sse_watch(state.server, state.room, state, alive)
+
+    def keep_ringing() -> None:
+        """背景執行緒:敲了沒反應就再敲(節拍器)。"""
+        re_ring_loop(state, alive)
+
+    threading.Thread(target=watch_room, daemon=True).start()
+    threading.Thread(target=keep_ringing, daemon=True).start()
 
     old_attrs = termios.tcgetattr(sys.stdin)
     tty.setraw(sys.stdin.fileno())
@@ -366,7 +390,11 @@ def main() -> int:
     LOG_PATH.parent.mkdir(exist_ok=True)
 
     def state_factory(write_fn) -> BellState:
-        state = BellState(cursor_path, lambda: write_fn(BELL_TEXT + BELL_SUBMIT))
+        def ring_the_bell() -> bool:
+            """真正的「敲鈴」動作:往子行程送一行固定暗號 + 送出鍵。"""
+            return write_fn(BELL_TEXT + BELL_SUBMIT)
+
+        state = BellState(cursor_path, ring_the_bell)
         state.name = args.name
         state.server = args.server.rstrip("/")
         state.room = args.room
