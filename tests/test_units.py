@@ -1,6 +1,7 @@
 """單元/邊界層:純函式與小類別,毫秒級,不建 app。"""
 from __future__ import annotations
 
+import threading
 import time
 
 import pytest
@@ -224,6 +225,50 @@ class TestSpecConstants:
         assert bell_mod.MAX_RINGS == 3
         assert bell_mod.BELL_TEXT == "[A2A-BELL] cursor updated"
         assert bell_mod.BELL_SUBMIT == chr(13)  # ConPTY 送出鍵,換行符會讓鈴聲躺在輸入框
+
+    def test_term_restore_contract(self):
+        """離場清潔序列缺一不可:少了 9001l,退出後 PowerShell 的每個按鍵
+        都會被印成 ESC[...;0;1_ 亂碼(實地災情,不是假想)。"""
+        for seq, why in [("\x1b[?9001l", "win32-input-mode"), ("\x1b[?1004l", "focus reporting"),
+                         ("\x1b[?2004l", "bracketed paste"), ("\x1b[?1049l", "alternate screen"),
+                         ("\x1b[?25h", "游標"), ("\x1b[0m", "SGR")]:
+            assert seq in bell_mod.TERM_RESTORE, f"{why} 沒關,終端機會髒給下一個程式"
+
+
+# ---------- guarded_write(退出競態)----------
+
+class TestGuardedWrite:
+    """子行程退出的瞬間仍可能有東西要寫(殘留按鍵、剛好撞上的鈴聲)。
+    那是正常終局,不是錯誤 —— 不該讓使用者看到 EOFError 堆疊。"""
+
+    def test_normal_write_passes_through(self):
+        got = []
+        assert bell_mod.guarded_write(got.append, "hi", threading.Lock()) is True
+        assert got == ["hi"]
+
+    @pytest.mark.parametrize("exc", [EOFError("Pty is closed"),   # pywinpty 實際丟的
+                                     OSError(5, "Input/output error"),  # POSIX master 已關
+                                     ValueError("I/O operation on closed file")])
+    def test_closed_child_swallowed(self, exc):
+        def boom(_):
+            raise exc
+        assert bell_mod.guarded_write(boom, "x", threading.Lock()) is False  # 不拋,誠實回報沒寫進去
+
+    def test_lock_is_held_during_write(self):
+        """打字與鈴聲共用一把鎖 —— 沒鎖住就會互相插隊,鈴聲被剖成兩半。"""
+        lock, seen = threading.Lock(), []
+        assert bell_mod.guarded_write(lambda _: seen.append(lock.locked()), "x", lock) is True
+        assert seen == [True]
+
+    def test_lock_released_after_failure(self):
+        """吞例外不能連鎖也一起吞掉:失敗後鎖沒放,下一次寫入就永久卡死。"""
+        lock = threading.Lock()
+
+        def boom(_):
+            raise EOFError("Pty is closed")
+
+        bell_mod.guarded_write(boom, "x", lock)
+        assert lock.locked() is False
 
 
 # ---------- BellState ----------

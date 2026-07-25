@@ -40,6 +40,20 @@ RECONNECT_MAX_BACKOFF = 30
 
 LOG_PATH: Path | None = None  # main() 依 --name 指定;None 時退回 stderr(僅啟動失敗前)
 
+# 離場時把終端機交還乾淨。TUI 子行程開了一堆終端機私有模式,若在它(或我們)退出時
+# 沒關,狀態會留給下一個程式 —— 最明顯的災情是 win32-input-mode 沒關,退回 PowerShell 後
+# 每個按鍵都被編成 ESC[...;0;1_ 印成亂碼,鍵盤等同壞掉。
+# 送出順序有講究:序列要在還原 console mode 之前送(那時 VT 輸出處理還開著),否則會被當字面印出來。
+TERM_RESTORE = (
+    "\x1b[?9001l"                                    # win32-input-mode off(亂碼元凶)
+    "\x1b[?1004l"                                    # focus reporting off(會吐 ESC[I / ESC[O)
+    "\x1b[?2004l"                                    # bracketed paste off
+    "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l"   # mouse tracking off
+    "\x1b[?1049l"                                    # 離開 alternate screen
+    "\x1b[?25h"                                      # 游標顯示(TUI 常藏起來)
+    "\x1b[0m"                                        # 顏色與屬性歸零
+)
+
 
 def log(msg: str) -> None:
     """敲鈴器狀態訊息寫檔(state/bell-<名字>.log)— stderr 與子行程 TUI 共用終端,
@@ -53,6 +67,22 @@ def log(msg: str) -> None:
             f.write(line)
     except OSError:
         pass  # log 寫不進去不能反過來炸掉轉發
+
+
+def guarded_write(write_fn, payload, lock) -> bool:
+    """所有「寫進子行程」的唯一閘門(打字與鈴聲共用一把鎖,互不插隊)。
+
+    吞掉寫入失敗是刻意的:子行程一退出,pty/master 隨即關閉,而此刻仍可能有東西要寫 ——
+    退出瞬間殘留在終端機緩衝的按鍵、或剛好撞上的鈴聲。isalive() 擋不住這個空檔
+    (檢查與寫入之間子行程就死了),所以退出時噴 EOFError('Pty is closed') 堆疊
+    其實是「正常終局被當成錯誤」。回傳是否真的寫進去了。
+    """
+    with lock:
+        try:
+            write_fn(payload)
+            return True
+        except (EOFError, OSError, ValueError):
+            return False  # ValueError:POSIX 端 master fd 已被關閉
 
 
 class BellState:
@@ -161,16 +191,27 @@ def run_windows(cmd: list[str], state_factory) -> int:
     kernel32.GetConsoleMode(hin, ctypes.byref(in_mode))
     raw_mode = (in_mode.value | 0x0200) & ~(0x0001 | 0x0002 | 0x0004)  # +VT_INPUT -PROCESSED -LINE -ECHO
     vt_input = bool(kernel32.SetConsoleMode(hin, raw_mode))
+    old_in_cp = kernel32.GetConsoleCP()
     if vt_input:
         kernel32.SetConsoleCP(65001)  # 輸入位元組走 UTF-8,中文 IME 不亂碼
+
+    def restore_terminal() -> None:
+        """離場清潔工:借來的終端機狀態全部歸還 —— 少了這段,退出後鍵盤會吐亂碼。"""
+        try:
+            sys.stdout.write(TERM_RESTORE)
+            sys.stdout.flush()
+        except (OSError, ValueError):
+            pass
+        kernel32.SetConsoleMode(hin, in_mode.value)    # 先送序列再還原,順序不能顛倒
+        kernel32.SetConsoleMode(hout, out_mode.value)
+        kernel32.SetConsoleCP(old_in_cp)
 
     cols, rows = shutil.get_terminal_size()
     proc = PtyProcess.spawn(cmd, dimensions=(rows, cols), cwd=str(BASE))
     write_lock = threading.Lock()  # 鈴聲(SSE 執行緒)與打字(輸入執行緒)不互插
 
     def safe_write(text: str) -> None:
-        with write_lock:
-            proc.write(text)
+        guarded_write(proc.write, text, write_lock)
 
     state: BellState = state_factory(safe_write)
 
@@ -225,14 +266,20 @@ def run_windows(cmd: list[str], state_factory) -> int:
             c, r = shutil.get_terminal_size()
             if (c, r) != (cols, rows):
                 cols, rows = c, r
-                proc.setwinsize(r, c)
+                try:
+                    proc.setwinsize(r, c)
+                except (EOFError, OSError):
+                    return  # 同 guarded_write:子行程剛走,調整視窗已無意義
 
-    for fn in (pump_input, watch_resize,
-               lambda: sse_watch(state.server, state.room, state, alive),
-               lambda: re_ring_loop(state, alive)):
-        threading.Thread(target=fn, daemon=True).start()
-    pump_output()  # 主執行緒守輸出;子行程退出即結束
-    return proc.exitstatus or 0
+    try:
+        for fn in (pump_input, watch_resize,
+                   lambda: sse_watch(state.server, state.room, state, alive),
+                   lambda: re_ring_loop(state, alive)):
+            threading.Thread(target=fn, daemon=True).start()
+        pump_output()  # 主執行緒守輸出;子行程退出即結束
+        return proc.exitstatus or 0
+    finally:
+        restore_terminal()
 
 
 # ---------- POSIX(Mac/Linux):std lib pty ----------
@@ -250,8 +297,7 @@ def run_posix(cmd: list[str], state_factory) -> int:
     write_lock = threading.Lock()  # 同 Windows:鈴聲與打字不互插
 
     def safe_write(data: bytes) -> None:
-        with write_lock:
-            os.write(master, data)
+        guarded_write(lambda payload: os.write(master, payload), data, write_lock)
 
     state: BellState = state_factory(lambda text: safe_write(text.encode("utf-8")))
     alive = lambda: True  # 以 EOF 判終,見下方讀迴圈
@@ -279,7 +325,14 @@ def run_posix(cmd: list[str], state_factory) -> int:
                     break
                 os.write(sys.stdout.fileno(), data)
     finally:
+        # 與 Windows 端對稱:termios 只還原「我們」動過的,子行程留下的終端機私有模式
+        # (alternate screen、mouse、focus reporting…)得另外關,否則同樣髒給下一個程式
         termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_attrs)
+        try:
+            sys.stdout.write(TERM_RESTORE)
+            sys.stdout.flush()
+        except (OSError, ValueError):
+            pass
     _, status = os.waitpid(pid, 0)
     return os.waitstatus_to_exitcode(status)
 
