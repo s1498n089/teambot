@@ -124,26 +124,36 @@ const FOCUS_NONE = "none";
 function createApi(notify) {
   let failStreak = 0;
 
-  /** 通用 GET/RPC:失敗 console.warn,連續失敗才 toast(誠實原則)。 */
-  async function request(url, options) {
+  /** 通用 GET/RPC:失敗 console.warn,連續失敗才 toast(誠實原則)。
+
+      quiet=true 給「背景輪詢」用:失敗不計入 failStreak、不彈 toast —
+      次要功能壞掉不該蓋住使用者的畫面,而「連線真的斷了」有 header 的
+      SERVER 燈負責通報,分工清楚。錯誤帶 status 供呼叫端做 404 降級。 */
+  async function request(url, options, quiet) {
     try {
       const res = await fetch(url, options);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      failStreak = 0;
+      if (!res.ok) {
+        const err = new Error(`HTTP ${res.status}`);
+        err.status = res.status;
+        throw err;
+      }
+      if (!quiet) failStreak = 0;
       return await res.json();
     } catch (err) {
       console.warn("[api]", url, err.message || err);
-      if (++failStreak >= API_FAIL_TOAST_THRESHOLD) notify(`>> API 連續失敗:${url}`, false);
+      if (!quiet && ++failStreak >= API_FAIL_TOAST_THRESHOLD) {
+        notify(`>> API 連續失敗:${url}`, false);
+      }
       throw err;
     }
   }
 
   return {
     config: () => request("/api/config"),
-    rooms: () => request("/api/rooms"),
-    members: (room) => request(`/api/rooms/${room}/members`),
-    tasks: (room) => request(`/api/rooms/${room}/tasks`),
-    presence: (room) => request(`/api/rooms/${room}/presence`),
+    rooms: () => request("/api/rooms", undefined, true),
+    members: (room) => request(`/api/rooms/${room}/members`, undefined, true),
+    tasks: (room) => request(`/api/rooms/${room}/tasks`, undefined, true),
+    presence: (room) => request(`/api/rooms/${room}/presence`, undefined, true),
     messages: (room, qs) => request(`/api/rooms/${room}/messages?${qs}`),
     /** 發言例外:4xx 的 detail 是要給使用者看的,不走 throw,回 {ok, status, data}。
         token 有值時附 Authorization(AUTH=on 的寫入守門,roadmap ③)。 */
@@ -440,6 +450,7 @@ createApp({
       messages: [],
       members: [],
       present: [],   // 在場名單(SSE 連線開著的人)— presence 的事實來源
+      presenceSupported: true,  // 舊版 hub 沒有 /presence:404 後自動停用並退回舊判定
       rooms: [],
       lastId: 0,
       name: localStorage.getItem("a2a-name") || "user",
@@ -469,6 +480,9 @@ createApp({
     authOn() { return rt.authEnabled; },  // 模板需要 reactive 依賴,包一層 computed
     /** 頭像列 = 在場者(含安靜待命的);離線者不佔位。 */
     onlineMembers() {
+      if (!this.presenceSupported) {
+        return this.members.filter((m) => this.presenceOf(m) === "active").slice(0, 6);
+      }
       return this.present.map((name) => this.members.find((m) => m.name === name) || { name })
         .slice(0, 6);
     },
@@ -551,6 +565,11 @@ createApp({
         在場 = SSE 連線開著(bell 或瀏覽器),不再拿「最近有沒有發言」猜在不在。 */
     presenceOf(member) {
       const name = typeof member === "string" ? member : member.name;
+      if (!this.presenceSupported) {  // 舊 hub 的退路:回到「近期發言 = 在線」的舊語意
+        const seen = (typeof member === "object" && member.lastSeen)
+          ? new Date(member.lastSeen).getTime() : 0;
+        return this.nowTick - seen < ACTIVE_WINDOW_MS ? "active" : "offline";
+      }
       if (!this.present.includes(name)) return "offline";
       const seen = (typeof member === "object" && member.lastSeen)
         ? new Date(member.lastSeen).getTime() : 0;
@@ -560,8 +579,15 @@ createApp({
       return { active: "● ACTIVE", standby: "◐ STANDBY", offline: "○ OFFLINE" }[this.presenceOf(member)];
     },
     async loadPresence() {
+      if (!this.presenceSupported) return;   // 舊 hub:別再打了,免得白吵
       try { this.present = (await this.api.presence(this.room)).present; }
-      catch (e) { /* request 已記錄;維持上次名單 */ }
+      catch (e) {
+        if (e && e.status === 404) {  // 端點不存在 = hub 比前端舊,優雅降級
+          this.presenceSupported = false;
+          this.present = [];
+          console.warn("[presence] hub 尚未支援 /presence,退回以發言時間推測在線");
+        }
+      }
     },
 
     /* ── SSE 進訊息:具名 handler 鏈(一步一責)── */
