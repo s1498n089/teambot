@@ -418,9 +418,15 @@ def create_app(port: int | None = None, host: str | None = None,
     鎖 → 樂觀鎖驗證 → reply_to 驗證 → 解析 mentions → 落地 → 廣播 → 通知 A2A 層。
     A2A 完成橋接以 callback 顯式注入 — 一行誠實的呼叫,宣告在組裝處。
 
-    遠端化(roadmap ①):HOST 控制綁定位址(預設只聽本機);PUBLIC_URL 決定
+    遠端化(roadmap ①):HOST 控制綁定位址,**預設 0.0.0.0 = 開放區網**
+    (見 DEFAULT_HOST;要只聽本機請設 HOST=127.0.0.1)。PUBLIC_URL 決定
     Agent Card 對外宣告的位址 — 開放綁定卻沒設它時,遠端 client 會拿到
     對它無效的 127.0.0.1,故啟動時印警告。
+
+    註:這段文字原本寫著「預設只聽本機」,與 DEFAULT_HOST 的實際值矛盾了一段時間
+    (2026-07-26 修正)。同一份程式裡兩處說法打架時,以有程式碼在旁邊的那處為準 ——
+    這裡的教訓是:改預設值時要一併搜尋描述它的文字,常數改了、說明沒改,
+    比沒有說明更糟。
     """
     port = port or int(os.environ.get("PORT", str(DEFAULT_PORT)))
     host = host or os.environ.get("HOST", DEFAULT_HOST)
