@@ -146,10 +146,21 @@ function inlineTokens(text, mods) {
 const FENCE_RE = /^\s*```(.*)$/;
 const LIST_RE = /^\s*(?:[-*+]|\d+\.)\s+(.*)$/;
 const QUOTE_RE = /^\s*>\s?(.*)$/;
+const HEAD_RE = /^\s*(#{1,6})\s+(.*)$/;
+const ROW_RE = /^\s*\|(.*)\|\s*$/;              // 表格列:前後都要有 |
+const SEP_RE = /^\s*\|[\s:|-]+\|\s*$/;          // 分隔列:只由 | - : 空白組成
 
-/** 塊解析。刻意**不做 # 標題** —— 聊天室裡打 "# xxx" 十次有九次是在貼 shell 註解,
-    渲染成超大字是幫倒忙(bob 的觀察)。
-    段落內的單換行**就是換行**(lines 陣列):標準 markdown 會把它吃掉,
+/** "| a | b |" → ["a", "b"](前後的空欄去掉,不支援跳脫的 \| ,子集) */
+function tableCells(line) {
+  return line.match(ROW_RE)[1].split("|").map((c) => inlineTokens(c.trim()));
+}
+
+/** 塊解析。
+    標題:原本刻意不做(顧慮聊天室裡的 "# xxx" 多半是 shell 註解,變超大字幫倒忙),
+    但老闆實際用了之後回報「缺標題」——**使用者的實際體驗勝過我們的事前推測**,故補上。
+    顧慮用兩件事化解:``` 區塊與行內 `code` 內不解析任何語法(shell 註解通常就在那裡),
+    且標題字級刻意克制(最大只到本文的 1.25 倍)——泡泡不是文件,不需要巨無霸大字。
+    段落內的單換行**就是換行**(rows 陣列):標準 markdown 會把它吃掉,
     但聊天訊息裡按 Enter 就是要換行,照標準做反而是老闆說的「黏在一起」。 */
 function parseBlocks(text) {
   const lines = String(text).split("\n");
@@ -165,6 +176,16 @@ function parseBlocks(text) {
       while (i < lines.length && !FENCE_RE.test(lines[i])) body.push(lines[i++]);
       i++;                                         // 吃掉收尾的 ```(沒有就是讀到結尾,一樣收工)
       blocks.push({ t: "code", lang, v: body.join("\n") });
+    } else if (HEAD_RE.test(line)) {
+      const h = line.match(HEAD_RE);
+      blocks.push({ t: "h", level: h[1].length, inline: inlineTokens(h[2]) });
+      i++;
+    } else if (ROW_RE.test(line) && i + 1 < lines.length && SEP_RE.test(lines[i + 1])) {
+      const head = tableCells(line);                // 表格必須有表頭 + 分隔列才算數,
+      i += 2;                                       // 否則單獨一行 |a|b| 只是普通文字
+      const rows = [];
+      while (i < lines.length && ROW_RE.test(lines[i])) rows.push(tableCells(lines[i++]));
+      blocks.push({ t: "table", head, rows });
     } else if (LIST_RE.test(line)) {
       const ordered = /^\s*\d+\./.test(line);
       const items = [];
@@ -184,9 +205,12 @@ function parseBlocks(text) {
       i++;                                         // 空行只負責分段,不留痕跡
     } else {
       const rows = [];
+      // 段落一路吃到「空行或另一種塊開頭」為止 —— 每加一種塊型,這裡就要讓一次路,
+      // 否則新塊會被段落吞掉(表格判斷含下一行,故一併看 i+1)
       while (i < lines.length && lines[i].trim()
              && !FENCE_RE.test(lines[i]) && !LIST_RE.test(lines[i])
-             && !lines[i].trim().startsWith(">")) {
+             && !HEAD_RE.test(lines[i]) && !lines[i].trim().startsWith(">")
+             && !(ROW_RE.test(lines[i]) && i + 1 < lines.length && SEP_RE.test(lines[i + 1]))) {
         rows.push(inlineTokens(lines[i]));
         i++;
       }
@@ -509,7 +533,7 @@ const MessageItem = {
         <button class="hover-btn mono" @click="$emit('copy', m.text)">⧉ COPY</button>
         <button class="hover-btn mono" @click="$emit('reply', m.id)">⟲ REPLY</button>
       </div>
-      <div class="bubble chamfer-sm"><template v-for="(b, bi) in blocks" :key="bi"><pre v-if="b.t === 'code'" class="md-code"><code>{{ b.v }}</code></pre><component v-else-if="b.t === 'list'" :is="b.ordered ? 'ol' : 'ul'" class="md-list"><li v-for="(it, ii) in b.items" :key="ii"><md-inline :ts="it"></md-inline></li></component><blockquote v-else-if="b.t === 'quote'" class="md-quote"><template v-for="(r, ri) in b.rows" :key="ri"><br v-if="ri"><md-inline :ts="r"></md-inline></template></blockquote><p v-else class="md-p"><template v-for="(r, ri) in b.rows" :key="ri"><br v-if="ri"><md-inline :ts="r"></md-inline></template></p></template></div>
+      <div class="bubble chamfer-sm"><template v-for="(b, bi) in blocks" :key="bi"><pre v-if="b.t === 'code'" class="md-code"><code>{{ b.v }}</code></pre><div v-else-if="b.t === 'h'" class="md-h" :class="'md-h' + b.level"><md-inline :ts="b.inline"></md-inline></div><div v-else-if="b.t === 'table'" class="md-table-wrap"><table class="md-table"><thead><tr><th v-for="(c, ci) in b.head" :key="ci"><md-inline :ts="c"></md-inline></th></tr></thead><tbody><tr v-for="(r, ri) in b.rows" :key="ri"><td v-for="(c, ci) in r" :key="ci"><md-inline :ts="c"></md-inline></td></tr></tbody></table></div><component v-else-if="b.t === 'list'" :is="b.ordered ? 'ol' : 'ul'" class="md-list"><li v-for="(it, ii) in b.items" :key="ii"><md-inline :ts="it"></md-inline></li></component><blockquote v-else-if="b.t === 'quote'" class="md-quote"><template v-for="(r, ri) in b.rows" :key="ri"><br v-if="ri"><md-inline :ts="r"></md-inline></template></blockquote><p v-else class="md-p"><template v-for="(r, ri) in b.rows" :key="ri"><br v-if="ri"><md-inline :ts="r"></md-inline></template></p></template></div>
     </div>
   </div>`,
 };

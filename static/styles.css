@@ -182,7 +182,19 @@ main {
 
 /* ── Markdown 塊(受限子集;renderer 在 app.js,只吐資料不吐 HTML)── */
 .bubble > :last-child { margin-bottom: 0; }   /* 泡泡底部不留多餘空隙 */
-.md-p, .md-list, .md-code, .md-quote { margin: 0 0 0.65em; }
+.md-p, .md-list, .md-code, .md-quote, .md-h, .md-table-wrap { margin: 0 0 0.65em; }
+/* 標題字級刻意克制:泡泡不是文件,h1 只比本文大一點點就夠有層次 */
+.md-h { font-weight: bold; line-height: 1.4; margin-top: 0.9em; }
+.bubble > .md-h:first-child { margin-top: 0; }
+.md-h1 { font-size: 1.25em; color: var(--cyan); }
+.md-h2 { font-size: 1.15em; }
+.md-h3 { font-size: 1.05em; }
+.md-table-wrap { overflow-x: auto; }   /* 窄泡泡裡寬表格自己捲,不撐爆 */
+.md-table { border-collapse: collapse; font-size: calc(var(--bubble-font) * 0.92); }
+.md-table th, .md-table td {
+  border: 1px solid var(--border); padding: 4px 9px; text-align: left; vertical-align: top;
+}
+.md-table th { background: var(--bg); color: var(--cyan); white-space: nowrap; }
 .md-list { padding-left: 1.5em; }
 .md-list li { margin: 0.15em 0; }
 .md-quote {
