@@ -1,10 +1,18 @@
-/* A2A Chatroom — 前端邏輯層。
-   分層:
-     ChatApi(Repository)   — HTTP 唯一出入口 + 統一錯誤策略
-     composables            — useTasks / useUnread / useStream(SRP,root 瘦身)
-     元件                    — HoloModal(彈窗皮)/ ChatHeader / MessageItem / ChatComposer
-     root                    — 只做編排;SSE 進訊息走具名 handler 鏈
-   零建置:純 CDN Vue 3,無打包器。 */
+/* ═══════════════════════════════════════════════════════════════════════════
+   app.js — 共用狀態與整體編排
+
+   這是最後載入、也是真正把畫面跑起來的檔案。它做三件事:
+
+   1. 放「大家都要用到的東西」:設定值、伺服器下發的執行期設定
+   2. 幾個把複雜狀態包起來的小工具(任務清單、未讀數、連線)
+   3. 最外層的元件:把上面那些接起來,決定什麼時候要做什麼
+
+   其他檔案(md / util / api / components / particles)都不認識這裡的東西;
+   反過來這裡會用到它們 —— 所以它排在載入順序的最後。
+
+   寫法約定同其他檔案:一行一件事、不用箭頭簡寫與解構、名字寫完整。
+   ═══════════════════════════════════════════════════════════════════════ */
+
 
 const { createApp, reactive, computed } = Vue;
 
@@ -86,59 +94,6 @@ function useStream({ url, onMessage, onOpen, onError }) {
   };
 }
 
-/* ═══════════ 粒子背景 ═══════════
-   密度依視口面積封頂、DPR≤1.5、分頁隱藏暫停、游標吸引;
-   prefers-reduced-motion 全關(只留 CSS 靜態 circuit grid)。 */
-function startParticles() {
-  const canvas = document.getElementById("particles");
-  if (matchMedia("(prefers-reduced-motion: reduce)").matches) { canvas.remove(); return; }
-  const ctx = canvas.getContext("2d");
-  const dpr = Math.min(devicePixelRatio || 1, 1.5);
-  let W, H, pts = [], raf = null;
-  const mouse = { x: -1e4, y: -1e4 };
-  const newPt = () => ({ x: Math.random() * W, y: Math.random() * H,
-                         vx: (Math.random() - 0.5) * 0.35, vy: (Math.random() - 0.5) * 0.35 });
-  function resize() {
-    W = innerWidth; H = innerHeight;
-    canvas.width = W * dpr; canvas.height = H * dpr;
-    canvas.style.width = W + "px"; canvas.style.height = H + "px";
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    let target = Math.min(80, Math.floor((W * H) / 18000));
-    if (W < 560) target = Math.floor(target / 2); // 手機減半;resize 時重判
-    while (pts.length < target) pts.push(newPt());
-    pts.length = target;
-  }
-  function step() {
-    ctx.clearRect(0, 0, W, H);
-    for (const p of pts) {
-      const dx = mouse.x - p.x, dy = mouse.y - p.y, d2 = dx * dx + dy * dy;
-      if (d2 < 22500 && d2 > 1) { const d = Math.sqrt(d2); p.vx += (dx / d) * 0.015; p.vy += (dy / d) * 0.015; }
-      p.vx = Math.max(-0.6, Math.min(0.6, p.vx)); p.vy = Math.max(-0.6, Math.min(0.6, p.vy));
-      p.x += p.vx; p.y += p.vy;
-      if (p.x < 0 || p.x > W) p.vx *= -1;
-      if (p.y < 0 || p.y > H) p.vy *= -1;
-      ctx.fillStyle = "rgba(0, 255, 136, 0.5)";
-      ctx.fillRect(p.x - 1, p.y - 1, 2, 2);
-    }
-    for (let i = 0; i < pts.length; i++) for (let j = i + 1; j < pts.length; j++) {
-      const a = pts[i], b = pts[j];
-      const dx = a.x - b.x, dy = a.y - b.y, d2 = dx * dx + dy * dy;
-      if (d2 < 14400) { // 連線距離 <120px,透明度隨距離衰減
-        ctx.strokeStyle = `rgba(0, 212, 255, ${(1 - Math.sqrt(d2) / 120) * 0.22})`;
-        ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
-      }
-    }
-    raf = requestAnimationFrame(step);
-  }
-  addEventListener("resize", resize);
-  addEventListener("mousemove", (e) => { mouse.x = e.clientX; mouse.y = e.clientY; });
-  document.addEventListener("visibilitychange", () => {
-    if (document.hidden) { cancelAnimationFrame(raf); raf = null; }
-    else if (!raf) step();
-  });
-  resize(); step();
-}
-startParticles();
 
 /* ═══════════ Root:只做編排 ═══════════ */
 

@@ -11,10 +11,10 @@
 <link rel="stylesheet" href="/static/styles.css">
 </head>
 <body>
-<!-- 粒子背景(canvas 固定底層;reduced-motion 時由 app.js 移除) -->
+<!-- 背景那些會飄的小點。畫布固定在最底層;使用者設定不看動畫時由 particles.js 移除 -->
 <canvas id="particles"></canvas>
 
-<!-- 根模板:只有結構,樣式在 styles.css、邏輯在 app.js -->
+<!-- 畫面的骨架:這裡只有結構,長相在 styles.css、行為在那幾支 js -->
 <div id="app" v-cloak>
   <chat-header :room="room" :rooms="rooms" :status="status" :active-tasks="tasks.active"
                :online-members="onlineMembers"
@@ -102,16 +102,18 @@
 </div>
 
 <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
-<!-- 程式碼依「職責」拆成幾個檔案,載入順序由下往上依賴:
-       md.js         Markdown 解析(不依賴任何人)
+<!-- 程式碼依「職責」拆成幾個檔案,載入順序由不依賴別人的排前面:
+       md.js         Markdown 解析(誰都不依賴)
+       particles.js  背景動畫(誰都不依賴,自己啟動自己)
        util.js       小工具:顏色、頭像、時間格式
        api.js        跟伺服器溝通
-       components.js 畫面上的五個零件(會用到上面三個)
+       components.js 畫面上的五個零件(會用到上面幾個)
        app.js        共用狀態與整體編排,最後載入,由它啟動整個畫面
 
      全部都是傳統的 script 標籤,不是 ES module —— 這樣不需要任何打包工具,
      而且 static/mdtest.html 可以直接用瀏覽器打開就跑測試。 -->
 <script src="/static/md.js"></script>
+<script src="/static/particles.js"></script>
 <script src="/static/util.js"></script>
 <script src="/static/api.js"></script>
 <script src="/static/components.js"></script>
