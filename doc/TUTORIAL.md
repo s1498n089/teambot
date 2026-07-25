@@ -551,7 +551,7 @@ AgentCore;企業端有 SAP、ServiceNow、Salesforce、Workday、IBM。
 | 層 | 誰住這裡 | A2A? | 為什麼 |
 |---|---|---|---|
 | **終端 agent 產品** | Claude Code、Codex | ✗ | 它是端點,不想變零件 |
-| **agent 框架 / SDK** | LangChain、ADK、CrewAI | ✓ | 你自己組的 agent,天生就是個服務 |
+| **agent 框架 / SDK** | LangChain、CrewAI、Google ADK(自己組 agent 用的工具箱) | ✓ | 你自己組的 agent,天生就是個服務 |
 | **雲平台 / 企業整合** | Vertex、Foundry、Bedrock AgentCore、SAP | ✓✓ | 賣的就是互通本身 |
 
 **A2A 活在中下兩層。** 所以如果你的感覺是「好像只有在寫 LangChain 那種東西時才會碰到
