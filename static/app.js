@@ -16,6 +16,7 @@ const PRESENCE_POLL_MS = 15000;      // 在場名單輪詢間隔(輕量,只回�
 const TOAST_MS = 3500;
 const FLASH_MS = 2000;               // 跳轉脈衝動畫的 class 存留時間
 const API_FAIL_TOAST_THRESHOLD = 3;  // 連續失敗達此數才吵使用者
+const DEFAULT_DEADLINE_SECONDS = 300;  // 任務逾時預設值(與 hub 同步)
 
 /* 執行期設定:開機從 /api/config 灌入 — reactive 讓 tokens/顏色 computed 真正依賴它
    (regex 熱替換必須觸發重算,不能靠呼叫順序保命)。 */
@@ -114,10 +115,10 @@ const STATE_GONE = { cls: "gone", short: "EVAPORATED" };
 function stateMeta(state) { return STATE_META[state] || STATE_GONE; }
 
 /* 鏡頭(FOCUS):決定「這面牆以誰為第一人稱」——靠右的那位。
-   FOCUS_ME 跟著名字欄動(改名字不會把鏡頭釘在舊名字)、FOCUS_NONE 是全員靠左的觀戰視角、
-   其餘值為具名主角(以他人視角回顧)。發言身分(名字欄)與觀看視角在此分離。 */
+   預設 FOCUS_ME:跟著名字欄動(你報什麼身分,就以誰為主角);點頭像把鏡頭
+   交給別人(以他人視角回顧),再點一次交回自己。沒有「關閉」狀態 ——
+   鏡頭永遠有主角,少一個狀態少一份心智負擔。 */
 const FOCUS_ME = "@me";
-const FOCUS_NONE = "none";
 
 /* ═══════════ ChatApi(Repository:HTTP 唯一出入口)═══════════ */
 
@@ -151,6 +152,7 @@ function createApi(notify) {
   return {
     config: () => request("/api/config"),
     rooms: () => request("/api/rooms", undefined, true),
+    agents: () => request("/agents", undefined, true),
     members: (room) => request(`/api/rooms/${room}/members`, undefined, true),
     tasks: (room) => request(`/api/rooms/${room}/tasks`, undefined, true),
     presence: (room) => request(`/api/rooms/${room}/presence`, undefined, true),
@@ -167,6 +169,26 @@ function createApi(notify) {
       });
       const data = await res.json().catch(() => ({}));
       return { ok: res.ok, status: res.status, data };
+    },
+    /** 發任務:走 A2A 正門而非聊天門。UI 一律 returnImmediately —
+        阻塞版會讓畫面卡到對方回覆或逾時。 */
+    async sendTask(target, { text, sender, deadlineSeconds, token }) {
+      const headers = { "Content-Type": "application/json" };
+      if (token) headers["Authorization"] = `Bearer ${token}`;
+      const res = await fetch(`/agents/${target}/a2a`, {
+        method: "POST", headers,
+        body: JSON.stringify({
+          jsonrpc: "2.0", id: 1, method: "SendMessage",
+          params: {
+            message: { role: "ROLE_USER", parts: [{ text }],
+                       messageId: crypto.randomUUID(), contextId: "main" },
+            configuration: { returnImmediately: true },
+            metadata: { senderName: sender, deadlineSeconds },
+          },
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      return { ok: res.ok && !data.error, data };
     },
     rpc: (agent, method, params) => request(`/agents/${agent}/a2a`, {
       method: "POST",
@@ -299,25 +321,13 @@ const HoloModal = {
 };
 
 const ChatHeader = {
-  data() { return { FOCUS_ME, FOCUS_NONE }; },  // 樣板要讀得到鏡頭常數
+  data() { return { FOCUS_ME }; },  // 樣板要讀得到鏡頭常數
   props: ["room", "rooms", "status", "activeTasks", "msgCount", "lastId", "onlineMembers",
           "focusTarget", "focusName"],
-  emits: ["switch-room", "toggle-focus", "open-member", "set-focus", "adjust-font"],
+  emits: ["switch-room", "open-member", "set-focus", "adjust-font"],
   computed: {
     /** 這顆燈講的是「本頁與 server 的連線」— 主詞寫明,別跟成員在場狀態混淆。 */
     statusText() { return { connecting: "SERVER…", online: "SERVER", reconnecting: "SERVER ✕" }[this.status]; },
-    /** 鏡頭狀態:ME(跟著名字欄)/ 具名(以他人為第一人稱)/ OFF(全員靠左)。 */
-    focusLabel() {
-      if (this.focusTarget === FOCUS_NONE) return "FOCUS: OFF";
-      if (this.focusTarget === FOCUS_ME) return "FOCUS: ME";
-      return "FOCUS: " + String(this.focusTarget).toUpperCase();
-    },
-    /** 鏡頭鈕染上主角色相 — 一眼看出「現在用誰的眼睛在看」。 */
-    focusStyle() {
-      if (!this.focusName) return {};
-      const c = colorHexOf(this.focusName);
-      return { color: c, borderColor: c };
-    },
   },
   methods: { avatarOf, colorHexOf },
   template: `
@@ -332,7 +342,7 @@ const ChatHeader = {
     <span class="online-row">
       <img v-for="m in onlineMembers" :key="m.name" :src="avatarOf(m.name)"
            :title="'以 ' + m.name + ' 的視角檢視(再點一次交回自己)'"
-           :class="{ focused: m.name === focusName && focusTarget !== FOCUS_ME }"
+           :class="{ focused: m.name === focusName }"
            :style="m.name === focusName ? { borderColor: colorHexOf(m.name) } : {}"
            @click="$emit('set-focus', focusTarget === m.name ? FOCUS_ME : m.name)">
     </span>
@@ -342,8 +352,6 @@ const ChatHeader = {
       <button class="mono" @click="$emit('adjust-font', 0)">A</button>
       <button class="mono" @click="$emit('adjust-font', 2)">A+</button>
     </span>
-    <button class="focus-toggle mono" :class="{ on: !!focusName }" :style="focusStyle"
-            @click="$emit('toggle-focus')">{{ focusLabel }}</button>
     <span class="meta mono" :class="{ 'task-counter': activeTasks, zero: !activeTasks }">TASKS:{{ activeTasks }}</span>
     <span class="meta mono msg-count">MSG:{{ msgCount }} LAST:#{{ lastId }}</span>
   </header>`,
@@ -398,14 +406,31 @@ const MessageItem = {
 };
 
 const ChatComposer = {
-  props: ["name", "room", "replyTo", "authEnabled", "token"],
-  emits: ["update:name", "update:token", "send", "cancel-reply"],
-  data() { return { draft: "" }; },
+  props: ["name", "room", "replyTo", "authEnabled", "token", "targets"],
+  emits: ["update:name", "update:token", "send", "send-task", "cancel-reply"],
+  data() {
+    return {
+      draft: "",
+      mode: "msg",                             // msg = 聊天門、task = 協定門
+      target: "",                              // 交辦給誰(不從文字的 @ 自動帶入 —
+                                               // 目標是協定欄位、@ 是社交語法,不讓兩者黏回去)
+      deadline: DEFAULT_DEADLINE_SECONDS,
+    };
+  },
   computed: {
     nameWidth() { return Math.max(3, (this.name || "").length + 1) + "ch"; }, // 名字欄自適應不截斷
+    isTask() { return this.mode === "task"; },
+    canFire() { return !!this.draft.trim() && (!this.isTask || !!this.target); },
   },
   methods: {
-    fire() { const t = this.draft.trim(); if (t) this.$emit("send", t); },
+    fire() {
+      const t = this.draft.trim();
+      if (!t) return;
+      if (!this.isTask) return this.$emit("send", t);
+      if (!this.target) return;                // 沒選對象就不送(鈕已 disabled,雙保險)
+      this.$emit("send-task", { text: t, target: this.target,
+                                deadlineSeconds: Number(this.deadline) || DEFAULT_DEADLINE_SECONDS });
+    },
     clear() { this.draft = ""; },       // 父層在「送出成功」後才呼叫 — 失敗保留草稿
     focusBox() { this.$refs.box.focus(); },
   },
@@ -414,7 +439,26 @@ const ChatComposer = {
     <div v-if="replyTo" class="reply-bar mono">RE #{{ replyTo }}
       <span class="x" @click="$emit('cancel-reply')">✕</span><span class="hint">[ESC]</span>
     </div>
+    <div class="task-bar mono" v-if="isTask">
+      <span class="task-tag">TASK</span>
+      <label>TO
+        <select v-model="target">
+          <option value="">選一位…</option>
+          <option v-for="t in targets" :key="t.name" :value="t.name">
+            {{ t.name }} {{ t.present ? "●" : "○" }}
+          </option>
+        </select>
+      </label>
+      <label>逾時
+        <input class="deadline" type="number" min="5" max="3600" v-model="deadline"> 秒
+      </label>
+      <span class="hint">送出後對方會收到帶 TASK 徽章的交辦,狀態全程可追蹤</span>
+    </div>
     <div class="input-row">
+      <span class="mode-ctl">
+        <button class="mono" :class="{ on: !isTask }" @click="mode = 'msg'">MSG</button>
+        <button class="mono" :class="{ on: isTask }" @click="mode = 'task'">TASK</button>
+      </span>
       <span class="prompt mono">
         <input class="name" :value="name" :style="{ width: nameWidth }"
                @input="$emit('update:name', $event.target.value)">@{{ room }} &gt;_
@@ -422,10 +466,13 @@ const ChatComposer = {
       <input v-if="authEnabled" class="token mono" type="password" :value="token"
              placeholder="token" title="AUTH 已啟用:發言需要你的 bearer token"
              @input="$emit('update:token', $event.target.value)">
-      <textarea ref="box" v-model="draft" placeholder="輸入訊息,Enter 送出(Shift+Enter 換行)"
+      <textarea ref="box" v-model="draft"
+                :placeholder="isTask ? '任務內容,Enter 送出(Shift+Enter 換行)'
+                                     : '輸入訊息,Enter 送出(Shift+Enter 換行)'"
                 @keydown.enter.exact.prevent="fire"
                 @keydown.esc="$emit('cancel-reply')"></textarea>
-      <button class="send" @click="fire">SEND</button>
+      <button class="send" :class="{ task: isTask }" :disabled="!canFire" @click="fire">
+        {{ isTask ? 'SEND TASK' : 'SEND' }}</button>
     </div>
   </footer>`,
 };
@@ -449,6 +496,7 @@ createApp({
     return {
       messages: [],
       members: [],
+      agents: [],     // A2A 名冊 — 只有註冊 agent 能被指派 task
       present: [],   // 在場名單(SSE 連線開著的人)— presence 的事實來源
       presenceSupported: true,  // 舊版 hub 沒有 /presence:404 後自動停用並退回舊判定
       rooms: [],
@@ -464,8 +512,7 @@ createApp({
       toastOk: false,
       modal: null,   // { type: 'member'|'task', ... }
       // 鏡頭目標:預設 ME(自己靠右,聊天慣例);舊版存的 "0" 對映到觀戰視角
-      focusTarget: localStorage.getItem("a2a-focus") === "0"
-        ? FOCUS_NONE : (localStorage.getItem("a2a-focus") || FOCUS_ME),
+      focusTarget: FOCUS_ME,
       bubbleFont: parseInt(localStorage.getItem("a2a-font") || "18", 10), // 聊天字級 px,A-/A/A+ 調整
       nowTick: Date.now(),  // 每分鐘跳動,驅動在線狀態的重新計算
     };
@@ -474,11 +521,15 @@ createApp({
     myName() { return this.name.trim() || "user"; },
     /** 鏡頭目標解析成實際名字:ME → 我、具名 → 該人、OFF → null(全員靠左)。 */
     focusName() {
-      if (this.focusTarget === FOCUS_NONE) return null;
       return this.focusTarget === FOCUS_ME ? this.myName : this.focusTarget;
     },
     authOn() { return rt.authEnabled; },  // 模板需要 reactive 依賴,包一層 computed
     /** 頭像列 = 在場者(含安靜待命的);離線者不佔位。 */
+    /** 可交辦對象:只有註冊 agent(協定層擋 unknown agent),附在場標記 —
+        發給沒人在的 agent 只會白等到逾時,選之前就該看得見。 */
+    taskTargets() {
+      return this.agents.map((a) => ({ name: a.name, present: this.present.includes(a.name) }));
+    },
     onlineMembers() {
       if (!this.presenceSupported) {
         return this.members.filter((m) => this.presenceOf(m) === "active").slice(0, 6);
@@ -528,7 +579,8 @@ createApp({
     } catch (e) { this.showToast(">> 初始載入失敗,請重整", false); }
 
     if (this.unread.afterId >= this.lastId) this.unread.afterId = 0; // 沒有未讀就不畫線
-    await Promise.all([this.tasks.load(), this.loadMembers(), this.loadRooms(), this.loadPresence()]);
+    await Promise.all([this.tasks.load(), this.loadMembers(), this.loadRooms(),
+                       this.loadPresence(), this.loadAgents()]);
     this.scrollToBottom();
 
     this.stream = useStream({
@@ -627,6 +679,9 @@ createApp({
     async loadRooms() {
       try { this.rooms = (await this.api.rooms()).rooms; } catch (e) { /* request 已記錄 */ }
     },
+    async loadAgents() {
+      try { this.agents = (await this.api.agents()).agents; } catch (e) { /* request 已記錄 */ }
+    },
     async loadMembers() {
       try { this.members = (await this.api.members(this.room)).members; } catch (e) { /* 同上 */ }
     },
@@ -645,6 +700,21 @@ createApp({
       }
       this.$refs.composer.clear();
       this.replyTo = null;
+    },
+    /** 發任務:走協定門。這是使用者主動操作,失敗一定要吵(與背景輪詢的靜默策略相反)。 */
+    async sendTask({ text, target, deadlineSeconds }) {
+      const sender = this.myName;
+      localStorage.setItem("a2a-name", sender);
+      const res = await this.api.sendTask(target, {
+        text, sender, deadlineSeconds, token: this.authOn ? this.token : null });
+      if (!res.ok) {
+        const err = res.data.error || res.data;
+        this.showToast(`>> 任務發送失敗:${err.message || err.detail || "unknown"}`, false);
+        return;  // 保留草稿
+      }
+      this.$refs.composer.clear();
+      this.tasks.load();
+      this.showToast(`>> 任務已交辦給 ${target}`, true);
     },
     setReply(id) { this.replyTo = id; this.$refs.composer.focusBox(); },
 
@@ -716,21 +786,11 @@ createApp({
 
     /* ── 偏好 ── */
     switchRoom(room) { location.href = `?room=${encodeURIComponent(room)}`; },
-    /** 鏡頭鈕 = 回家鍵:看著別人時一鍵歸位;已在自己時切換觀戰視角(全員靠左)。 */
-    toggleFocus() {
-      if (this.focusTarget !== FOCUS_ME && this.focusTarget !== FOCUS_NONE) {
-        return this.setFocus(FOCUS_ME);
-      }
-      this.setFocus(this.focusTarget === FOCUS_ME ? FOCUS_NONE : FOCUS_ME);
-    },
-    /** 持久化分級:ME/OFF 是長期偏好(記住),具名是臨時檢視(關頁即忘)——
-        否則明天打開會發現自己的話在左邊、別人在右邊,一頭霧水。 */
+    /** 切鏡頭:點誰 = 以誰為視角、點當前主角 = 交回自己。
+        具名視角是臨時檢視,不持久化 —— 重開一律回到「以自己為主角」。 */
     setFocus(target) {
       this.focusTarget = target;
-      if (target === FOCUS_ME || target === FOCUS_NONE) {
-        localStorage.setItem("a2a-focus", target);
-      }
-      if (this.modal && this.modal.type === "member") this.modal = null;  // 從彈窗切換即關窗
+      if (this.modal && this.modal.type === "member") this.modal = null;
     },
     /** 字級調整:delta ±2 步進、0 = 回預設 18;夾在 14~26 之間。 */
     adjustFont(delta) {

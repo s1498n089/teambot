@@ -105,12 +105,6 @@ select.room-switch {
 .spacer { flex: 1; }
 .meta { color: var(--muted); font-size: 11px; letter-spacing: 1px; white-space: nowrap; }
 .task-counter { color: var(--amber); }
-button.focus-toggle {
-  background: none; border: 1px solid var(--border); color: var(--muted);
-  font-family: var(--mono); font-size: 10px; letter-spacing: 1px;
-  padding: 3px 8px; border-radius: 2px; cursor: pointer;
-}
-button.focus-toggle.on { color: var(--cyan); border-color: var(--cyan); }
 .font-ctl { display: flex; gap: 2px; }
 .font-ctl button {
   background: none; border: 1px solid var(--border); color: var(--muted);
@@ -228,6 +222,32 @@ footer {
 .reply-bar .x:hover { color: var(--red); }
 .reply-bar .hint { color: var(--muted); font-size: 10px; }
 .input-row { display: flex; gap: 8px; align-items: stretch; }
+/* MSG / TASK 兩態切換:選 TASK 就改走 A2A 協定門(不再是普通聊天訊息) */
+.mode-ctl { display: flex; flex-direction: column; gap: 2px; justify-content: center; }
+.mode-ctl button {
+  background: none; border: 1px solid var(--border); color: var(--muted);
+  font-family: var(--mono); font-size: 9px; letter-spacing: 1px;
+  padding: 2px 6px; border-radius: 2px; cursor: pointer; min-width: 44px;
+}
+.mode-ctl button.on { color: var(--amber); border-color: var(--amber); }
+/* 任務參數列:只在 TASK 模式出現,把「合約要素」攤在眼前 */
+.task-bar {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  font-size: 11px; color: var(--muted); letter-spacing: 1px;
+}
+.task-bar .task-tag {
+  color: var(--amber); border: 1px solid var(--amber);
+  border-radius: 2px; padding: 0 5px; font-size: 10px;
+}
+.task-bar select, .task-bar input.deadline {
+  background: var(--bg); color: var(--text); border: 1px solid var(--border);
+  font-family: var(--mono); font-size: 11px; padding: 2px 4px; border-radius: 2px;
+}
+.task-bar input.deadline { width: 64px; }
+.task-bar .hint { color: var(--muted); opacity: 0.7; }
+button.send.task { border-color: var(--amber); color: var(--amber); }
+button.send.task:hover { box-shadow: 0 0 12px rgba(255, 184, 108, 0.4); }
+button.send:disabled { opacity: 0.4; cursor: not-allowed; box-shadow: none; }
 .prompt { display: flex; align-items: center; gap: 2px; color: var(--green); font-size: 12px; letter-spacing: 1px; white-space: nowrap; }
 input.name {
   background: none; border: none; border-bottom: 1px dashed var(--border);
