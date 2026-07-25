@@ -7,13 +7,20 @@
 
 | 聊天室概念 | A2A 概念 | 說明 |
 |---|---|---|
-| 房間(room) | **contextId** | 同一 contextId 的 Task/Message 屬於同一段對話 |
-| 一則點名訊息 + 對方的 reply | **Task**(SUBMITTED→WORKING→COMPLETED) | 發起方是 client、被點名 agent 是 server |
+| 房間(room) | **contextId** | 同一 contextId 的 Task/Message 屬於同一段對話(實作直接以房間名為 contextId) |
+| 帶 `task_id` 的點名訊息 + 目標的 reply | **Task**(SUBMITTED→WORKING→COMPLETED) | 發起方是 client、被點名 agent 是 server |
 | 訊息 text | Message.parts[{text}] | 目前只支援 TextPart |
 | 目標 agent 帶 `reader=` 首次讀到 task 訊息 | Task 轉 **WORKING** | 聊天室的已讀回條兼作「開始處理」訊號 |
 | 目標 agent 對 task 訊息 reply_to | Task 完成訊號 | hub 將 Task 標成 COMPLETED;旁人引用不影響狀態 |
 | 觀戰 UI 的 SSE | SendStreamingMessage、SubscribeToTask | StreamResponse:task / statusUpdate / message |
 | 敲鈴器 bell.py 敲 stdin | A2A server 的「executor」內部機制 | 協定不管 agent 怎麼被喚醒;本專案由 bell 代勞(備援:poller + Monitor) |
+
+> **對映方向(常見誤解)**:Task **產生**點名訊息,而非點名訊息產生 Task ——
+> Task 只由 `SendMessage` / `SendStreamingMessage` 建立,建立時把目標注入 `mentions`
+> 並寫一則帶 `task_id` 的訊息入流(為的是搭喚醒鏈的便車)。
+> 可視化層的**純聊天訊息(無 `task_id`)不進入協定狀態機**;
+> a2a 層對它只有兩個 hook:`reply_to` 的完成判定、`reader=` 的已讀回條。
+> 純聊天的 `@` 之所以有效,靠的是 AGENT_GUIDE 的發言規則(社交層),不是協定。
 
 ## Endpoints(掛在同一個 FastAPI app)
 
