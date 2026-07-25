@@ -365,6 +365,22 @@ const checks = [
     }
   },
   {
+    name: "中文緊貼星號也算粗體(刻意比標準寬鬆)",
+    input: "解法是改放**「一直變大的數字」**。",
+    note: "標準 Markdown 要求 ** 左邊不能緊貼文字,那是為英文設計的規則;"
+        + "中文不用空格分詞,逼使用者插空格是把標準的缺陷轉嫁給他。不要改成標準行為。",
+    run: function (blocks) {
+      const tokens = collectTokens(blocks);
+      let boldText = "";
+      for (let i = 0; i < tokens.length; i++) {
+        if (tokens[i].bold === true) {
+          boldText = boldText + tokens[i].text;
+        }
+      }
+      return boldText === "「一直變大的數字」";
+    }
+  },
+  {
     name: "全形標點與語法符號相鄰",
     input: "「**粗體**」與(`code`)相鄰",
     note: "中文標點不能吃掉語法邊界",
