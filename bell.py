@@ -226,26 +226,58 @@ class BellState:
         self.evaluate()
 
     def evaluate(self) -> None:
-        """核心判斷:落後才敲;敲過就交給重敲節奏;追上就歸零。"""
+        """判斷「現在該不該敲」。
+
+        ★ 這個方法【被呼叫得很頻繁】,但真正敲下去的次數很少。
+          呼叫它的有兩邊:收到新訊息時(sse_watch)、以及每 5 秒一次(re_ring_loop)。
+
+        會敲下去,得先通過三道閘門 —— 任何一道擋下都直接返回:
+
+            1. 你追上了嗎?    cursor 已經不落後 → 不敲,順便把計數歸零
+            2. 敲滿三次了嗎?  已經敲了 MAX_RINGS 次 → 不敲,只印一次警告就閉嘴
+            3. 才剛敲過嗎?    距離上次不到 RE_RING_SECONDS(90 秒)→ 不敲
+
+        所以實際的節奏是這樣的:
+
+            發現落後 → 立刻敲第 1 次
+                    → 90 秒後還沒動 → 敲第 2 次
+                    → 再 90 秒     → 敲第 3 次
+                    → 再過去       → 安靜,印一行警告請人類看一眼
+
+        中間那幾十次每 5 秒的檢查,全部在第三道閘門就返回了 ——
+        **每 5 秒是「檢查」,不是「敲」。**
+        """
         with self.lock:
             cursor = self.read_cursor()
+
+            # ── 閘門一:追上了就沒事,順便把狀態歸零,下次落後才能重新從第 1 次算起 ──
             if self.known_last_id <= cursor:
                 if self.rings_this_gap:
                     log(f"cursor 已追上(={cursor}),鈴聲歸位")
                 self.rings_this_gap = 0
                 self.warned = False
                 return
+
             now = time.monotonic()
+
+            # ── 閘門二:敲滿了就不再騷擾,但要留一行紀錄讓人類知道有人卡住 ──
+            #    warned 這個旗標是為了「只印一次」—— 否則每 5 秒就會刷一行同樣的警告。
             if self.rings_this_gap >= MAX_RINGS:
                 if not self.warned:
                     log(f"WARN 已敲 {MAX_RINGS} 次仍未見 cursor 推進"
                         f"(room={self.known_last_id} cursor={cursor})— agent 可能卡住,請人類看一眼")
                     self.warned = True
                 return
+
+            # ── 閘門三:才剛敲過,還在等待窗內 —— 這道擋掉了絕大多數的呼叫 ──
+            #    (agent 可能正在生成中,給它時間反應,不要連珠炮)
             if self.rings_this_gap and now - self.last_ring_at < RE_RING_SECONDS:
-                return  # 敲過了,還在等待窗內,不騷擾
+                return
+
+            # ── 三道都過了,真的敲下去 ──
             delivered = self.ring_fn()
-            self.rings_this_gap += 1  # 送不進去也計數:pty 已死時才不會無限重敲刷 log
+            # ★ 送不進去也照樣計數。這樣子行程已經死掉時,才不會變成無限重敲狂刷紀錄檔。
+            self.rings_this_gap += 1
             self.last_ring_at = now
             if delivered is False:  # 只認明確的 False;回 None 的 ring_fn 視為沒回報
                 log(f"WARN 鈴聲沒送進子行程 #{self.rings_this_gap}"
@@ -304,99 +336,182 @@ def re_ring_loop(state: BellState, child_alive) -> None:
 # 我們沒有直接呼叫 ConPTY 的 Win32 API,而是透過 pywinpty 這個套件(winpty 3.0.5)。
 
 def run_windows(cmd: list[str], state_factory) -> int:
+    """Windows 版:開起 agent CLI,並在它和使用者之間當中間人。
+
+    ═══ 這個函式怎麼讀(裡面有很多是照抄的樣板,別平均用力)═══
+
+    【要懂的】這五件是設計,你改東西時會踩到:
+      1. 為什麼要開 VT —— 不開的話,子行程畫的畫面會變成滿螢幕垃圾字
+      2. 為什麼先記舊設定再還原 —— 不還原的話,你退出後鍵盤會壞掉(真的發生過)
+      3. 為什麼要關掉「等 Enter 才送出」—— 不關的話 TUI 完全不能用
+      4. 那把鎖為什麼存在 —— 打字和敲鈴是兩個執行緒,同時寫會打架
+      5. 最後啟動的四個背景執行緒各做什麼 —— 那才是這個函式真正的骨架
+
+    【知道有這回事就好】不必記細節:
+      · ctypes + kernel32 = Python 在直接請 Windows 本人做事
+      · handle = Windows 發給資源的號碼牌
+      · `|` 是打開某個開關,`& ~` 是關掉某個開關
+
+    【完全不用記】Windows 的規矩,照抄即可:
+      · -11 / -10 這些編號、0x0004 / 0x0200 這些常數值
+      · byref、DWORD 這些 C 語言慣例
+      · VT_KEYS 那張鍵碼對照表的內容
+    """
     # 這些 import 刻意寫在函式裡面,不放檔案頂端 —— 理由見 run_posix 那邊的說明。
     import ctypes
     import msvcrt
     from ctypes import wintypes
     from winpty import PtyProcess
 
+    # kernel32.dll 是 Windows 最核心的系統函式庫。以下每一個 kernel32.XXX
+    # 都是在請 Windows 本人做事,不是 Python 的功能。(照抄)
     kernel32 = ctypes.windll.kernel32
-    # 輸出開 VT 處理(讓子行程的 ANSI 畫面原樣呈現)
-    hout = kernel32.GetStdHandle(-11)
-    out_mode = wintypes.DWORD()
-    kernel32.GetConsoleMode(hout, ctypes.byref(out_mode))
+
+    # ══ 第一件事:借用終端機,並記住原本的樣子 ══
+    #
+    # 我們接下來要改主控台的行為(讓它看懂 VT 暗號、讓按鍵原始傳遞)。
+    # ★ 但那是【跟使用者借的】,離場時必須原封不動還回去 ——
+    #   所以每改一個設定之前,都要先把舊值讀出來存著。
+    #   不還的話,你退出後鍵盤會吐亂碼,等同壞掉。(restore_terminal 就是在還)
+
+    # ── 輸出方向:讓主控台看懂 VT 暗號 ──
+    # 不開的話,子行程送出的 ESC[31m(把字變紅)會被當普通文字印出來,
+    # 你會看到滿螢幕的 ←[31m 垃圾。
+    hout = kernel32.GetStdHandle(-11)                       # 拿輸出的號碼牌(-11 照抄)
+    out_mode = wintypes.DWORD()                             # 準備一個空盒子接答案(照抄)
+    kernel32.GetConsoleMode(hout, ctypes.byref(out_mode))   # ★ 先讀舊值,離場要還
+    # `|` = 在原有開關上多開一個。直接寫 =0x0004 會把使用者其他設定全關掉。
     kernel32.SetConsoleMode(hout, out_mode.value | 0x0004)  # ENABLE_VIRTUAL_TERMINAL_PROCESSING
 
-    # 輸入開 VT 模式(getwch 只回「字元」,Shift+Tab 與 Tab 同為 \t,
-    # 修飾鍵資訊全丟 — TUI 認的 Shift+Tab 是 ESC[Z)。VT 輸入模式下 Windows 會把
-    # 組合鍵翻成標準 VT 序列,按鍵保真交給作業系統。失敗(舊系統)則退回 getwch 路徑。
-    hin = kernel32.GetStdHandle(-10)
+    # ── 輸入方向:讓按鍵原封不動傳給子行程 ──
+    #
+    # 這裡打開一個、關掉三個。三個都要關,少關一個就會壞掉:
+    #   關 LINE(0x0002)  → 不然 Windows 會【等你按 Enter】才把整行交出去,TUI 完全不能用
+    #   關 ECHO(0x0004)  → 不然你的字會顯示兩次(Windows 印一次、claude 自己再印一次)
+    #   關 PROCESSED(0x0001)→ 不然 Ctrl+C 會被 Windows 攔走,claude 根本收不到
+    # 打開 VT_INPUT(0x0200)→ Windows 會把組合鍵翻成標準暗號再送出。
+    #   舊做法 getwch 只回「字元」,Shift+Tab 和 Tab 一樣都是 \t,修飾鍵資訊整個丟失;
+    #   而 TUI 要的 Shift+Tab 是 ESC[Z —— 開了這個才拿得到。
+    hin = kernel32.GetStdHandle(-10)                        # 拿輸入的號碼牌(-10 照抄)
     in_mode = wintypes.DWORD()
-    kernel32.GetConsoleMode(hin, ctypes.byref(in_mode))
+    kernel32.GetConsoleMode(hin, ctypes.byref(in_mode))     # ★ 一樣先讀舊值
+    # `& ~(...)` = 把括號裡那幾個開關關掉;`| 0x0200` = 把 VT 輸入打開。
     raw_mode = (in_mode.value | 0x0200) & ~(0x0001 | 0x0002 | 0x0004)  # +VT_INPUT -PROCESSED -LINE -ECHO
+    # SetConsoleMode 會回報成功或失敗。太舊的 Windows 不支援 VT 輸入 → 失敗 →
+    # 下面 pump_input 會自動改走 getwch 那條退路。
     vt_input = bool(kernel32.SetConsoleMode(hin, raw_mode))
-    old_in_cp = kernel32.GetConsoleCP()
+    old_in_cp = kernel32.GetConsoleCP()                     # ★ 字碼頁也是借的,一樣要記
     if vt_input:
-        kernel32.SetConsoleCP(65001)  # 輸入位元組走 UTF-8,中文 IME 不亂碼
+        # 65001 是 UTF-8 的字碼頁編號。這台機器預設是 cp950(繁中),
+        # 不改的話中文輸入法打的字會亂碼。
+        kernel32.SetConsoleCP(65001)
 
     def restore_terminal() -> None:
-        """離場清潔工:借來的終端機狀態全部歸還 —— 少了這段,退出後鍵盤會吐亂碼。"""
+        """離場清潔工:把上面借的三樣東西全部還回去。
+
+        少了這段,你退出後每個按鍵都會被印成 ESC[...;0;1_ 這種序列,鍵盤等同壞掉。
+        """
         try:
-            sys.stdout.write(TERM_RESTORE)
+            sys.stdout.write(TERM_RESTORE)   # 先送「關掉各種模式」的暗號
             sys.stdout.flush()
         except (OSError, ValueError):
             pass
-        kernel32.SetConsoleMode(hin, in_mode.value)    # 先送序列再還原,順序不能顛倒
-        kernel32.SetConsoleMode(hout, out_mode.value)
-        kernel32.SetConsoleCP(old_in_cp)
+        # ★ 順序不能顛倒:上面那些暗號要在【還原設定之前】送出。
+        #   一旦把設定還原了,VT 輸出處理就關掉了,那些暗號會被當普通文字印在螢幕上。
+        kernel32.SetConsoleMode(hin, in_mode.value)         # 還輸入設定
+        kernel32.SetConsoleMode(hout, out_mode.value)       # 還輸出設定
+        kernel32.SetConsoleCP(old_in_cp)                    # 還字碼頁
 
-    cols, rows = shutil.get_terminal_size()
+    # ══ 第二件事:開一條偽終端,把 agent CLI 放進去 ══
+
+    cols, rows = shutil.get_terminal_size()                 # 問「這個視窗現在幾行幾列」
+    # 開偽終端 + 啟動子行程。注意 dimensions 是 (rows, cols),跟上一行順序相反。
+    # cwd 設成專案目錄,子行程才找得到 state/、chat.jsonl 這些檔案。
     proc = PtyProcess.spawn(cmd, dimensions=(rows, cols), cwd=str(BASE))
-    write_lock = threading.Lock()  # 鈴聲(SSE 執行緒)與打字(輸入執行緒)不互插
+
+    # ★ 這把鎖是必要的:等一下會有【兩個執行緒】同時想往子行程寫字 ——
+    #   一個是你打字(pump_input),一個是敲鈴(SSE 執行緒)。
+    #   沒有鎖的話,鈴聲可能插進你打到一半的字中間,兩邊都變成亂碼。
+    write_lock = threading.Lock()
 
     def safe_write(text: str) -> bool:
+        """所有「寫進子行程」都要走這裡 —— 上鎖 + 吞掉子行程已死的錯誤。"""
         return guarded_write(proc.write, text, write_lock)  # 回傳透傳給鈴聲,失敗才有案可查
 
+    # 到這裡才建 BellState,因為現在才有 safe_write 可以交給它。
+    # (為什麼不能在 main() 就建好,見 main() 裡 state_factory 的說明)
     state: BellState = state_factory(safe_write)
 
     def alive() -> bool:
+        """子行程還活著嗎?下面每個迴圈都靠它決定要不要繼續。"""
         return proc.isalive()
 
+    # ══ 第三件事:定義五個「幫浦」,等一下讓它們各自跑起來 ══
+
     def pump_output() -> None:
-        """子行程畫面 → 我們的終端機(TUI 保真的另一半)。"""
+        """子行程的畫面 → 你的終端機。(TUI 保真的一半)
+
+        它讀出來的是子行程畫的原始內容(含 VT 暗號),原封不動印出去 ——
+        因為前面已經請主控台看懂那些暗號了,所以畫面會正確呈現。
+        """
         while True:
             try:
                 data = proc.read(4096)
             except EOFError:
-                break
+                break                      # 子行程結束了,這個迴圈就該收工
             if data:
                 sys.stdout.write(data)
-                sys.stdout.flush()
+                sys.stdout.flush()         # 立刻吐出去,不然畫面會一卡一卡
 
-    # 傳統鍵碼 → VT 序列(getwch 退路用:對特殊鍵回傳 \x00/\xe0 前綴 + 第二碼)
+    # 舊路徑專用的鍵碼對照表(照抄,不用記內容):
+    # getwch 遇到方向鍵這類特殊鍵時,會回傳兩個字元 —— 先給 \x00 或 \xe0 當前綴,
+    # 再給第二碼。這張表就是把第二碼翻成 TUI 認得的 VT 暗號。
     VT_KEYS = {"H": "\x1b[A", "P": "\x1b[B", "M": "\x1b[C", "K": "\x1b[D",
                "G": "\x1b[H", "O": "\x1b[F", "S": "\x1b[3~", "R": "\x1b[2~",
                "I": "\x1b[5~", "Q": "\x1b[6~"}
 
     def pump_input() -> None:
-        """鍵盤 → 子行程。主路徑:VT 輸入模式的原始位元組(Shift+Tab=ESC[Z、
-        修飾鍵組合全保真);退路:getwch 逐鍵(寬字元 IME OK,但修飾鍵資訊有限)。"""
+        """你的鍵盤 → 子行程。(TUI 保真的另一半)
+
+        有兩條路,取決於前面 VT 輸入模式有沒有開成功:
+          主路徑:直接讀原始位元組,Shift+Tab、Ctrl+方向鍵這些組合鍵全部保真
+          退路  :舊的 getwch 逐鍵讀,中文輸入沒問題,但修飾鍵資訊有限
+        """
         if vt_input:
-            # incremental decoder:os.read 可能把多位元組中文切在 1024 邊界,
-            # 殘餘位元組要跨次保留拼接,否則貼上大段中文會出 � 亂碼
+            # ★ 這個 decoder 是為中文而存在的:
+            #   一個中文字佔 3 個位元組,而 os.read 一次最多讀 1024 個 ——
+            #   如果某個字剛好被切在邊界上,直接解碼會變成 � 亂碼。
+            #   incremental decoder 會把「還沒湊齊的殘餘位元組」留著,等下一次讀進來再拼。
+            #   （貼上一大段中文時就會踩到這個。）
             decoder = codecs.getincrementaldecoder("utf-8")("replace")
             while proc.isalive():
                 try:
-                    data = os.read(0, 1024)
+                    data = os.read(0, 1024)    # 0 = 標準輸入的檔案編號(照抄)
                 except OSError:
                     break
                 if not data:
                     break
                 text = decoder.decode(data)
-                if text:
+                if text:                       # 可能整批都是殘餘位元組,還拼不成字
                     safe_write(text)
             return
+
+        # 退路:一次讀一個字元
         while proc.isalive():
             ch = msvcrt.getwch()
-            if ch in ("\x00", "\xe0"):
+            if ch in ("\x00", "\xe0"):         # 前綴 → 代表這是特殊鍵,還有第二碼
                 safe_write(VT_KEYS.get(msvcrt.getwch(), ""))
             else:
                 safe_write(ch)
 
     def watch_resize() -> None:
+        """你把視窗拉大縮小時,通知子行程重新排版。
+
+        沒有這段的話,你拉大視窗後 claude 還以為自己只有原本那麼寬,畫面會歪掉。
+        """
         nonlocal cols, rows
         while proc.isalive():
-            time.sleep(1)
+            time.sleep(1)                              # 每秒看一次就夠,不必更頻繁
             c, r = shutil.get_terminal_size()
             if (c, r) != (cols, rows):
                 cols, rows = c, r
@@ -413,12 +528,28 @@ def run_windows(cmd: list[str], state_factory) -> int:
         """背景執行緒:敲了沒反應就再敲(節拍器)。"""
         re_ring_loop(state, alive)
 
+    # ══ 第四件事:把五個幫浦跑起來 ══
+    #
+    # ★ 這幾行是整個函式的骨架,其他都是準備工作:
+    #     pump_input   你打的字   → 子行程
+    #     watch_resize 視窗大小變 → 子行程
+    #     watch_room   hub 有新訊息 → 敲鈴
+    #     keep_ringing 敲了沒反應 → 再敲
+    #     pump_output  子行程畫面 → 你的螢幕     ← 這個留在主執行緒
+    #
+    # 為什麼 pump_output 不也開一條執行緒?因為主執行緒總得有事做,
+    # 而「子行程畫面沒東西了」正好就是「該收工了」——用它當結束訊號最自然。
+    #
+    # daemon=True 的意思是「主人走了就跟著走」:主執行緒一結束,
+    # 這四條背景執行緒會自動消失,不必一個個去叫它們停。
     try:
         for fn in (pump_input, watch_resize, watch_room, keep_ringing):
             threading.Thread(target=fn, daemon=True).start()
         pump_output()  # 主執行緒守輸出;子行程退出即結束
         return proc.exitstatus or 0
     finally:
+        # ★ finally 保證這行一定會跑到 —— 就算上面爆炸、就算使用者按 Ctrl+C。
+        #   終端機是跟使用者借的,無論如何都要還。
         restore_terminal()
 
 
@@ -428,6 +559,29 @@ def run_windows(cmd: list[str], state_factory) -> int:
 # 這正是「Windows 遲到了幾十年」的另一面。
 
 def run_posix(cmd: list[str], state_factory) -> int:
+    """Mac / Linux 版:做的事跟 run_windows 完全一樣,只是工具不同。
+
+    ═══ 這個函式怎麼讀 ═══
+
+    【要懂的】跟 Windows 版對照著看最快:
+      1. 為什麼 import 寫在函式裡 —— 放頂端會讓整個程式在 Windows 上開不起來
+      2. pty.fork() 那三行在做什麼 —— 一個行程變兩個,一個當人一個當 CLI
+      3. 為什麼要先記舊設定再還原 —— 跟 Windows 版同一個理由:終端機是借來的
+      4. select 那個迴圈 —— 它一個人做完 Windows 版兩條執行緒的事
+
+    【知道有這回事就好】:
+      · termios / tty = Unix 版的「主控台設定」,對應 Windows 的 SetConsoleMode
+      · select = 「這幾個來源,誰有資料就叫我」,不必為每個來源各開一條執行緒
+
+    【兩邊的差異,不是遺漏】:
+      · 這裡不必開 VT —— Unix 終端機天生就懂那些暗號(Windows 2018 年才有)
+      · 這裡不必設 UTF-8 —— Unix 預設就是
+      · 這裡不必裝套件 —— 偽終端是作業系統原生設施,標準庫直接有
+
+    ⚠️ 已知缺口:這裡【沒有】對應 Windows 版的 watch_resize ——
+       在 Mac/Linux 上把視窗拉大縮小,子行程不會知道,畫面會歪掉。
+       正解是接 SIGWINCH 訊號。尚未實作,因為手邊沒有 POSIX 環境長期驗證。
+    """
     # ★ 為什麼這幾個 import 寫在函式裡,不放檔案頂端?
     #   因為在 Windows 上 `import pty` 會【當場失敗】——
     #   它連鎖 import tty → termios,而 termios 是 POSIX 專屬,Windows 根本沒有。
@@ -440,31 +594,52 @@ def run_posix(cmd: list[str], state_factory) -> int:
     import termios
     import tty
 
-    # pty.fork():開一條偽終端,然後把行程一分為二。
-    # 回傳的 pid 若為 0 代表「我是子行程」,此時它的 stdin/stdout 已經接在
-    # 偽終端的從屬端上;execvp 把自己整個換成要跑的 agent CLI(取代,不是啟動另一個)。
-    # 父行程拿到的 master 就是主控端 —— 往它寫字 = 假裝有人在鍵盤上打字。
+    # ══ 第一件事:開一條偽終端,並把自己一分為二 ══
+    #
+    # pty.fork() 做兩件事:開偽終端,然後複製出一個一模一樣的行程。
+    # 複製完之後,兩個行程都從這一行繼續執行,靠回傳值分辨自己是誰:
+    #     pid == 0  → 我是子行程,我的鍵盤與螢幕已經接在偽終端的從屬端上
+    #     pid  > 0  → 我是父行程,master 就是主控端(往它寫字 = 假裝有人在打字)
+    #
+    # execvp 是「把自己整個換掉」,不是「啟動另一個程式」——
+    # 換成功之後,這個行程就【變成】 claude 了,下面的程式碼一行都不會執行。
+    # (萬一換失敗,例如指令不存在,Python 會拋例外讓子行程直接結束 —— 實測確認過。)
     pid, master = pty.fork()
     if pid == 0:
         os.execvp(cmd[0], cmd)
 
-    write_lock = threading.Lock()  # 同 Windows:鈴聲與打字不互插
+    # ══ 第二件事:準備「怎麼寫字進去」 ══
+
+    # 跟 Windows 版同一個理由:等一下會有兩個執行緒同時想寫,不上鎖會交錯成亂碼。
+    write_lock = threading.Lock()
 
     def write_to_child(payload: bytes) -> None:
+        """往主控端寫 = 假裝使用者敲了這些鍵。"""
         os.write(master, payload)
 
     def safe_write(data: bytes) -> bool:
+        """所有寫入的唯一閘門:上鎖 + 吞掉子行程已死的錯誤。"""
         return guarded_write(write_to_child, data, write_lock)
 
     def ring(text: str) -> bool:
-        """鈴聲是字串,但 pty 收的是位元組,所以在這裡轉一次。"""
+        """鈴聲是字串,但偽終端只收位元組,所以在這裡轉一次。
+
+        ★ 這就是分層的意義:BellState 只知道「呼叫 ring 就會響」,
+          完全不知道 POSIX 這邊多了一道編碼手續。Windows 那邊則沒有這道。
+        """
         return safe_write(text.encode("utf-8"))
 
     def alive() -> bool:
-        """POSIX 這邊不查子行程狀態,改以「讀到 EOF」判定結束(見下方讀迴圈),
-        所以這裡永遠回 True —— 執行緒都是 daemon,主迴圈收工就一起走。"""
+        """子行程還活著嗎?
+
+        ★ 這裡永遠回 True,跟 Windows 版【故意不一樣】:
+          Windows 有現成的 isalive() 可問,POSIX 這邊要問得多花一次系統呼叫,
+          而我們其實不需要 —— 下面那個讀迴圈讀到 EOF 就會自己結束,
+          兩條背景執行緒都是 daemon,主迴圈一收工它們就跟著走。
+        """
         return True
 
+    # 到這裡才建 BellState,因為現在才有 ring 可以交給它。
     state: BellState = state_factory(ring)
 
     def watch_room() -> None:
@@ -478,23 +653,30 @@ def run_posix(cmd: list[str], state_factory) -> int:
     threading.Thread(target=watch_room, daemon=True).start()
     threading.Thread(target=keep_ringing, daemon=True).start()
 
-    old_attrs = termios.tcgetattr(sys.stdin)
-    tty.setraw(sys.stdin.fileno())
+    # ══ 第三件事:借用終端機,跑主迴圈,最後還回去 ══
+
+    old_attrs = termios.tcgetattr(sys.stdin)   # ★ 先記舊設定,離場要原封不動還回去
+    tty.setraw(sys.stdin.fileno())             # 切成原始模式:按鍵一按就轉交,不等 Enter、不回顯
     try:
         while True:
+            # select 的意思是「這幾個來源,誰有資料就叫我」。
+            # ★ Windows 版為了同樣的效果開了兩條執行緒(pump_input + pump_output),
+            #   POSIX 這邊一個迴圈就夠 —— 這是兩邊最大的結構差異。
             r, _, _ = select.select([sys.stdin, master], [], [])
-            if sys.stdin in r:
+
+            if sys.stdin in r:                 # 你打了字 → 轉交給子行程
                 data = os.read(sys.stdin.fileno(), 1024)
                 if not data:
                     break
                 safe_write(data)
-            if master in r:
+
+            if master in r:                    # 子行程畫了畫面 → 原樣印到螢幕
                 try:
                     data = os.read(master, 4096)
                 except OSError:
-                    break
+                    break                      # 子行程結束了
                 if not data:
-                    break
+                    break                      # 讀到 EOF,同樣代表結束
                 os.write(sys.stdout.fileno(), data)
     finally:
         # 與 Windows 端對稱:termios 只還原「我們」動過的,子行程留下的終端機私有模式
@@ -505,6 +687,8 @@ def run_posix(cmd: list[str], state_factory) -> int:
             sys.stdout.flush()
         except (OSError, ValueError):
             pass
+
+    # 等子行程真的結束,把它的結束碼原樣轉交出去(讓外面知道 claude 是正常退出還是出錯)
     _, status = os.waitpid(pid, 0)
     return os.waitstatus_to_exitcode(status)
 
@@ -526,6 +710,17 @@ def main() -> int:
     cmd = args.cmd[1:] if args.cmd and args.cmd[0] == "--" else args.cmd
     if not cmd:
         parser.error("缺少要包的指令,例:uv run bell.py --name alice -- claude --resume")
+
+    # ★ 必須在真的終端機裡執行,否則後面會炸。
+    #   這個程式的工作是「站在使用者的鍵盤與 agent 之間轉交按鍵」——
+    #   如果 stdin 被接到管線或排程系統上,根本沒有按鍵可以轉,底層借用終端機設定
+    #   的動作也會失敗(POSIX 端會丟出 Inappropriate ioctl for device 這種天書)。
+    #   與其讓它在深處爆炸,不如在這裡先講清楚。
+    if not sys.stdin.isatty():
+        print("bell.py 必須在終端機裡執行(它要轉交你的按鍵)。\n"
+              "偵測到 stdin 不是終端機 —— 常見原因是接了管線、放進排程、或在 CI 裡跑。",
+              file=sys.stderr)
+        return 1
 
     cursor_path = BASE / "state" / f"cursor-{args.name}.txt"
     global LOG_PATH

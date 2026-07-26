@@ -407,146 +407,243 @@ class RegisterAgent(BaseModel):
     color: str = Field(pattern=r"^#[0-9a-fA-F]{6}$")
     inviteToken: str = Field(min_length=1, max_length=128)
 
+# ═══════════════════════════════════════════════════════════════════════════
+#  Hub —— 資料與規則
+# ═══════════════════════════════════════════════════════════════════════════
 
-# ---------- Composition Root ----------
+class Hub:
+    """聊天室的中樞:所有元件與共用規則都放在這裡。
 
-def create_app(port: int | None = None, host: str | None = None,
-               public_url: str | None = None) -> FastAPI:
-    """組裝一切:store / bus / a2a_layer 在這裡建構、耦合點在這裡宣告。
+    為什麼要有這個類別:
+        這些東西原本全塞在 create_app 裡面,那個函式長到三百多行,
+        中間還巢狀了十九個路由函式 —— 想看懂任何一個路由,得先穿過那三百行。
 
-    ingest 是「訊息入流」的唯一入口(REST 發言與 A2A SendMessage 共用):
-    鎖 → 樂觀鎖驗證 → reply_to 驗證 → 解析 mentions → 落地 → 廣播 → 通知 A2A 層。
-    A2A 完成橋接以 callback 顯式注入 — 一行誠實的呼叫,宣告在組裝處。
+        現在切成三層,各做一件事:
 
-    遠端化(roadmap ①):HOST 控制綁定位址,**預設 0.0.0.0 = 開放區網**
-    (見 DEFAULT_HOST;要只聽本機請設 HOST=127.0.0.1)。PUBLIC_URL 決定
-    Agent Card 對外宣告的位址 — 開放綁定卻沒設它時,遠端 client 會拿到
-    對它無效的 127.0.0.1,故啟動時印警告。
+            Hub          管資料與規則(這個類別)
+            register_*   管「哪個網址對應到哪個動作」
+            create_app   只負責把上面兩者組裝起來
 
-    註:這段文字原本寫著「預設只聽本機」,與 DEFAULT_HOST 的實際值矛盾了一段時間
-    (2026-07-26 修正)。同一份程式裡兩處說法打架時,以有程式碼在旁邊的那處為準 ——
-    這裡的教訓是:改預設值時要一併搜尋描述它的文字,常數改了、說明沒改,
-    比沒有說明更糟。
+        好處是:想改規則就看 Hub,想加網址就看 register_*,兩邊互不干擾。
     """
-    port = port or int(os.environ.get("PORT", str(DEFAULT_PORT)))
-    host = host or os.environ.get("HOST", DEFAULT_HOST)
-    public_url = (public_url or os.environ.get("PUBLIC_URL", "")).rstrip("/")
-    base_url = public_url or f"http://127.0.0.1:{port}"
-    if host not in ("127.0.0.1", "localhost") and not public_url:
-        print(f"[hub] WARN HOST={host}(對外開放)但未設 PUBLIC_URL — "
-              f"遠端 client 取得的 Agent Card url 會指向對它無效的 {base_url};"
-              f"建議啟動時設 PUBLIC_URL=http://<你的區網IP>:{port}", file=sys.stderr)
-    store = MessageStore(BASE / "chat.jsonl")
-    bus = EventBus()
-    post_lock = asyncio.Lock()
 
-    async def ingest(room: str, sender: str, text: str, reply_to: int | None = None,
-                     task_id: str | None = None, extra_mentions: list[str] | None = None,
-                     expect_last_id: int | None = None) -> dict:
-        async with post_lock:
-            current = store.last_id(room)
-            if expect_last_id is not None and expect_last_id != current:
-                missed, _ = store.query(room, since_id=expect_last_id)
-                raise StaleCursorError({"error": "stale", "last_id": current, "missed": missed})
-            if reply_to is not None and not store.exists(room, reply_to):
-                raise BadReplyToError({"error": "bad_reply_to",
-                                       "detail": f"訊息 #{reply_to} 不存在於 {room}"})
-            mentions = MentionParser.parse(store.known(room), text)
-            for extra in extra_mentions or []:
-                if extra not in mentions:
-                    mentions.append(extra)  # task 訊息強制點名目標 agent,確保喚醒
-            msg = store.append(room, sender, text, mentions, reply_to=reply_to, task_id=task_id)
-        bus.publish(room, msg)
-        a2a_layer.on_room_message(room, msg)  # 完成橋接(耦合點,見 docstring)
-        return msg
+    def __init__(self, port: int | None = None, host: str | None = None,
+                 public_url: str | None = None):
+        self.port = port or int(os.environ.get("PORT", str(DEFAULT_PORT)))
+        self.host = host or os.environ.get("HOST", DEFAULT_HOST)
+        self.public_url = (public_url or os.environ.get("PUBLIC_URL", "")).rstrip("/")
+        self.base_url = self.public_url or f"http://127.0.0.1:{self.port}"
+        self.warn_if_exposed_without_public_url()
 
-    agents = a2a_mod.AgentRegistry(BASE / "agents.json")  # 名冊:seed + 註冊者(roadmap ②)
-    invite_token = os.environ.get("INVITE_TOKEN", "")     # 未設 = 註冊關閉(安全預設)
+        # ── 訊息與廣播 ──
+        self.store = MessageStore(BASE / "chat.jsonl")
+        self.bus = EventBus()
+        # 這把鎖讓「寫進聊天室」這件事一次只有一個人在做。
+        # 沒有它的話,兩個人同時發言會讓樂觀鎖失效 —— 兩邊都以為自己是最新的。
+        self.post_lock = asyncio.Lock()
 
-    # ── 認證與限流(roadmap ③)──
-    auth_enabled = os.environ.get("AUTH", "").lower() in ("on", "1", "true")
-    token_store = TokenStore(BASE / "tokens.json")
-    rate_limiter = RateLimiter()
-    if auth_enabled:
-        # 名冊每人 + user(人類)確保持鑰;新發的印 console 讓使用者分發
-        fresh = token_store.ensure(agents.names() + ["user"])
+        # ── 名冊、認證、限流 ──
+        self.agents = a2a_mod.AgentRegistry(BASE / "agents.json")
+        self.invite_token = os.environ.get("INVITE_TOKEN", "")   # 沒設 = 註冊功能關閉
+        self.auth_enabled = os.environ.get("AUTH", "").lower() in ("on", "1", "true")
+        self.token_store = TokenStore(BASE / "tokens.json")
+        self.rate_limiter = RateLimiter()
+        if self.auth_enabled:
+            self.issue_startup_tokens()
+
+        # ── A2A 協定層 ──
+        # 注意這裡傳的是 self.ingest,一個已經綁在這個 Hub 上的方法。
+        # 協定層收到訊息時會呼叫它,而它裡面又會回頭呼叫協定層 —— 兩邊互相需要。
+        # 放在同一個類別裡,這種互相需要就自然解決了。
+        self.a2a_layer = a2a_mod.A2ALayer(
+            ingest=self.ingest,
+            sanitize_sender=sanitize_sender,
+            base_url=self.base_url,
+            agents=self.agents,
+            auth_enabled=self.auth_enabled,
+            tasks_path=self.pick_tasks_path(),
+        )
+
+    # ---------- 開機時的準備工作 ----------
+
+    def warn_if_exposed_without_public_url(self) -> None:
+        """對外開放卻沒設對外網址時,印一行警告。
+
+        為什麼要警告:遠端的 client 會來問「你的名片在哪」,
+        我們若回答 127.0.0.1,對它來說指的是【它自己那台機器】,永遠連不到我們。
+        """
+        if self.host in ("127.0.0.1", "localhost"):
+            return
+        if self.public_url:
+            return
+        print(f"[hub] WARN HOST={self.host}(對外開放)但未設 PUBLIC_URL — "
+              f"遠端 client 取得的 Agent Card url 會指向對它無效的 {self.base_url};"
+              f"建議啟動時設 PUBLIC_URL=http://<你的區網IP>:{self.port}", file=sys.stderr)
+
+    def issue_startup_tokens(self) -> None:
+        """開了認證時,確保名冊上每個人(加上人類 user)都有一把鑰匙。
+
+        新發的鑰匙印在畫面上,而且【只印這一次】—— 檔案裡存的是指紋不是明文,
+        所以沒抄到就只能重發。設 ROTATE_TOKEN=<名字> 可以幫某人重發、舊的作廢。
+        """
+        fresh = self.token_store.ensure(self.agents.names() + ["user"])
         for name, token in fresh.items():
             print(f"[auth] {name} 的 token(僅此一次,請抄下分發):{token}", file=sys.stderr)
         rotate = os.environ.get("ROTATE_TOKEN", "")
-        if rotate:  # 丟鑰匙換鎖:ROTATE_TOKEN=<名字> 重生該人 token
-            print(f"[auth] {rotate} 的新 token(舊的已失效):{token_store.issue(rotate)}",
-                  file=sys.stderr)
+        if rotate:
+            new_token = self.token_store.issue(rotate)
+            print(f"[auth] {rotate} 的新 token(舊的已失效):{new_token}", file=sys.stderr)
 
-    def check_writer(name: str, request: Request) -> None:
-        """AUTH=on 時的寫入守門:Bearer 必須存在、有效、且與聲稱身分綁定。"""
-        if not auth_enabled:
+    def pick_tasks_path(self) -> Path:
+        """決定任務狀態要存到哪個檔案。
+
+        為什麼不固定一個檔名:任務檔是【整包蓋回去】的寫法,
+        兩個 hub 共用同一個檔案會互相把對方的狀態洗掉(實際踩過)。
+        所以用非預設埠號跑的實例,自動改用自己的檔名。TASKS_PATH 可以手動指定。
+        """
+        custom = os.environ.get("TASKS_PATH")
+        if custom:
+            return Path(custom)
+        if self.port == DEFAULT_PORT:
+            return BASE / "tasks.json"
+        return BASE / f"tasks-{self.port}.json"
+
+    async def restore_tasks(self) -> None:
+        """伺服器重開時,把還沒做完的任務接回來。
+
+        這件事必須等 event loop 起來才能做(裡面要重新掛計時器),
+        所以由 lifespan 呼叫,不能寫在 __init__ 裡。
+        """
+        self.a2a_layer.restore(self.store.exists)
+
+    # ---------- 共用規則 ----------
+
+    async def ingest(self, room: str, sender: str, text: str, reply_to: int | None = None,
+                     task_id: str | None = None, extra_mentions: list[str] | None = None,
+                     expect_last_id: int | None = None) -> dict:
+        """所有訊息進入聊天室的唯一入口。
+
+        網頁發言走這裡,A2A 派任務也走這裡 —— 只有一個入口,規則才不會有兩套。
+
+        流程固定六步:上鎖 → 樂觀鎖檢查 → 引用檢查 → 解析點名 → 寫檔 → 廣播
+        """
+        async with self.post_lock:
+            current = self.store.last_id(room)
+
+            # 樂觀鎖:發言者聲明「我以為現在最新是第 N 則」。
+            # 對不上代表有人搶先發言了 —— 擋下來,並把他錯過的內容一起回給他。
+            if expect_last_id is not None and expect_last_id != current:
+                missed, _ = self.store.query(room, since_id=expect_last_id)
+                raise StaleCursorError({"error": "stale", "last_id": current, "missed": missed})
+
+            # 引用檢查:不能引用一則不存在的訊息。
+            if reply_to is not None and not self.store.exists(room, reply_to):
+                raise BadReplyToError({"error": "bad_reply_to",
+                                       "detail": f"訊息 #{reply_to} 不存在於 {room}"})
+
+            mentions = MentionParser.parse(self.store.known(room), text)
+            # 派任務時要強制點名目標,否則對方不會被叫醒。
+            for extra in extra_mentions or []:
+                if extra not in mentions:
+                    mentions.append(extra)
+
+            msg = self.store.append(room, sender, text, mentions,
+                                    reply_to=reply_to, task_id=task_id)
+
+        # 鎖放掉之後才做這兩件事 —— 它們不碰檔案,不需要排隊。
+        self.bus.publish(room, msg)                 # 通知所有正在看的人
+        self.a2a_layer.on_room_message(room, msg)   # 通知協定層(任務狀態可能要變)
+        return msg
+
+    def check_writer(self, name: str, request: Request) -> None:
+        """寫入前的身分檢查。沒開認證就直接放行。
+
+        三種失敗分開講,因為它們的意思完全不同:
+            沒帶鑰匙     → 你需要先拿一把
+            鑰匙是別人的 → 你在冒名(這種最該講清楚)
+            鑰匙不存在   → 這把是假的
+        """
+        if not self.auth_enabled:
             return
+
         header = request.headers.get("authorization", "")
         if not header.lower().startswith("bearer "):
             raise UnauthorizedError({"error": "no_token",
                                      "detail": "AUTH 已啟用,寫入需 Authorization: Bearer <token>"})
+
         token = header[7:].strip()
-        if token_store.verify(name, token):
+        if self.token_store.verify(name, token):
             return
-        owner = token_store.owner_of(token)
-        if owner:  # 鑰匙是真的,但開的不是自己的門 = 冒名
+
+        owner = self.token_store.owner_of(token)
+        if owner:
             raise ForbiddenError({"error": "wrong_identity",
                                   "detail": f"這把 token 屬於「{owner}」,不能以「{name}」發言"})
         raise UnauthorizedError({"error": "bad_token", "detail": "無效的 token"})
 
-    # task 快照路徑:非預設 PORT 的實例自動用獨立檔 — 全量快照是「最後寫者贏」,
-    # 多實例共用同一檔會互洗 task 狀態(實測過的營運風險);TASKS_PATH 可覆寫
-    tasks_path = Path(os.environ.get("TASKS_PATH") or
-                      BASE / ("tasks.json" if port == DEFAULT_PORT else f"tasks-{port}.json"))
-    a2a_layer = a2a_mod.A2ALayer(ingest=ingest, sanitize_sender=sanitize_sender,
-                                 base_url=base_url, agents=agents, auth_enabled=auth_enabled,
-                                 tasks_path=tasks_path)  # roadmap ④:task 持久化
+    def identify_optional_reader(self, name: str | None, request: Request) -> str | None:
+        """認一下「順便報上名字」的人是誰,認不出來就當匿名。
 
-    @asynccontextmanager
-    async def lifespan(_app: FastAPI):
-        # 復原 in-flight task(roadmap ④):殭屍判定/停機逾期/剩餘時間重掛,
-        # 必須在 event loop 起來後執行,故掛在 lifespan 而非 create_app 本體
-        a2a_layer.restore(store.exists)
-        yield
+        用在兩個地方:讀訊息時的 reader=、看直播時的 watcher=。
+        這兩個都不是正式的寫入動作,所以驗不過【不擋人】,只是不算數 ——
+        照樣讓你讀、讓你看,只是不觸發已讀、不列進在場名單。
 
-    app = FastAPI(title="A2A Chatroom Hub", lifespan=lifespan)
-    app.mount("/static", StaticFiles(directory=BASE / "static"), name="static")
-
-    @app.exception_handler(ApiError)
-    async def api_error_handler(request: Request, exc: ApiError):
-        return JSONResponse(status_code=exc.status, content=exc.payload)
-
-    # ---------- 可視化層 REST(協定見 AGENT_GUIDE.md)----------
-
-    STATIC_REF_RE = re.compile(r'"/static/([^"?]+\.(?:js|css))"')
-
-    def stamp_static_urls(html: str) -> str:
-        """把 index.html 裡的 js / css 網址接上「這個檔案的修改時間」。
-
-        為什麼要這樣做:瀏覽器會把 js 與 css 快取起來,所以改了樣式或程式碼之後,
-        使用者按重整**仍然看到舊的**,要按 Ctrl+F5 才會更新 —— 這種「明明改好了
-        對方卻看不到」的狀況我們已經踩過兩次。
-
-        接上修改時間之後,檔案一改網址就變(/static/app.js?v=1753...),
-        瀏覽器認得那是新網址,自然會重新下載;檔案沒改時網址不變,快取照樣有效。
-        兩全其美,而且不需要任何打包工具。
+        為什麼還是要驗:不驗的話,任何人都能假裝別人已讀、假裝別人在線上。
         """
-        def add_version(match: re.Match) -> str:
-            filename = match.group(1)
-            file_path = BASE / "static" / filename
-            version = 0
-            if file_path.exists():
-                version = int(file_path.stat().st_mtime)
-            return f'"/static/{filename}?v={version}"'
+        if not name:
+            return None
+        clean = sanitize_sender(name)
+        if clean is None:
+            return None
+        if not self.auth_enabled:
+            return clean
+        try:
+            self.check_writer(clean, request)
+        except ApiError:
+            return None      # 冒名者當匿名處理
+        return clean
 
-        return STATIC_REF_RE.sub(add_version, html)
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  路由註冊 —— 哪個網址對應到哪個動作
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# 每一組獨立一個函式。想找某個端點,直接看對應的那一組就好,不必翻整個檔案。
+
+STATIC_REF_RE = re.compile(r'"/static/([^"?]+\.(?:js|css))"')
+
+
+def stamp_static_urls(html: str) -> str:
+    """把 index.html 裡的 js / css 網址接上「這個檔案的修改時間」。
+
+    為什麼要這樣做:瀏覽器會把 js 與 css 快取起來,所以改了樣式或程式碼之後,
+    使用者按重整**仍然看到舊的**,要按 Ctrl+F5 才會更新 —— 這種「明明改好了
+    對方卻看不到」的狀況我們已經踩過兩次。
+
+    接上修改時間之後,檔案一改網址就變(/static/app.js?v=1753...),
+    瀏覽器認得那是新網址,自然會重新下載;檔案沒改時網址不變,快取照樣有效。
+    兩全其美,而且不需要任何打包工具。
+    """
+    def add_version(match: re.Match) -> str:
+        filename = match.group(1)
+        file_path = BASE / "static" / filename
+        version = 0
+        if file_path.exists():
+            version = int(file_path.stat().st_mtime)
+        return f'"/static/{filename}?v={version}"'
+
+    return STATIC_REF_RE.sub(add_version, html)
+
+
+def register_page_routes(app: FastAPI, hub: Hub) -> None:
+    """網頁本體與前端開機設定。"""
 
     @app.get("/")
     async def index():
         # 這一頁不准快取。原因:index.html 決定要載入哪些 js 檔,瀏覽器若拿到
         # 舊版的它,就會少載新加的檔案 —— 畫面會整個壞掉,而且使用者按重整
         # 也救不回來(要按 Ctrl+F5 才行)。每次只有一份小小的 HTML,不值得為
-        # 它冒這個險;js 與 css 由上面的 stamp_static_urls 負責換網址。
+        # 它冒這個險;js 與 css 由 stamp_static_urls 負責換網址。
         html = (BASE / "static" / "index.html").read_text(encoding="utf-8")
         return HTMLResponse(
             stamp_static_urls(html),
@@ -555,52 +652,59 @@ def create_app(port: int | None = None, host: str | None = None,
 
     @app.get("/api/config")
     async def get_config():
-        """前端開機設定:mention 規則與 agent 色相的單一事實來源。
-        名冊動態化後,新註冊者的色相在「重新整理後」生效(已知時效行為)。"""
+        """前端開機設定:點名規則與每個 agent 的顏色,都以這裡為準。
+
+        新註冊的成員,顏色要重新整理頁面後才會生效(已知的時效行為)。
+        """
+        colors = {}
+        for name, profile in hub.agents.profiles.items():
+            colors[name] = {"color": profile.get("color", "#c9d1d9")}
         return {
             "mentionPattern": MentionParser.JS_SOURCE,
             "a2aVersion": a2a_mod.A2A_PROTOCOL_VERSION,
-            "authEnabled": auth_enabled,  # UI 據此顯示/隱藏 token 欄
-            "agents": {name: {"color": p.get("color", "#c9d1d9")}
-                       for name, p in agents.profiles.items()},
+            "authEnabled": hub.auth_enabled,   # 前端據此決定要不要顯示 token 欄位
+            "agents": colors,
         }
+
+
+def register_room_routes(app: FastAPI, hub: Hub) -> None:
+    """房間的讀寫:清單、在場名單、訊息、發言、任務。"""
 
     @app.get("/api/rooms")
     async def rooms_index():
-        return {"rooms": store.rooms_index()}
+        return {"rooms": hub.store.rooms_index()}
 
     @app.get("/api/rooms/{room}/presence")
     async def get_presence(room: str):
-        """在場名單:誰的 SSE 連線正開著(bell 或瀏覽器)。"""
-        return {"room": room, "present": sorted(bus.watchers(room))}
+        """在場名單:誰的直播連線正開著(敲鈴器或瀏覽器都算)。"""
+        return {"room": room, "present": sorted(hub.bus.watchers(room))}
 
     @app.get("/api/rooms/{room}/members")
     async def get_members(room: str):
-        return {"members": store.members(room)}
+        return {"members": hub.store.members(room)}
 
     @app.get("/api/rooms/{room}/state")
     async def get_state(room: str):
-        """給 poller 的極輕量狀態:只有 cursor,不含訊息內容。"""
-        return {"room": room, "last_id": store.last_id(room), "count": store.count(room)}
+        """極輕量的狀態查詢:只回「最新第幾則」,不含訊息內容。"""
+        return {"room": room,
+                "last_id": hub.store.last_id(room),
+                "count": hub.store.count(room)}
 
     @app.get("/api/rooms/{room}/messages")
     async def get_messages(room: str, request: Request, since_id: int = 0, limit: int = 500,
                            mentioned: str | None = None, before_id: int | None = None,
                            tail: int | None = None, reader: str | None = None):
-        sel, last = store.query(room, since_id, limit, mentioned, before_id, tail)
-        if reader:
-            name = sanitize_sender(reader)
-            # reader= 是隱藏的寫入(觸發 task 轉 WORKING)— AUTH=on 時必須驗身分,
-            # 驗不過就優雅降級:GET 本體照常回,只是不觸發已讀
-            authorized = True
-            if auth_enabled and name:
-                try:
-                    check_writer(name, request)
-                except ApiError:
-                    authorized = False
-            if name and authorized:
-                a2a_layer.on_reader_fetch(room, name, sel)  # 已讀回條 = WORKING
-        return {"messages": sel, "last_id": last}
+        """撈訊息。
+
+        reader=<名字> 是一個「順便」的動作:代表這個人真的把訊息看過了,
+        所以派給他的任務要從「已送出」變成「處理中」—— 等於已讀回條。
+        認不出身分時照樣把訊息給他,只是不算已讀(見 identify_optional_reader)。
+        """
+        selected, last_id = hub.store.query(room, since_id, limit, mentioned, before_id, tail)
+        who = hub.identify_optional_reader(reader, request)
+        if who:
+            hub.a2a_layer.on_reader_fetch(room, who, selected)
+        return {"messages": selected, "last_id": last_id}
 
     @app.post("/api/rooms/{room}/messages", status_code=201)
     async def post_message(room: str, body: PostMessage, request: Request):
@@ -608,84 +712,100 @@ def create_app(port: int | None = None, host: str | None = None,
         if sender is None:
             raise BadSenderError({"error": "bad_sender",
                                   "detail": "名字限 1-32 字的中英數與 - _,不含空白與 @"})
-        check_writer(sender, request)   # 認證(AUTH=on 時)
-        rate_limiter.check(sender)      # 限流(永遠啟用)
-        msg = await ingest(room, sender, body.text, reply_to=body.reply_to,
-                           expect_last_id=body.expect_last_id)
+        hub.check_writer(sender, request)    # 認證(只在 AUTH=on 時真的檢查)
+        hub.rate_limiter.check(sender)       # 限流(永遠啟用)
+        msg = await hub.ingest(room, sender, body.text,
+                               reply_to=body.reply_to,
+                               expect_last_id=body.expect_last_id)
         return {"id": msg["id"]}
 
     @app.get("/api/rooms/{room}/tasks")
     async def get_room_tasks(room: str):
-        return {"tasks": a2a_layer.tasks_for_room(room)}
+        return {"tasks": hub.a2a_layer.tasks_for_room(room)}
 
-    # /wait long-poll 端點已移除(喚醒改走 bell 敲鈴器,watch 機制留作備援,
-    # curl 等待路線退場)— 需要考古的話看 git 歷史 🚀 fa0c64b 前後。
+
+def register_stream_route(app: FastAPI, hub: Hub) -> None:
+    """觀戰直播。獨立一組,因為它是唯一一個「連線會一直開著」的端點。"""
 
     @app.get("/api/rooms/{room}/stream")
     async def stream(room: str, request: Request, since_id: int = 0,
                      watcher: str | None = None):
-        """觀戰 SSE。送 id: 欄位,瀏覽器斷線重連自帶 Last-Event-ID 無縫補齊。
+        """把新訊息即時推給對方,連線一直開著不關。
 
-        watcher=<名字> 讓訂閱者自報身分以計入 presence;AUTH=on 時驗不過就
-        降級為匿名(串流照給,只是不計入在場名單)— 與 reader= 同一套模式,
-        否則任何人都能假裝別人在線。
+        watcher=<名字> 讓訂閱者報上身分,才會被算進在場名單;
+        認不出來就當匿名觀眾(照樣看得到,只是不列名)。
+
+        斷線重連:瀏覽器會自動帶上 Last-Event-ID 這個標頭告訴我們「我看到第幾則」,
+        我們就從那裡繼續送 —— 斷線期間的訊息不會漏掉。
         """
         last_event_id = request.headers.get("last-event-id")
         if last_event_id and last_event_id.isdigit():
             since_id = int(last_event_id)
-        name = None
-        if watcher:
-            name = sanitize_sender(watcher)
-        if name and auth_enabled:
-            try:
-                check_writer(name, request)
-            except ApiError:
-                name = None  # 冒名者只當匿名觀眾
-        sub = bus.subscribe(room, watcher=name)
 
-        def sse(msg: dict) -> str:
-            return f"id: {msg['id']}\ndata: {json.dumps(msg, ensure_ascii=False)}\n\n"
+        who = hub.identify_optional_reader(watcher, request)
+        subscription = hub.bus.subscribe(room, watcher=who)
 
-        async def gen():
+        def to_sse(msg: dict) -> str:
+            """把一則訊息包成直播的格式(id 那行讓瀏覽器記住進度)。"""
+            payload = json.dumps(msg, ensure_ascii=False)
+            return f"id: {msg['id']}\ndata: {payload}\n\n"
+
+        async def event_stream():
             try:
-                yield "retry: 2000\n\n"
-                replay, _ = store.query(room, since_id=since_id, limit=SSE_REPLAY_LIMIT)
-                for m in replay:  # 先訂閱再回放,交界重複由 client 以 id 去重
-                    yield sse(m)
+                yield "retry: 2000\n\n"     # 告訴瀏覽器:斷線後 2 秒再重連
+
+                # 先補上他錯過的,再開始等新的。
+                # 順序是「先訂閱、後回放」,所以交界處可能重複送一兩則 ——
+                # 沒關係,對方會用 id 去掉重複的。反過來做則會漏訊息。
+                replay, _ = hub.store.query(room, since_id=since_id, limit=SSE_REPLAY_LIMIT)
+                for msg in replay:
+                    yield to_sse(msg)
+
                 while True:
                     try:
-                        m = await asyncio.wait_for(sub.queue.get(), timeout=SSE_KEEPALIVE_SECONDS)
-                        yield sse(m)
+                        msg = await asyncio.wait_for(subscription.queue.get(),
+                                                     timeout=SSE_KEEPALIVE_SECONDS)
+                        yield to_sse(msg)
                     except asyncio.TimeoutError:
-                        if sub.dead:
-                            break  # backpressure 斷線,client 重連補齊
-                        yield ": keep-alive\n\n"
+                        # 一段時間沒訊息了。先看看這條連線是不是已經被判定塞車,
+                        # 是的話就結束,讓對方重連(重連會自動補齊)。
+                        if subscription.dead:
+                            break
+                        yield ": keep-alive\n\n"   # 送個空訊號,免得中間的路由器把連線切掉
             finally:
-                bus.unsubscribe(room, sub)
+                hub.bus.unsubscribe(room, subscription)
 
-        return StreamingResponse(gen(), media_type="text/event-stream",
-                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+        return StreamingResponse(event_stream(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache",
+                                          "X-Accel-Buffering": "no"})
 
-    # ---------- A2A Protocol 層(底層協定,對映見 A2A_MAPPING.md)----------
+
+def register_agent_routes(app: FastAPI, hub: Hub) -> None:
+    """成員名冊:列出有誰、報到加入、查看名片。"""
 
     @app.get("/agents")
     async def agents_index():
-        return {"agents": [{"name": n, "card": f"/agents/{n}/.well-known/agent-card.json"}
-                           for n in agents.names()]}
+        listing = []
+        for name in hub.agents.names():
+            listing.append({"name": name,
+                            "card": f"/agents/{name}/.well-known/agent-card.json"})
+        return {"agents": listing}
 
     @app.post("/agents", status_code=201)
     async def register_agent(body: RegisterAgent):
-        """roadmap ② 動態註冊:憑邀請 token 入冊,回 Agent Card。
+        """報到窗口:新成員憑邀請碼加入名冊,加入後回一張名片給他。
 
-        驗證順序:註冊開關 → token → 名字消毒 → 保留名單 → 語意綠黑名單 →
-        (持鎖)不分大小寫重名 → 入冊原子落地。
+        檢查順序固定,由寬到嚴:
+            功能有沒有開 → 邀請碼對不對 → 名字合不合法 → 是不是保留名
+            → 顏色有沒有搶系統色 → 資料會不會太大 → (上鎖)名字有沒有被用走
         """
-        if not invite_token:
+        if not hub.invite_token:
             return JSONResponse(status_code=403, content={
                 "error": "registration_closed",
                 "detail": "hub 未設定 INVITE_TOKEN,註冊功能關閉"})
-        if body.inviteToken != invite_token:
+        if body.inviteToken != hub.invite_token:
             return JSONResponse(status_code=403, content={"error": "bad_invite_token"})
+
         name = sanitize_sender(body.name)
         if name is None:
             raise BadSenderError({"error": "bad_name",
@@ -696,60 +816,133 @@ def create_app(port: int | None = None, host: str | None = None,
         if body.color.lower() == a2a_mod.SEMANTIC_GREEN:
             raise BadSenderError({"error": "semantic_color",
                                   "detail": "語意綠 #00ff88 為系統獨占(點名/連線/NEW),sender 禁用"})
-        if len(json.dumps(body.skills, ensure_ascii=False)) > 2000 or len(body.skills) > 10:
-            raise BadSenderError({"error": "skills_too_large", "detail": "skills 最多 10 項、總長 2000 字"})
-        async with post_lock:  # 併發決勝:同名同時註冊只有一人成功
-            if agents.taken_ci(name):
+        skills_text = json.dumps(body.skills, ensure_ascii=False)
+        if len(skills_text) > 2000 or len(body.skills) > 10:
+            raise BadSenderError({"error": "skills_too_large",
+                                  "detail": "skills 最多 10 項、總長 2000 字"})
+
+        # 上鎖是為了「兩個人同時用同一個名字報到」這種情況 —— 只能有一個成功。
+        async with hub.post_lock:
+            if hub.agents.taken_ci(name):
                 raise ConflictError({"error": "name_taken",
                                      "detail": f"名字「{name}」已被使用(不分大小寫)"})
-            agents.register(name, {"color": body.color.lower(),
-                                   "description": body.description,
-                                   "skills": body.skills})
-        # AUTH=on 時隨註冊發一次性 token(明文僅此一次;勿貼進聊天室)
-        # 只有開了認證才需要發鑰匙;沒開認證時發了也沒人會驗
+            hub.agents.register(name, {"color": body.color.lower(),
+                                       "description": body.description,
+                                       "skills": body.skills})
+
+        # 開了認證才需要發鑰匙(沒開的話發了也沒人會驗)。
+        # 明文只在這裡出現這一次,之後檔案裡存的是指紋。
         token = None
-        if auth_enabled:
-            token = token_store.issue(name)
-        return {"agentCard": a2a_layer.agent_card(name), "token": token}
+        if hub.auth_enabled:
+            token = hub.token_store.issue(name)
+        return {"agentCard": hub.a2a_layer.agent_card(name), "token": token}
 
     @app.get("/agents/{name}/.well-known/agent-card.json")
-    @app.get("/agents/{name}/.well-known/a2a-agent-card")  # 常見路徑別名
+    @app.get("/agents/{name}/.well-known/a2a-agent-card")   # 常見的路徑別名,一併支援
     async def agent_card(name: str):
-        if agents.get(name) is None:
+        if hub.agents.get(name) is None:
             return JSONResponse(status_code=404, content={"error": "unknown agent"})
-        return a2a_layer.agent_card(name)
+        return hub.a2a_layer.agent_card(name)
+
+
+def extract_sender_name(params: dict) -> str:
+    """從 A2A 請求裡找出「發送者自稱是誰」。
+
+    這個資訊可能出現在兩個地方(訊息裡面、或請求外層),外層優先。
+    找不到就給一個預設名字,讓後續流程照樣走得下去。
+    """
+    message = params.get("message") or {}
+    metadata = {}
+    metadata.update(message.get("metadata") or {})
+    metadata.update(params.get("metadata") or {})
+    raw_name = str(metadata.get("senderName", ""))
+    return sanitize_sender(raw_name) or "a2a-client"
+
+
+def register_a2a_route(app: FastAPI, hub: Hub) -> None:
+    """A2A 協定端點:別的 agent 用這個網址跟我們對話。"""
 
     @app.post("/agents/{name}/a2a")
     async def a2a_rpc(name: str, request: Request):
-        """JSON-RPC 2.0 端點。串流方法回 SSE,其餘回標準 JSON-RPC 信封。"""
+        """JSON-RPC 2.0 端點。
+
+        JSON-RPC 的規矩是:不管成功或失敗,回應都長同一個樣子 ——
+        有 jsonrpc、有 id,然後 result 或 error 二選一。
+        """
         try:
             body = await request.json()
         except Exception:
-            return {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "parse error"}}
-        rid = body.get("id")
+            return {"jsonrpc": "2.0", "id": None,
+                    "error": {"code": -32700, "message": "parse error"}}
+
+        request_id = body.get("id")
         method = body.get("method")
         if body.get("jsonrpc") != "2.0" or not isinstance(method, str):
-            return {"jsonrpc": "2.0", "id": rid, "error": {"code": -32600, "message": "invalid request"}}
+            return {"jsonrpc": "2.0", "id": request_id,
+                    "error": {"code": -32600, "message": "invalid request"}}
+
         params = body.get("params") or {}
+
+        # 會寫入的方法要先過認證與限流。
+        # (協定本身把認證交給 HTTP 層處理,所以檢查放在這裡,而不是放進協定層。)
         if method in ("SendMessage", "SendStreamingMessage"):
-            # 寫入方法:AUTH=on 時驗 senderName 的 Bearer 綁定 + 限流(spec 將認證放在 HTTP 層)
-            meta = {**((params.get("message") or {}).get("metadata") or {}),
-                    **(params.get("metadata") or {})}
-            sender = sanitize_sender(str(meta.get("senderName", ""))) or "a2a-client"
+            sender = extract_sender_name(params)
             try:
-                check_writer(sender, request)
-                rate_limiter.check(sender)
+                hub.check_writer(sender, request)
+                hub.rate_limiter.check(sender)
             except ApiError as exc:
                 return JSONResponse(status_code=exc.status, content=exc.payload)
-        try:
-            result = await a2a_layer.dispatch(name, method, params)
-        except a2a_mod.A2AError as exc:
-            return {"jsonrpc": "2.0", "id": rid, "error": {"code": exc.code, "message": exc.message}}
-        if inspect.isasyncgen(result):  # SendStreamingMessage / SubscribeToTask
-            return StreamingResponse(result, media_type="text/event-stream",
-                                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
-        return {"jsonrpc": "2.0", "id": rid, "result": result}
 
+        try:
+            result = await hub.a2a_layer.dispatch(name, method, params)
+        except a2a_mod.A2AError as exc:
+            return {"jsonrpc": "2.0", "id": request_id,
+                    "error": {"code": exc.code, "message": exc.message}}
+
+        # 串流類的方法回傳的是「會一直吐東西的東西」,要用直播的方式送。
+        if inspect.isasyncgen(result):
+            return StreamingResponse(result, media_type="text/event-stream",
+                                     headers={"Cache-Control": "no-cache",
+                                              "X-Accel-Buffering": "no"})
+        return {"jsonrpc": "2.0", "id": request_id, "result": result}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  組裝 —— 把上面兩層接起來
+# ═══════════════════════════════════════════════════════════════════════════
+
+def create_app(port: int | None = None, host: str | None = None,
+               public_url: str | None = None) -> FastAPI:
+    """把整個 hub 組起來,回傳一個可以跑的網頁應用。
+
+    這個函式刻意保持很短 —— 它只做組裝,不做決定。
+    想知道規則怎麼定的就看 Hub;想知道有哪些網址就看 register_* 那幾個函式。
+
+    關於綁定位址:HOST 決定要聽哪個網路介面,**預設是 0.0.0.0,也就是開放區網**
+    (見 DEFAULT_HOST;想只聽本機請設 HOST=127.0.0.1)。
+    """
+    hub = Hub(port, host, public_url)
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        # 伺服器起來之後、開始服務之前,先把沒做完的任務接回來。
+        await hub.restore_tasks()
+        yield
+
+    app = FastAPI(title="A2A Chatroom Hub", lifespan=lifespan)
+    app.mount("/static", StaticFiles(directory=BASE / "static"), name="static")
+
+    async def handle_api_error(request: Request, exc: ApiError):
+        """我們自訂的錯誤都帶著「該回什麼狀態碼、該說什麼」,這裡統一轉成回應。"""
+        return JSONResponse(status_code=exc.status, content=exc.payload)
+
+    app.add_exception_handler(ApiError, handle_api_error)
+
+    register_page_routes(app, hub)
+    register_room_routes(app, hub)
+    register_stream_route(app, hub)
+    register_agent_routes(app, hub)
+    register_a2a_route(app, hub)
     return app
 
 
