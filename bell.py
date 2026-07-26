@@ -5,6 +5,9 @@
 
 角色:本專案的預設喚醒機制 — 不靠 agent 自律重掛、不靠檔案旗子,
 由本程式把 agent CLI 包成子行程(ConPTY / pty,TUI 體驗保真),
+    ※ TUI = Text User Interface(文字使用者介面):像 BIOS 設定畫面或 menuconfig 那樣,
+      在終端機裡用文字字元畫出框線、選單、顏色的介面。Claude Code 就是這種程式。
+      這也正是本檔非用偽終端不可的原因 —— 純 CLI 用管線就夠了,是 TUI 逼出來的。
 盯著 hub 的 SSE 直播當眼睛,發現「房間進度 > 該 agent 的 cursor」
 就往子行程的 stdin 敲一行固定鈴聲。agent 看到鈴聲照對帳鐵則辦事。
 
@@ -43,6 +46,59 @@
 寫 cursor 的是 agent 自己(它讀完訊息後自己更新)。
 如果敲鈴器也能寫,它就能把「你已經讀了」這件事偽造出來 ——
 等於自己把叫醒你的證據銷毀掉。所以整個檔案裡找不到任何一行寫 cursor。
+
+
+═══ 這條技術鏈的源頭:一個產品需求 ═══
+
+會走到偽終端這麼底層的東西,不是技術品味,是被一句需求逼出來的:
+
+    「不要 headless(無畫面模式)—— 過程必須看得見」
+        ↓ 所以要跑真正的 TUI,不能用只吐文字的批次模式
+        ↓ 所以要給子行程一條真的 tty
+        ↓ 所以要用偽終端(Windows 的 ConPTY / Unix 的 pty)
+        ↓ 所以有了這個檔案
+
+這個需求的理由:這套系統要當「虛擬 AI 團隊」,人類得能旁觀、能中途插話、
+能一眼看出誰卡住了。headless 做不到「看著它工作」,出事只能事後翻 log。
+
+★ 反過來說,**這整條鏈是可以一起拆掉的**。
+  哪天需求變成「跑在雲端,沒人看畫面」,那 ConPTY、pty、VT 模式、
+  終端機還原(TERM_RESTORE)……全部都可以刪 —— 它們全部只為「看得見」而存在。
+  要拆就整串拆,別東挑一塊西挑一塊,那會拆出一個半殘的東西。
+
+
+═══ 偽終端(pseudo-terminal / PTY)是什麼,為什麼非用它不可 ═══
+
+先講「終端機」這個字的來歷:早年那真的是一台機器 —— 一台打字機接上主機,
+你敲鍵盤、它印紙。那台東西叫 teletype,縮寫 tty,這個字一路活到今天。
+程式從 tty 讀輸入、往 tty 寫畫面,還可以反過來問它:你多寬?幾行?支援顏色嗎?
+
+今天當然沒有那台機器了。你用的 Windows Terminal / iTerm 是「終端機模擬器」——
+一個視窗程式,假裝自己是那台老機器。
+
+**偽終端就是作業系統提供的一條「假的線」**,兩端各給一個人拿:
+
+    子行程(claude)拿【從屬端】 ← 它看到的是一個正常的 tty,完全不知道對面是誰
+    bell.py 拿【主控端】        ← 誰拿這端,誰就在扮演「坐在鍵盤前的人類」
+
+所以 claude 以為自己接在真終端上、以為對面是人在打字;實際上對面是我們。
+(這兩端在 code 裡的原文是 master / slave,Python 的 pty 模組仍沿用這組字。)
+
+**為什麼不能用一般的管線(pipe)就好?** 因為程式會發現自己不是接在 tty 上,
+接著會發生四件事,每一件都足以毀掉體驗:
+
+    1. 它會關掉顏色、關掉整個互動式介面,改用「給程式讀的」純文字批次輸出
+    2. 它問不到視窗大小 → 不知道畫面幾行幾列 → 沒辦法畫框、沒辦法排版
+    3. Ctrl+C 不再變成中斷訊號、方向鍵不再被解讀成方向鍵
+    4. 輸出從「一有東西就吐」改成「攢一大塊才吐」→ 畫面一卡一卡
+
+一句話:**要讓畫面跟你自己開 claude 一模一樣,就必須給它一條真的 tty,
+而偽終端是唯一能造出這種東西的辦法。**
+
+給韌體背景的對照:這幾乎就是 **USB-to-UART 橋接晶片**。
+MCU 那端看到標準 UART(有 TX/RX、有 baud rate),PC 那端看到一個 COM port,
+中間根本沒有真的串列線 —— 但兩邊的驅動都不必改一行,因為兩邊都感覺不出來。
+偽終端就是作業系統內建的這顆橋接晶片。
 """
 from __future__ import annotations
 
@@ -231,8 +287,22 @@ def re_ring_loop(state: BellState, child_alive) -> None:
 
 
 # ---------- Windows(主戰場):ConPTY via pywinpty ----------
+#
+# ConPTY = Windows 版的偽終端(概念見檔案頂端)。它很年輕:
+# Unix 有偽終端幾十年了,**Windows 直到 2018 年秋的 Windows 10 更新才第一次有**。
+#
+# 在那之前,Windows 上的第三方終端機必須做一件荒謬的事 —— 微軟自己這樣描述:
+#     「被迫開一個螢幕外的 Console,把使用者輸入送進去,再把它的畫面『刮』出來,
+#       重畫到自己的視窗上。」
+# 微軟列出的後果是:不穩定、崩潰、資料損毀、格式全丟。
+#
+# 換句話說:**這個專案能在 Windows 上成立,是因為 2018 年那次更新。**
+# 再早幾年,「包住一個 TUI 程式又保持畫面原樣」在 Windows 上根本做不到。
+#
+# 我們沒有直接呼叫 ConPTY 的 Win32 API,而是透過 pywinpty 這個套件(winpty 3.0.5)。
 
 def run_windows(cmd: list[str], state_factory) -> int:
+    # 這些 import 刻意寫在函式裡面,不放檔案頂端 —— 理由見 run_posix 那邊的說明。
     import ctypes
     import msvcrt
     from ctypes import wintypes
@@ -351,13 +421,27 @@ def run_windows(cmd: list[str], state_factory) -> int:
 
 
 # ---------- POSIX(Mac/Linux):std lib pty ----------
+#
+# Unix 這邊不需要任何外部套件:偽終端是作業系統的原生設施,Python 標準庫直接有 pty。
+# 這正是「Windows 遲到了幾十年」的另一面。
 
 def run_posix(cmd: list[str], state_factory) -> int:
+    # ★ 為什麼這幾個 import 寫在函式裡,不放檔案頂端?
+    #   因為在 Windows 上 `import pty` 會【當場失敗】——
+    #   它連鎖 import tty → termios,而 termios 是 POSIX 專屬,Windows 根本沒有。
+    #   放在檔案頂端的話,這個檔案在 Windows 上連載入都做不到,整個程式開不起來。
+    #   (實測過:ModuleNotFoundError: No module named 'termios')
+    #   所以兩邊的平台專屬 import 都關在各自的函式裡,誰被呼叫誰才載入 ——
+    #   這叫延遲載入(lazy import),是跨平台程式的常見手法,不是隨手亂放。
     import pty
     import select
     import termios
     import tty
 
+    # pty.fork():開一條偽終端,然後把行程一分為二。
+    # 回傳的 pid 若為 0 代表「我是子行程」,此時它的 stdin/stdout 已經接在
+    # 偽終端的從屬端上;execvp 把自己整個換成要跑的 agent CLI(取代,不是啟動另一個)。
+    # 父行程拿到的 master 就是主控端 —— 往它寫字 = 假裝有人在鍵盤上打字。
     pid, master = pty.fork()
     if pid == 0:
         os.execvp(cmd[0], cmd)
