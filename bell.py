@@ -14,6 +14,35 @@
 - 重敲保險:敲後 RE_RING_SECONDS 內 cursor 未推進且仍落後 → 再敲,上限 MAX_RINGS 次
   (agent 可能正在生成中漏聽;超過上限就安靜,印警告請人類看一眼)
 - SSE 斷線自動重連(指數退避封頂),重連後若已落後立即補敲 — 對帳鐵則的 wrapper 版
+
+
+═══ 這個檔案怎麼分層(改 code 前先看這張圖)═══
+
+    ┌─ main() ──────────── 讀參數、決定要跑哪個平台
+    │
+    ├─ BellState ───────── 【決策層】什麼時候該敲?
+    │                      只認得兩個數字:房間進度 vs 我的 cursor。
+    │                      不知道自己活在 Windows 還是 Linux,
+    │                      也不知道「敲」實際上是在做什麼。
+    │
+    ├─ sse_watch ───────── 【眼睛】盯 hub 直播,把房間進度餵給決策層
+    ├─ re_ring_loop ────── 【節拍器】定時催決策層再想一次(SSE 靜默時的保險)
+    │
+    └─ run_windows / run_posix ── 【平台層】真的把 agent CLI 開起來,
+                                  並提供「怎麼往它 stdin 寫字」這個能力
+
+分層的意義,就是韌體的 HAL(硬體抽象層):
+上層只認得一個 `ring_fn()`,呼叫它就會響 —— 底下是 ConPTY 還是 pty,上層一無所知。
+要支援第三種終端,只要再寫一個 run_xxx 提供 write 能力,BellState 一行都不用改。
+
+**兩層之間唯一的連結是一個函式**,這件事在 main() 的 state_factory 那裡有更完整的說明
+(包括「為什麼不能在 main 裡直接把 BellState 建好」)。
+
+另外有一條規矩貫穿全檔,違反了會出大事:
+    **敲鈴器只『讀』cursor,永遠不寫。**
+寫 cursor 的是 agent 自己(它讀完訊息後自己更新)。
+如果敲鈴器也能寫,它就能把「你已經讀了」這件事偽造出來 ——
+等於自己把叫醒你的證據銷毀掉。所以整個檔案裡找不到任何一行寫 cursor。
 """
 from __future__ import annotations
 
@@ -92,7 +121,30 @@ def guarded_write(write_fn, payload, lock) -> bool:
 
 
 class BellState:
-    """鈴聲狀態機:知道房間進度(SSE 餵)與 agent 進度(cursor 檔),決定何時敲。"""
+    """鈴聲狀態機:知道房間進度(SSE 餵)與 agent 進度(cursor 檔),決定何時敲。
+
+    這是整個檔案的【決策層】,也是最該保持乾淨的一塊。它只認得兩個數字:
+
+        known_last_id  房間現在最新是第幾則(眼睛 sse_watch 餵進來)
+        cursor         這個 agent 讀到第幾則(從檔案讀)
+
+    前者比後者大 = 有沒看過的訊息 = 該敲。就這麼簡單,沒有別的條件。
+
+    它刻意不知道的事(這些「不知道」就是分層的價值):
+    - 不知道自己跑在 Windows 還是 Linux
+    - 不知道「敲」實際上是把字寫進 ConPTY、pty、還是別的什麼東西
+    - 不知道 agent 是 Claude 還是 Codex
+
+    它只知道「手上有個 ring_fn,呼叫它就會響」—— 這正是韌體的 HAL:
+    上層邏輯只認得 send(),不管底下是 UART 還是 SPI。
+
+    ring_fn 是從外面【傳進來】的,不是自己建的(這叫依賴注入),
+    因為只有平台層才知道怎麼往那個特定的子行程寫字。建構的時機問題見 main() 裡的說明。
+
+    ★ 這裡永遠只讀 cursor,不寫。寫是 agent 自己的事。
+      理由:能寫就能偽造「你已經讀過了」,等於自己銷毀叫醒你的證據。
+      (這個「一邊寫、另一邊讀、彼此不協調」的結構,來歷見 doc/TUTORIAL.md 第 3 章)
+    """
 
     def __init__(self, cursor_path: Path, ring_fn):
         self.cursor_path = cursor_path
@@ -390,6 +442,26 @@ def main() -> int:
     LOG_PATH.parent.mkdir(exist_ok=True)
 
     def state_factory(write_fn) -> BellState:
+        """把「怎麼建 BellState」打包成一份食譜,交給平台層在對的時機自己煮。
+
+        為什麼不在這裡直接建好就好?因為有個雞生蛋的環:
+
+            BellState 要能敲鈴  → 需要「往子行程寫字」的能力
+            那個能力            → 要先有子行程才存在
+            子行程              → 在 run_windows / run_posix 裡面才誕生
+            而 run_*            → 又需要 BellState
+
+        在 main() 這個時間點,子行程根本還沒開,所以建不出來。
+        解法是把建構往後延:main 只交食譜,平台層開好子行程、湊齊材料後
+        才呼叫這個函式,拿到一個綁定了「這個平台的寫入方式」的 BellState。
+
+        這個技巧叫【延遲建構】,傳進來的 write_fn 叫【依賴注入】。
+        它是「工廠函式」(一個回傳新物件的函式),但**不是** GoF 的工廠模式 ——
+        那個模式的重點是靠多型決定要建立哪個類別,這裡永遠只建 BellState 一種。
+
+        兩個平台傳進來的東西其實不一樣(Windows 傳吃字串的、POSIX 傳要轉 bytes 的),
+        而 BellState 完全不知道這件事 —— 那個「不知道」就是分層要換來的東西。
+        """
         def ring_the_bell() -> bool:
             """真正的「敲鈴」動作:往子行程送一行固定暗號 + 送出鍵。"""
             return write_fn(BELL_TEXT + BELL_SUBMIT)
@@ -401,6 +473,16 @@ def main() -> int:
         return state
 
     log(f"啟動:name={args.name} server={args.server} room={args.room} cmd={' '.join(cmd)}")
+    # 為什麼是 "nt" 不是 "windows"?os.name 只有 'posix' 與 'nt' 兩個值(官方原話),
+    # 它問的是「系統 API 是哪一家的」,不是商品名。nt 來自 Windows NT ——
+    # 1993 年那條跟 DOS 分家的核心血脈,今天的 Win10/11 都是它的後代
+    # (你在 Windows 11 上查系統版本會看到 10.0.xxxxx,那個 10.0 就是 NT 版本號)。
+    # 這裡用 os.name 而不是 platform.system()=="Windows",是因為我們要分的那條線
+    # 剛好就是它那條線:run_posix 用 POSIX 的 pty,run_windows 用 NT 的 ConPTY。
+    #
+    # 註:編輯器(Pylance)可能會把下面兩行的其中一行標成「永遠不會執行」。
+    # 那不是錯誤 —— 它知道你現在這台是什麼系統,就把另一條路判成走不到。
+    # 換一台機器打開,它會反過來標另一行。
     if os.name == "nt":
         return run_windows(cmd, state_factory)
     return run_posix(cmd, state_factory)
