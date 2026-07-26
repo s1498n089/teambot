@@ -756,6 +756,14 @@ def create_app(port: int | None = None, host: str | None = None,
 if __name__ == "__main__":
     import uvicorn
 
+    from envfile import load_env_file
+
+    # 設定檔要在讀任何環境變數【之前】載入,否則下面幾行拿到的還是舊值。
+    # 已存在的環境變數優先,所以 `HOST=127.0.0.1 uv run server.py` 這種臨時覆寫仍然有效。
+    _applied = load_env_file(BASE / "server.env")
+    if _applied:
+        print(f"[hub] 已套用 server.env:{', '.join(_applied)}", file=sys.stderr)
+
     _port = int(os.environ.get("PORT", str(DEFAULT_PORT)))
     _host = os.environ.get("HOST", DEFAULT_HOST)
     uvicorn.run(create_app(_port, _host), host=_host, port=_port)

@@ -96,9 +96,14 @@ EXAMINER_SCRIPT = textwrap.dedent('''
 @pytest.mark.slow
 def test_official_sdk_examiner(tmp_path):
     # tmp 部署副本:不汙染專案的 chat.jsonl / tasks.json
+    #
+    # ★ 這份清單就是「伺服器端的最小部署集」—— 少一個檔案,子行程就會 import 失敗、
+    #   起不來,測試會以「server 子行程在時限內未就緒」的形式失敗。
+    #   所以要往這裡加檔案之前,先想清楚:那真的是伺服器跑起來必需的嗎?
+    #   (envfile.py 是 2026-07-26 加入設定檔功能時進來的,server.py 啟動時要用它讀 server.env)
     deploy = tmp_path / "deploy"
     deploy.mkdir()
-    for f in ("server.py", "a2a.py"):
+    for f in ("server.py", "a2a.py", "envfile.py"):
         shutil.copy(ROOT / f, deploy / f)
     (deploy / "static").mkdir()
     (deploy / "static" / "index.html").write_text("<html></html>", encoding="utf-8")

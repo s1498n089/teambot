@@ -113,6 +113,8 @@ import time
 import urllib.request
 from pathlib import Path
 
+from envfile import load_env_file
+
 BASE = Path(__file__).resolve().parent
 
 BELL_TEXT = "[A2A-BELL] cursor updated"
@@ -508,11 +510,16 @@ def run_posix(cmd: list[str], state_factory) -> int:
 
 
 def main() -> int:
+    # 設定檔要在建立 parser 之【前】載入,因為下面幾個 default 會去讀環境變數,
+    # 而這一行正是把 client.env 的內容填進環境變數的那一步。順序顛倒的話設定檔會失效。
+    load_env_file(BASE / "client.env")
+
     parser = argparse.ArgumentParser(
         description="A2A 敲鈴器:包住 agent CLI,新訊息時往其 stdin 敲鈴")
     parser.add_argument("--name", required=True, help="agent 名字(對應 state/cursor-<名字>.txt)")
-    parser.add_argument("--server", default="http://127.0.0.1:8787", help="hub 位址(遠端機器指向遠端 hub)")
-    parser.add_argument("--room", default="main")
+    parser.add_argument("--server", default=os.environ.get("A2A_SERVER", "http://127.0.0.1:8787"),
+                        help="hub 位址(遠端機器指向遠端 hub);預設值可寫在 client.env 的 A2A_SERVER")
+    parser.add_argument("--room", default=os.environ.get("A2A_ROOM", "main"))
     parser.add_argument("cmd", nargs=argparse.REMAINDER,
                         help="-- 之後接要包的指令,如:-- claude --resume")
     args = parser.parse_args()

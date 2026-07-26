@@ -16,6 +16,11 @@ tasks*.json
 # ── 個人環境設定(Claude Code session 本地設定)──
 .claude/
 
+# ── 環境設定檔:內容因機器而異,而且會裝認證鑰匙與邀請碼 ──
+# 只有 *.example 範本進版本庫,實際的設定檔留在各自的機器上。
+client.env
+server.env
+
 # 資料檔的手動備份(清理測試房間時產生),不進版本庫
 *.bak-*
 *.tmp
