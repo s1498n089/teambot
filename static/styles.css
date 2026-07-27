@@ -15,11 +15,17 @@
      那個色域產不出這種螢光感),不需要執行期檢查。
      完整說明在 util.js 的 colorHexOf 下方。 */
   --green: #00ff88;
-  --cyan: #00d4ff;     /* bob、引用、跳轉脈衝 */
-  --pink: #ff79c6;     /* alice */
-  --amber: #ffb86c;    /* dev、task open */
-  --human: #c9d1d9;    /* 人類 */
-  --magenta: #ff00ff;  /* 裝飾層專用(glitch/aberration),不入功能色 */
+  --cyan: #00d4ff;     /* 連結、引用、跳轉脈衝、AI 徽章 */
+  --amber: #ffb86c;    /* 進行中的任務、待處理的提醒、TASK 模式 */
+
+  /* 註:這裡曾經還有 --pink(alice)、--human(人類)、--magenta(裝飾層)。
+     三個都零使用,而且前兩個是「名冊寫死在程式裡」那個時代的遺物 ——
+     那時每位成員有自己的專屬色(alice 粉、bob 青、dev 琥珀),
+     現在成員顏色一律由 util.js 從名字算出來,誰都不再有專屬變數。
+     (--cyan 與 --amber 活下來,是因為它們早就改去代表「功能」而不是「某個人」。)
+
+     --human 的值 #c9d1d9 搬去了 app.js 的 rt.palette,定義端留在這裡沒人用 ——
+     那是搬家只搬了一半。這次收掉,新家那邊有註解說明它的來歷。 */
   --red: #ff5555;
   --mono: "Share Tech Mono", Consolas, monospace;
   --shadow-neon: 0 0 5px var(--green), 0 0 10px rgba(0, 255, 136, 0.25);
@@ -34,13 +40,15 @@
 
 /* ═══════════ 2. Utility 層 ═══════════ */
 .mono { font-family: var(--mono); }
-.mono-label { font-family: var(--mono); text-transform: uppercase; letter-spacing: 0.15em; font-size: var(--ui-md); }
-.chamfer { clip-path: polygon(0 8px, 8px 0, calc(100% - 8px) 0, 100% 8px,
-           100% calc(100% - 8px), calc(100% - 8px) 100%, 8px 100%, 0 calc(100% - 8px)); }
 .chamfer-sm { clip-path: polygon(0 5px, 5px 0, calc(100% - 5px) 0, 100% 5px,
               100% calc(100% - 5px), calc(100% - 5px) 100%, 5px 100%, 0 calc(100% - 5px)); }
-.glow-green { box-shadow: var(--shadow-neon); }
-.glow-cyan { box-shadow: var(--shadow-neon-cyan); }
+
+/* 註:這一層曾經還有四個工具類 —— .mono-label、.chamfer(8px 的切角版本)、
+   .glow-green、.glow-cyan。四個都零套用(掃過全部 HTML 與 JS,含 mdtest.html)。
+
+   工具類特別容易變成這樣:寫的時候覺得「之後一定會用到」,
+   而真正需要的時候,人又習慣直接寫在那個元件自己的規則裡。
+   .chamfer-sm 是活的(泡泡的切角),留著。 */
 
 /* ═══════════ 3. 基底與背景層 ═══════════ */
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -81,7 +89,9 @@ main::-webkit-scrollbar-thumb, .modal-body::-webkit-scrollbar-thumb {
   border: 2px solid var(--bg);
 }
 main::-webkit-scrollbar-thumb:hover { box-shadow: inset 0 0 6px rgba(255, 255, 255, 0.5); }
-main, .modal-body { scrollbar-width: thin; scrollbar-color: #00d4ff transparent; }
+/* 這一行原本寫死 #00d4ff —— 那是 --cyan 的第四份副本,而且十六進位的寫法
+   讓「改配色」的人 grep 不到它。改用變數,少一個會偷偷走鐘的地方。 */
+main, .modal-body { scrollbar-width: thin; scrollbar-color: var(--cyan) transparent; }
 
 /* ═══════════ 4. Header ═══════════ */
 header {
@@ -216,6 +226,12 @@ main {
 /* 標題字級刻意克制:泡泡不是文件,h1 只比本文大一點點就夠有層次 */
 .md-h { font-weight: bold; line-height: 1.4; margin-top: 0.9em; }
 .bubble > .md-h:first-child { margin-top: 0; }
+/* ⚠️ 下面三條的名字是【在 JS 裡拼出來的】:components.js 寫 :class="'md-h' + block.level"。
+      所以 grep「md-h1」在整個專案只會找到這一行 —— 任何自動死碼掃描都會說它沒人用。
+      【不要刪。】
+
+      只做到 h3 是刻意的:md.js 認得到 ###### 六層,但四層以上的標題在一則
+      聊天訊息裡沒有意義,所以第 4~6 層只會拿到 .md-h 的共通樣式(粗體、間距)。 */
 .md-h1 { font-size: 1.25em; color: var(--cyan); }
 .md-h2 { font-size: 1.15em; }
 .md-h3 { font-size: 1.05em; }
@@ -400,6 +416,8 @@ button.send:hover { box-shadow: var(--shadow-neon-cyan); }
 .stat .k { font-size: var(--ui-sm); color: var(--muted); letter-spacing: 1px; }
 .stat .v { font-size: var(--ui-lg); color: var(--text); }
 /* presence 三態:亮綠=在場且活躍、半透明綠=在場但安靜(同屬「連線正常」家族)、灰=無連線 */
+/* ⚠️ 同上:這三條的名字由 index.html 的 :class="presenceOf(...) + '-dot'" 拼出來,
+      grep 找不到,不要當死碼刪掉。 */
 .active-dot { color: var(--green); }
 .standby-dot { color: var(--green); opacity: 0.45; }
 .offline-dot { color: var(--muted); }

@@ -32,15 +32,40 @@ const TOAST_MS = 3500;                 // 提示訊息顯示多久
 const FLASH_MS = 2000;                 // 跳到某則訊息時,那則閃爍多久
 const API_FAIL_TOAST_THRESHOLD = 3;    // 連續失敗幾次才跳出來吵使用者
 const DEFAULT_DEADLINE_SECONDS = 300;  // 派任務的預設逾時(跟伺服器同步)
+const AVATAR_SLOTS = 6;                // 標題列最多擺幾張頭像
+const RENAME_DEBOUNCE_MS = 800;        // 改名後等多久才重連(見 watch.myName)
+const NAME_MAX_LENGTH = 32;            // 名字最長幾個字 —— 對齊伺服器 SENDER_RE 的 {1,32}
+const FONT_DEFAULT = 20;               // 聊天基準字級,整個介面依此等比縮放
+const FONT_MIN = 14;
+const FONT_MAX = 28;
+
+/* ★ 為什麼有些數字【沒有】搬上來:這一區收的是【政策】,不是【參數】。
+
+   政策 = 產品決定,而且通常在別的地方也有一份對應物:
+     NAME_MAX_LENGTH 對齊伺服器的白名單、字級三數與 styles.css 的 calc 綁在一起、
+     AVATAR_SLOTS 與 RENAME_DEBOUNCE_MS 是使用者感覺得到的行為。
+
+   參數 = 某一段程式的局部手感,離開使用它的那幾行就沒有意義:
+     isNearBottom 的 120 像素、onScroll 的 40 與 60 —— 這三個是同一個
+     「捲動手感」的三個旋鈕,要一起調。搬上來反而切斷它們與使用處的關係,
+     讀的人得在兩個地方之間來回才知道自己在調什麼。
+
+   集中是為了讓「為什麼是這個數字」有地方回答,不是為了讓上面這一區變長。 */
 
 /* 伺服器開機時下發的設定。用 reactive 包起來,是為了讓畫面上依賴它的地方
    在設定送到時自動重算 —— 例如 @某人 的規則換了,所有訊息要重新解析一次。
    這裡先放一份預設值,萬一拿不到設定也不會整個壞掉。 */
 const rt = reactive({
   mentionPattern: "(?<![A-Za-z0-9_@.-])(@[\\w一-鿿-]+)",
-  palette: { user: "#c9d1d9" },        // 人類的預設顏色;agent 的顏色由伺服器指定
-  authEnabled: false,                  // 伺服器有沒有開認證(有的話畫面要多一個 token 欄)
+  /* 名字 → 指定顏色。★ 現在只剩這一筆,而且【不要清掉】——
+     "user" 是取名框上線前的人類預設名,聊天室裡有 138 則歷史訊息靠它維持灰色。
+     完整說明在 util.js 的 colorHexOf(那裡是這條規則的正本)。
 
+     那個 #c9d1d9 就是 styles.css 以前的 --human。這次搬家把定義端刪掉了,
+     值留在這裡 —— 所以這行註解就是它的新家。 */
+  palette: { user: "#c9d1d9" },
+
+  authEnabled: false,                  // 伺服器有沒有開認證(有的話畫面要多一個 token 欄)
 });
 
 /* api.js 需要「跟使用者說話」的能力,但它在畫面建好之前就先造好了。
@@ -229,12 +254,12 @@ createApp({
     const hasChosenName = localStorage.getItem("a2a-name") !== null;
     const savedName = localStorage.getItem("a2a-name") || "user";
     const savedToken = localStorage.getItem("a2a-token") || "";
-    const savedFont = localStorage.getItem("a2a-font") || "20";
+    const savedFont = localStorage.getItem("a2a-font") || String(FONT_DEFAULT);
 
     return {
       messages: [],
       members: [],          // 這個房間發言過的人
-      agents: [],           // 有註冊的 agent —— 只有他們能被派任務
+      agents: [],           // 現在連著線的 agent —— 只有他們能被派任務
       present: [],          // 現在連著線的人(在場的事實來源)
       presenceSupported: true,  // 舊版伺服器沒有這個功能,遇到 404 就自動關掉
       rooms: [],
@@ -245,7 +270,6 @@ createApp({
       nameError: "",                // 取名框的錯誤訊息(空字串 = 沒問題)
       nameWarning: "",              // 取名框的提醒(不擋人,再按一次就放行)
       nameChecking: false,          // 正在跟伺服器查撞名(避免連按)
-        renameTimer: null,            // 改名後延遲重連的計時器(見 watch.myName)
       token: savedToken,    // 伺服器有開認證時,發言需要的個人憑證
       status: "connecting",
       replyTo: null,
@@ -259,6 +283,18 @@ createApp({
       bubbleFont: parseInt(savedFont, 10),  // 基準字級,整個介面依此等比縮放
       nowTick: Date.now(),  // 每分鐘更新一次,用來重算「誰還活躍」
     };
+
+    /* ★ 約定:「把手」類的東西【不進 data】—— 直接掛在 this 上就好。
+
+       這裡指的是計時器 id、EventSource 物件這種【不需要驅動畫面】的東西
+       (this.renameTimer、this.stream、this.toastTimer)。
+       放進 data 會讓 Vue 替它們建立一整套響應式追蹤,而那份追蹤永遠不會被用到 ——
+       它們不會出現在任何樣板裡。
+
+       也不要用底線開頭:Vue 自己用 _ 與 $ 當內部命名空間,自訂屬性帶底線有撞名風險。
+
+       (renameTimer 原本在 data 裡,是這三個裡唯一的例外。三個一樣的東西
+        三種寫法,下一個要加把手的人不知道該學誰,所以在這裡把規矩寫死。) */
   },
 
   computed: {
@@ -318,7 +354,7 @@ createApp({
             recentlyActive.push(member);
           }
         }
-        return recentlyActive.slice(0, 6);
+        return recentlyActive.slice(0, AVATAR_SLOTS);
       }
 
       const result = [];
@@ -335,7 +371,7 @@ createApp({
           result.push({ name: name });
         }
       }
-      return result.slice(0, 6);
+      return result.slice(0, AVATAR_SLOTS);
     },
 
     /**
@@ -418,8 +454,8 @@ createApp({
      * 不等的話「kevin」五個字會斷線重連五次,而每次重連伺服器都要重送一批訊息 ——
      * 打字打到一半畫面就開始卡。
      *
-     * 800 毫秒是「打字停下來了」的常見門檻:比一般按鍵間隔長,
-     * 又短到使用者不會覺得延遲。
+     * RENAME_DEBOUNCE_MS(800 毫秒)是「打字停下來了」的常見門檻:
+     * 比一般按鍵間隔長,又短到使用者不會覺得延遲。
      */
     myName(newName, oldName) {
       if (newName === oldName) {
@@ -437,14 +473,41 @@ createApp({
            單純改名字欄的人會遇到:改完當下正常,一重整又變回舊名字。 */
         localStorage.setItem("a2a-name", newName);
         self.openStream();
-      }, 800);
+      }, RENAME_DEBOUNCE_MS);
     },
   },
 
   methods: {
     avatarOf: avatarOf,
-    fmtFull: fmtFull,
     colorOf: colorHexOf,
+
+    /* ★ fmtFull 在 components.js 的 MessageItem 也掛了一份 —— 那【不是重複】:
+         Vue 的 methods 不會跨元件繼承,誰的樣板要用就得自己掛。
+         這一份是給 index.html 的根樣板用的(成員視窗與任務視窗的時間戳)。 */
+    fmtFull: fmtFull,
+
+    /**
+     * 把 A2A 訊息的 parts 接成一串文字。
+     *
+     * 存在的理由是【樣板裡不寫運算】:這段原本寫成
+     *   {{ h.parts.map(p => p.text).join('') }}
+     * ——那是全專案唯一的箭頭函式,而每一支 JS 的檔頭都寫著不用箭頭簡寫。
+     * 樣板裡留一個例外,下一個人就會寫第二個(「有前例」是最強的繁殖力)。
+     *
+     * @param {Array} parts A2A 的 parts 陣列
+     * @returns {string} 接起來的文字
+     */
+    partsText(parts) {
+      const list = parts || [];
+      let out = "";
+
+      for (const part of list) {
+        if (part && part.text) {
+          out = out + part.text;
+        }
+      }
+      return out;
+    },
 
     /* ── 開機流程(從 mounted 拆出來,讓 mounted 只剩一串看得懂的步驟)── */
 
@@ -455,9 +518,8 @@ createApp({
         rt.mentionPattern = config.mentionPattern;
         rt.authEnabled = !!config.authEnabled;
 
-        /* 註:伺服器以前會在這裡下發每個 agent 的指定顏色。名冊動態化之後
-           它開機時並不知道會有誰連進來,所以顏色改由前端從名字算(同名同色)——
-           新成員第一次出現就有顏色,不必等重整。 */
+        // 註:這裡曾經一併收下伺服器下發的成員顏色。名冊動態化之後不再有那個欄位,
+        //     顏色改由前端從名字算 —— 正本說明在 util.js 的 colorHexOf。
       } catch (error) {
         // 預設值已經在 rt 裡了,不做事就是正確的處理
       }
@@ -597,8 +659,8 @@ createApp({
       if (!name) {
         return "要有個名字才能開始";
       }
-      if (name.length > 32) {
-        return "名字最多 32 個字";
+      if (name.length > NAME_MAX_LENGTH) {
+        return "名字最多 " + NAME_MAX_LENGTH + " 個字";
       }
       /* 跟伺服器同一套規則:中英文、數字、- 和 _。
          為什麼一定要擋 @:訊息裡的 @某人 是點名語法,
@@ -925,8 +987,10 @@ createApp({
         body.reply_to = this.replyTo;
       }
 
+      // 用 this.authOn(它就是 rt.authEnabled 包一層的 computed)——
+      // 與 sendTask、fetchTaskFull 同一種問法,免得讀的人以為三者有差別。
       let token = "";
-      if (rt.authEnabled) {
+      if (this.authOn) {
         token = this.token;
       }
 
@@ -951,7 +1015,7 @@ createApp({
       const sender = this.myName;
       localStorage.setItem("a2a-name", sender);
 
-      let token = null;
+      let token = "";
       if (this.authOn) {
         token = this.token;
       }
@@ -1141,10 +1205,10 @@ createApp({
      */
     adjustFont(delta) {
       if (delta === 0) {
-        this.bubbleFont = 20;
+        this.bubbleFont = FONT_DEFAULT;
       } else {
         const next = this.bubbleFont + delta;
-        this.bubbleFont = Math.min(28, Math.max(14, next));   // 夾在 14~28 之間
+        this.bubbleFont = Math.min(FONT_MAX, Math.max(FONT_MIN, next));
       }
 
       localStorage.setItem("a2a-font", String(this.bubbleFont));
@@ -1253,8 +1317,8 @@ createApp({
       this.toast = text;
       this.toastOk = !!ok;
 
-      clearTimeout(this._toastTimer);
-      this._toastTimer = setTimeout(function () {
+      clearTimeout(this.toastTimer);
+      this.toastTimer = setTimeout(function () {
         self.toast = null;
       }, TOAST_MS);
     },

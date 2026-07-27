@@ -5,6 +5,20 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>A2A Chatroom</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>💬</text></svg>">
+<!-- ★ 下面三個是【外部請求】:兩個字型網域與 unpkg 的 Vue。
+
+     這跟 md.js 拒絕自動載入外部圖片的理由看起來矛盾,其實界線很清楚 ——
+     差別不在「是不是外部」,而在【誰決定要連到哪裡】:
+
+       這三個   是網站作者自己挑的供應商。要不要信任它們,是我們做的一次決定。
+       貼圖網址 是【發文者】決定的。任何人貼一張圖,就替所有讀者決定了
+                他們的瀏覽器要向誰報到 —— 對方因此拿得到全部讀者的 IP 與時間。
+
+     所以第一方的外部資源可以有,使用者提供的不行。這條界線是這個專案
+     所有「要不要載入別人的東西」判斷的依據,寫在這裡是因為它們出現在這裡。
+
+     附帶的取捨:這也意味著【離線就沒有 Vue】,整個畫面不會啟動。
+     現階段接受(這是區網內的開發工具),真的要離線可用就得把 Vue 放進 static/。 -->
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap" rel="stylesheet">
@@ -40,6 +54,8 @@
          畫面會變成「框跳出來了但裡面是空的」,而且不報任何錯。 -->
     <template #body>
       <div class="naming">
+        <!-- maxlength 對齊 app.js 的 NAME_MAX_LENGTH(以及伺服器的 SENDER_RE)。
+             HTML 屬性讀不到 JS 常數,所以這裡是手動對齊的第三份 —— 要改三處一起改。 -->
         <input class="naming-input mono" v-model="nameDraft" maxlength="32"
                placeholder="例如:kevin"
                @keydown.enter.prevent="confirmName"
@@ -132,7 +148,7 @@
         <div class="modal-sub mono">STATUS: {{ modal.full.status.state }} @ {{ fmtFull(modal.full.status.timestamp) }}</div>
         <div v-for="(h, i) in modal.full.history" :key="i" class="tl-item">
           <span class="tl-state mono" :style="{ color: h.role === 'ROLE_AGENT' ? 'var(--green)' : 'var(--cyan)' }">{{ h.role.replace('ROLE_', '') }}</span>
-          <div class="tl-msg">{{ h.parts.map(p => p.text).join('') }}</div>
+          <div class="tl-msg">{{ partsText(h.parts) }}</div>
         </div>
       </template>
       <div v-else class="modal-sub mono">── LOADING TASK ──</div>
