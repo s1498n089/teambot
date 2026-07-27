@@ -104,17 +104,17 @@ class ConflictError(ApiError):
 
 
 class UnauthorizedError(ApiError):
-    """未帶或無效的 token(roadmap ③)。"""
+    """未帶或無效的 token(AUTH=on 時)。"""
     status = 401
 
 
 class ForbiddenError(ApiError):
-    """token 有效但身分不符(冒名,roadmap ③)。"""
+    """token 有效但身分不符 —— 拿別人的鑰匙開自己的門。"""
     status = 403
 
 
 class RateLimitError(ApiError):
-    """寫入頻率超限(roadmap ③),payload 附 retryAfter 秒數。"""
+    """寫入頻率超限,payload 附 retryAfter 秒數。"""
     status = 429
 
 
@@ -318,7 +318,7 @@ class MessageStore:
         return list(stats.values())
 
 
-# ---------- TokenStore 與 RateLimiter(roadmap ③)----------
+# ---------- TokenStore 與 RateLimiter(認證與限流)----------
 
 class TokenStore:
     """per-agent bearer token。明文只在生成當下出現一次,落地只存 sha256。
@@ -559,7 +559,7 @@ class Hub:
             # 我們選擇不擋,因為擋的話要把「目標房間」一路傳進協定層,
             # 而這個情境至今沒發生過(通常只有一個房間),逾時機制也已經兜住後果。
             # 哪天真的多房間常態運作,這裡就是要改的第一個地方。
-            agents=self.bus.all_live_agents,
+            live_agents_fn=self.bus.all_live_agents,
             auth_enabled=self.auth_enabled,
             tasks_path=self.pick_tasks_path(),
         )

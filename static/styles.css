@@ -10,7 +10,10 @@
   --border: #23232f;
   --text: #e0e0e0;
   --muted: #7f8797;
-  --green: #00ff88;    /* 語意色專用:點名/連線正常/NEW —— sender 禁用 */
+  /* ★ 語意色專用:點名、連線正常、NEW 徽章。成員顏色不准撞到它 ——
+     這條靠 util.js 的配色參數天然守住(見那裡的 SEMANTIC_GREEN 說明),
+     不需要執行期檢查。 */
+  --green: #00ff88;
   --cyan: #00d4ff;     /* bob、引用、跳轉脈衝 */
   --pink: #ff79c6;     /* alice */
   --amber: #ffb86c;    /* dev、task open */

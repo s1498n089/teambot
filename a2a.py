@@ -24,6 +24,7 @@ import uuid
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from typing import Callable
 
 # ---------- 協定常數 ----------
 
@@ -60,9 +61,19 @@ ERR_UNSUPPORTED_OPERATION = -32004
 ERR_CONTENT_TYPE = -32005
 ERR_EXTENDED_CARD_NOT_CONFIGURED = -32007
 
-# 名冊治理常數(roadmap ②)
-RESERVED_NAMES = {"user", "admin", "system", "hub", "server", "poller"}  # 撞人類/基礎設施的名字
-SEMANTIC_GREEN = "#00ff88"  # 語意色獨占鐵律(v4):sender 禁用,註冊時黑名單
+# 不該被任何成員拿去用的名字:人類的預設名、以及基礎設施的代稱。
+#
+# ★ 這裡是這條規則的【權威定義】,但目前的【執行點只剩前端的取名框】——
+#   後端的動態註冊在 2026-07-27 退役,不再有「入冊時檢查名字」這個動作。
+#   前端 static/app.js 有一份手動對齊的副本(它少一個 user,理由寫在那邊)。
+#   哪天雲端階段把註冊機制撿回來,執行點就會回到這裡。
+#
+# 留著而不刪的理由:前端那份的註解指名「對齊伺服器的 a2a.py:RESERVED_NAMES」——
+# 刪掉它,那句話就變成指向不存在東西的失效引用。
+RESERVED_NAMES = {"user", "admin", "system", "hub", "server", "poller"}
+
+# 註:這裡曾經有 SEMANTIC_GREEN(#00ff88)。它是「這個顏色系統獨占,成員不准用」
+# 的視覺鐵律,而視覺鐵律的家不該在協定層 —— 已移居 static/util.js 的配色函式旁邊。
 
 # 註:2026-07-27 之前這裡有一份寫死的 SEED_PROFILES(alice/bob/dev),
 # 以及一個把註冊者存進 agents.json 的 AgentRegistry。兩者都已退役 ——
@@ -91,7 +102,7 @@ class Task:
     """一個 A2A Task:spec 欄位 + hub 內部管理欄位合體。
 
     spec 形狀一律經 to_spec() 輸出,內部欄位(target/feed_mid/訂閱者等)不外洩。
-    持久化(roadmap ④)只序列化 _PERSIST_FIELDS;訂閱者/事件/計時器是 runtime 欄位,
+    持久化只序列化 _PERSIST_FIELDS;訂閱者/事件/計時器是 runtime 欄位,
     重啟後由 restore() 重建。
     """
     id: str
@@ -146,7 +157,7 @@ class Task:
 
 
 class TaskRegistry:
-    """Task 的唯一儲存與索引(Repository)+ 持久化(roadmap ④)。
+    """Task 的唯一儲存與索引(Repository)+ 持久化到 tasks.json。
 
     三個索引(id、房間、feed 訊息)的同步只發生在這個類別內。
     快照落地的唯二時機(「不可能忘記存」與殭屍防範):
@@ -233,16 +244,21 @@ class A2ALayer:
     - sanitize_sender:名字白名單(與可視化層同一套規則)
     """
 
-    def __init__(self, ingest, sanitize_sender, base_url: str, agents: AgentRegistry,
+    def __init__(self, ingest, sanitize_sender, base_url: str,
+                 live_agents_fn: Callable[[], set[str]],
                  auth_enabled: bool = False, tasks_path=None):
         self._ingest = ingest
         self._sanitize = sanitize_sender
         self.base_url = base_url.rstrip("/")
-        # 「現在有哪些 agent 連著線」——傳進來的是一個函式,不是一份名單。
-        # 名單是靜態的,函式每次呼叫都會給出當下的答案,而 agent 隨時上下線。
-        self.live_agents = agents
+        # 「現在有哪些 agent 連著線」——★ 傳進來的是一個【函式】,不是一份名單。
+        #
+        # 名單是靜態的,函式每次呼叫都給出當下的答案,而 agent 隨時上下線。
+        # 這個參數曾經叫 agents、型別註解也曾寫著 AgentRegistry(一個 2026-07-27
+        # 已刪除的類別)—— 名字與型別都在說一件與實際相反的事:它從來不是名冊,
+        # 現在更不是。改名改型是為了讓讀的人不必先受一次誤導再自己糾正。
+        self.live_agents = live_agents_fn
         self.auth_enabled = auth_enabled  # 影響 Agent Card 的 securitySchemes 誠實聲明(③)
-        self.registry = TaskRegistry(tasks_path)  # roadmap ④:tasks.json 持久化
+        self.registry = TaskRegistry(tasks_path)  # 任務狀態落地,伺服器重開不失憶
         self._handlers = {  # 方法分派表建一次即可,dispatch 熱路徑不重建
             "SendMessage": self._send_message,
             "SendStreamingMessage": self._send_streaming_message,
@@ -332,7 +348,7 @@ class A2ALayer:
         self._transition(task, "TASK_STATE_FAILED")
 
     def restore(self, message_exists) -> None:
-        """啟動復原(roadmap ④,需在 running event loop 內呼叫):
+        """啟動復原(需在 running event loop 內呼叫):
 
         1. 殭屍判定:非終態且 feed_mid 為 None 或訊息流查無 → FAILED
         2. 停機期間已逾期 → FAILED(記入 downtime 原因)
@@ -470,11 +486,9 @@ class A2ALayer:
         context = params.get("contextId")
 
         if context:
-            tasks = self.registry.in_room(context)      # 只要這個房間的
+            tasks = self.registry.in_room(context)   # 指定房間 → 只要那一間的
         else:
-            tasks = []                                   # 沒指定房間就全部
-            for task_id in self.registry.all_ids():
-                tasks.append(self.registry.get(task_id))
+            tasks = self.registry.all_tasks()        # 沒指定 → 全部
 
         history_length = params.get("historyLength")
         return {"tasks": [t.to_spec(history_length) for t in tasks]}
