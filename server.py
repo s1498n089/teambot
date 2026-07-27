@@ -61,10 +61,9 @@ DATA_DIR_NAME = "hub_data"
 DEFAULT_PORT = 8787
 DEFAULT_HOST = "0.0.0.0"  # 預設開放區網(手機觀戰);要只聽本機可設 HOST=127.0.0.1
 SENDER_RE = re.compile(r"^[\w一-鿿-]{1,32}$")   # 名字白名單:擋空白與 @,防 parse 怪象
-# 2026-07-27 之前,這三個名字是寫死在程式裡的 agent。
-# 保留它們只有一個用途:替那天以前的舊訊息補上 kind 欄位(見 MessageStore._index)。
-# 它【不是】名冊 —— 今天的名冊是「現在連著線而且自稱 agent 的人」,見 EventBus.live_agents。
-LEGACY_AGENT_NAMES = {"alice", "bob", "dev"}
+# 註:這裡曾經有 LEGACY_AGENT_NAMES = {"alice", "bob", "dev"},
+#     用途是讀檔時替 2026-07-27 之前的舊訊息補上 kind。
+#     那份補全已經直接寫進 chat.jsonl 本體,所以這個常數與那段邏輯一起退役。
 
 SSE_KEEPALIVE_SECONDS = 15
 SSE_REPLAY_LIMIT = 10_000                        # 重連回放的上限
@@ -184,16 +183,18 @@ class MessageStore:
         self._load()
 
     def _index(self, msg: dict) -> None:
-        """load 與 append 共用的索引維護 — 三個結構同步只在這裡發生。"""
-        # 2026-07-27 之前的訊息沒有 kind 欄位。在讀進來的當下補上,
-        # 之後所有人(前端、API)拿到的訊息就一定有 kind,不必各自處理「舊格式」。
-        # 補的依據是當年寫死在程式裡的那三個名字 —— 它們在那個年代確實是 AI。
-        #
-        # ★ 檔案裡的原始行【刻意不動】,不要「順手修好它」:
-        #   那些行當年寫入時就沒有 kind,那是歷史原貌。回頭改寫檔案才是違規 ——
-        #   記事本只增不改。補全只存在於記憶體的讀取視圖裡,兩層各自誠實。
-        if "kind" not in msg:
-            msg["kind"] = "agent" if msg.get("from") in LEGACY_AGENT_NAMES else "human"
+        """load 與 append 共用的索引維護 — 三個結構同步只在這裡發生。
+
+        ★ 這裡【不修補任何格式】。檔案裡是什麼樣子,記憶體就是什麼樣子。
+
+          這裡曾經有一段「舊訊息沒有 kind 就當場補上」的邏輯,
+          結果是記憶體有、檔案沒有 —— 而那個分岔沒有寫在任何地方,
+          下一個直接讀檔案的人(備份腳本、資料分析)會拿到不一樣的東西。
+
+          正確的處理位置是【資料本身】:kind 已經補進 chat.jsonl 的每一則訊息,
+          所以讀取端不需要知道曾經有過舊格式。
+          (2026-07-28,allen 的裁決:「不要在程式裡面去做 workaround」。)
+        """
         room = msg["room"]
         self.rooms.setdefault(room, []).append(msg)
         self._ids.setdefault(room, set()).add(msg["id"])
