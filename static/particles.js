@@ -179,7 +179,7 @@ function startParticles() {
        對照表(改配色的人請一起改):
 
          rgba(0, 255, 136, …)  =  #00ff88  =  styles.css 的 --green,也就是語意色
-                                            (定義與獨占規則見 util.js 的 SEMANTIC_GREEN)
+                                            (獨占規則見 util.js 的 colorHexOf 下方)
          rgba(0, 212, 255, …)  =  #00d4ff  =  styles.css 的 --cyan
 
        為什麼不改成讀 CSS 變數:getComputedStyle 每一格都要呼叫太貴,
