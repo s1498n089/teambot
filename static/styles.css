@@ -71,7 +71,10 @@ body::before { /* circuit grid(靜態,reduced-motion 也保留) */
     linear-gradient(90deg, rgba(0, 255, 136, 0.03) 1px, transparent 1px);
   background-size: 50px 50px;
 }
-/* scanlines 已停用;要復原,把當時的 body::after 規則加回來即可 */
+/* scanlines 已停用。
+   ★ 2026-07-27 需求方(allen)明確裁決【不復原】,理由:「東西越單純越簡單其實越好」。
+     它原本是設計需求書裡點名三次的視覺簽名,所以這不是被遺忘,是被決定。
+     哪天要改主意,把當時的 body::after 規則加回來即可(見 doc/DESIGN_SYSTEM.md 文末)。 */
 #particles { position: fixed; inset: 0; z-index: 0; pointer-events: none; }
 #app {
   position: relative; z-index: 1;
