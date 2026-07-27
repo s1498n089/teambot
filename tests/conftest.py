@@ -1,7 +1,7 @@
 """測試共用夾具。
 
 隔離原則:每個測試拿到自己的 tmp 目錄當 BASE(chat.jsonl / tasks.json /
-tokens.json / agents.json 全部落在裡面),測試之間零共享狀態 —
+tokens.json 全部落在裡面),測試之間零共享狀態 —
 「多實例互洗」的教訓在這裡制度化。
 
 create_app() 是 composition root:monkeypatch server.BASE 後呼叫它,
@@ -28,14 +28,14 @@ def isolated_base(tmp_path, monkeypatch):
     (tmp_path / "static").mkdir()
     (tmp_path / "static" / "index.html").write_text("<html></html>", encoding="utf-8")
     monkeypatch.setattr(server_mod, "BASE", tmp_path)
-    for var in ("AUTH", "INVITE_TOKEN", "ROTATE_TOKEN", "HOST", "PUBLIC_URL", "TASKS_PATH", "PORT"):
+    for var in ("AUTH", "ROTATE_TOKEN", "HOST", "PUBLIC_URL", "TASKS_PATH", "PORT"):
         monkeypatch.delenv(var, raising=False)
     return tmp_path
 
 
 @pytest.fixture
 def make_app(isolated_base, monkeypatch):
-    """app 工廠:make_app(AUTH="on", INVITE_TOKEN="t") 這樣帶環境變數建 app。
+    """app 工廠:make_app(AUTH="on") 這樣帶環境變數建 app。
     回傳 (app, base_path);同一個 base 可重建 app 以測「重啟復原」。"""
     def _make(**env):
         for key, value in env.items():

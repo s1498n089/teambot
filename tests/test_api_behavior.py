@@ -95,7 +95,14 @@ class TestAuth:
             assert c.get("/api/config").json()["authEnabled"] is True
 
 
-# ---------- 動態註冊鏈 ----------
+# ---------- SSE 直播 ----------
+#
+# 註:這一段的標題曾經是「動態註冊鏈」,下面站著測「憑邀請碼註冊成員」的 TestRegister。
+# 2026-07-27 名冊改成「誰現在連著線」之後,註冊這個動作本身就不存在了,測試隨功能退役 ——
+# 但標題留了下來,於是它掛在一個 SSE 的輔助函式上面。
+# ★ 錯的標題比沒有標題更糟,因為它主動誤導:讀的人會以為那個函式跟註冊有關。
+# 考古請看 git 歷史。
+
 
 async def collect_sse_frames(app, path: str, headers: list, n_frames: int, timeout: float = 5.0):
     """手動 ASGI 驅動 SSE 端點:收滿 n 個 data 幀就送 http.disconnect 終止串流。
@@ -125,12 +132,6 @@ async def collect_sse_frames(app, path: str, headers: list, n_frames: int, timeo
              "client": ("test", 1), "server": ("test", 80)}
     await asyncio.wait_for(app(scope, receive, send), timeout=timeout)
     return frames
-
-
-
-# 註:這裡曾經有 TestRegister —— 測「憑邀請碼註冊成員」的那套流程。
-# 2026-07-27 名冊改成「誰現在連著線」之後,註冊這個動作本身就不存在了,
-# 測試隨功能一起退役。考古請看 git 歷史。
 
 
 class TestSSE:

@@ -15,7 +15,12 @@ from server import MentionParser, MessageStore, RateLimiter, TokenStore
 # ---------- MentionParser ----------
 
 class TestMentionParser:
-    KNOWN = {"alice", "bob", "dev"}
+    # ★ 這是【測試資料】不是名冊 —— 名字刻意用不存在的成員(carol),
+    #   免得讀的人以為它在描述誰是這個聊天室的成員。
+    #   (這裡曾經是 {"alice", "bob", "dev"};dev 2026-07-27 退役之後,
+    #    留著真名只會讓「資料」與「名冊」兩件事混在一起 ——
+    #    而不靠名字猜身分,正是我們同一天加 kind 欄位的理由。)
+    KNOWN = {"alice", "bob", "carol"}
 
     def test_basic_mention(self):
         assert MentionParser.parse(self.KNOWN, "hi @bob") == ["bob"]

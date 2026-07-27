@@ -88,7 +88,9 @@ class TestLifecycle:
     def test_bystander_reply_does_not_complete(self, client):
         task = send_task(client)
         feed_mid = client.get("/api/rooms/main/messages?since_id=0").json()["messages"][-1]["id"]
-        post_msg(client, "main", "dev", "路過引用", reply_to=feed_mid)
+        # 旁人叫什麼不重要,重點是「不是 task 的目標」——用不存在的成員名,
+        # 免得讀的人以為 carol 是這個聊天室的成員。
+        post_msg(client, "main", "carol", "路過引用", reply_to=feed_mid)
         got = rpc(client, "bob", "GetTask", {"id": task["id"]})["result"]
         assert got["status"]["state"] == "TASK_STATE_SUBMITTED"  # 旁人不動狀態
 
