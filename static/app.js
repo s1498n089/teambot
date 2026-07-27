@@ -1191,7 +1191,10 @@ createApp({
       const summary = this.tasks.map[taskId];
 
       if (!summary) {
-        this.showToast(">> TASK NOT FOUND(伺服器重開之前的任務會消失)", false);
+        // ★ 這句話與 components.js 的 badgeTitle 是【同一件事的兩種說法】,
+        //   兩處要一起改。它原本寫「伺服器重開之前的任務會消失」——
+        //   那在任務持久化上線前是對的,現在重開會從 tasks.json 復原。
+        this.showToast(">> TASK NOT FOUND(這則訊息比任務持久化功能還早)", false);
         return;
       }
 

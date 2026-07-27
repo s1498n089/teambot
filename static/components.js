@@ -10,7 +10,19 @@
      MessageItem   — 一則訊息(頭像、名字、泡泡)
      ChatComposer  — 最下面的輸入區
 
-   這些零件會用到 util.js 的工具與 md.js 的解析結果,所以那兩個檔案要先載入。
+   ★ 五個之中,MdInline 跟其他四個不是同一種東西:
+     前四個由 app.js 直接掛上畫面;MdInline【沒有外部使用點】——
+     它是 MessageItem 內部的積木(見那裡的 components 欄位),在樣板裡被用了十次。
+     照這份清單去 app.js 找它會找不到,所以先說明白。
+     獨立成一個零件的理由就是那個十:同一串行內元素在段落、標題、清單、
+     表格、引用裡都要畫一次,寫十遍不如寫一遍。
+
+   ── 這個檔案依賴外面的東西 ─────────────────────────────────────────────
+   util.js 的工具與 md.js 的解析結果 —— 那兩個檔案要先載入。
+
+   全域的 rt(定義在 app.js)—— 讀 3 處,都在 MessageItem 的 blocks / rawTokens。
+   app.js 比這個檔案【晚】載入,能跑是因為那幾行是在【畫面開始跑之後】
+   才被求值的,那時 app.js 早就載完了。(util.js 依賴 rt 是同一個模式。)
 
    讀法提示:每個零件都有固定的幾個欄位 ——
      props    別人傳給我的資料(我只能讀,不能改)
@@ -59,10 +71,10 @@ const ChatHeader = {
           "focusTarget", "focusName"],
   emits: ["switch-room", "open-member", "set-focus", "adjust-font"],
 
-  data: function () {
-    // 樣板裡要用到這個常數,而樣板只看得到元件自己的資料,所以帶進來
-    return { FOCUS_ME: FOCUS_ME };
-  },
+  /* 註:這裡曾經有一個 data() 把 FOCUS_ME 帶進元件,註解寫著「樣板裡要用到」——
+     但樣板從來沒有提到它,唯一用到 FOCUS_ME 的是下面的 toggleFocus,
+     而那裡用的是全域的那個。零使用的欄位加上一句解釋它為什麼存在的錯誤說明,
+     比單純的死碼更難清 —— 因為那句說明會讓下一個人以為刪了會壞。 */
 
   computed: {
     /**
@@ -273,12 +285,23 @@ const MessageItem = {
       return "TASK⌀";
     },
 
-    /** 滑鼠移到任務徽章上的說明。 */
+    /**
+     * 滑鼠移到任務徽章上的說明。
+     *
+     * ★ 這句話曾經寫著「伺服器重開之前的任務」—— 那在任務持久化(tasks.json)
+     *   上線之前是對的,現在不是:重開會從檔案復原。
+     *
+     *   會是【給使用者看的字】說錯了,比註解說錯嚴重:看到的人會照它推論
+     *   (「那我不要重開伺服器就好」),而那個推論是錯的。
+     *   真正的原因是這則訊息比持久化功能還老。
+     *
+     *   同一句話在 app.js 的「TASK NOT FOUND」toast 還有一份,兩處要一起改。
+     */
     badgeTitle: function () {
       if (this.taskInfo) {
         return this.taskInfo.state;
       }
-      return "EVAPORATED(伺服器重開之前的任務,狀態已經沒了)";
+      return "EVAPORATED(這則訊息比任務持久化功能還早,它的任務狀態沒有被存下來)";
     },
 
     /** 切換鈕上的字:顯示的是「按下去會變成什麼」。 */
@@ -541,6 +564,11 @@ const ChatComposer = {
           </option>
         </select>
       </label>
+      <!-- min/max 只是【體貼】不是【把關】:HTML 的 min/max 對「用鍵盤打進去的值」
+           不生效(只擋上下箭頭與表單驗證,而這裡沒有表單驗證)。
+           真正夾住範圍的是伺服器 —— a2a.py 的 MIN/MAX_DEADLINE_SECONDS。
+           所以打 99999 送出去不會被前端擋,但也不會有事。
+           要改範圍的話,兩邊要一起改,而且以伺服器那邊為準。 -->
       <label>逾時
         <input class="deadline" type="number" min="5" max="3600" v-model="deadline"> 秒
       </label>
