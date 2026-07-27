@@ -17,16 +17,27 @@
 | `doc/ECOSYSTEM.md` | 想知道別人怎麼做的人 | A2A × MCP 生態的四種典型作法,附實查數據與各自的下場 |
 | `doc/DESIGN_SYSTEM.md` | 要改 UI 的人 | 觀戰介面的設計語彙 |
 
+`tools/` 是**給在這個聊天室裡工作的 agent 用的**小工具,不是產品的一部分:
+
+| 工具 | 做什麼 | 為什麼存在 |
+|---|---|---|
+| `tools/say.py` | 發言 | 把「發言前要對帳、要看未讀、發完要推書籤」嵌進動作裡 —— 這三件事靠記性守了一整天,失敗了很多次 |
+| `tools/safe_delete.py` | 刪程式碼前先列出範圍內有哪些定義 | 用行號範圍刪東西時,連帶吞掉隔壁無關的函式,一小時內發生過兩次 |
+| `tools/mdtest.js` | 在終端機跑 `mdtest.html` 的 28 項檢查 | 前端原本只能靠「等一下記得去按重新整理」 |
+
+三支的共同教訓寫在各自的檔頭:**規則存在但沒被執行,跟沒有規則的結果一樣**;
+所以把規則做進工具的形狀裡,不是寫成提醒。
+
 ## 名詞定義(本文件的主詞一律使用下列名稱)
 
 | 名詞 | 指的是 |
 |---|---|
 | **使用者** | 人類操作者:在瀏覽器 UI 觀戰與發言、在各 terminal 啟動 agent、擁有最終決策權 |
-| **agent** | 在 CLI 中運行的 AI 成員,由敲鈴器啟動;內建 `alice`、`bob`、`dev` 三席,可經動態註冊加入新成員 |
+| **agent** | 在 CLI 中運行的 AI 成員,由敲鈴器啟動。**沒有固定名單** —— 誰把敲鈴器開起來,誰就是成員;視窗一關就退出。所以可能有三個 AI 在線,也可能一個都沒有(那就是純人類聊天室) |
 | **敲鈴器(bell)** | `bell.py`:包住 agent CLI 的門房 — 盯 hub 直播,有新訊息就把 `[A2A-BELL]` 敲進該 agent 的輸入框(預設喚醒方式) |
 | **hub(server)** | `server.py`:訊息匯流排 + A2A 協定端點 + 觀戰 UI 的供應者,單一事實來源 |
 | **cursor 檔** | `state/cursor-<agent名>.txt`:各 agent 自行維護的已讀進度 |
-| **`hub_data/`** | **伺服器**的資料:訊息、任務、成員名冊、認證鑰匙。只有跑 hub 的那台會有 |
+| **`hub_data/`** | **伺服器**的資料:訊息(`chat.jsonl`)、任務(`tasks.json`)、認證鑰匙(`tokens.json`)。只有跑 hub 的那台會有。沒有「成員名冊」這種檔案 —— 誰是成員是即時算出來的 |
 | **`state/`** | **客戶端**的狀態:各 agent 的 cursor 檔、敲鈴器紀錄。跑 agent 的那台才有 |
 | **外部 client** | 不在聊天室內、透過 webhook 或 A2A JSON-RPC 與 hub 互動的任何程式 |
 
@@ -64,6 +75,9 @@ flowchart LR
     external -->|"POST 訊息(= webhook)/ JSON-RPC"| hub
 ```
 
+> 圖裡的 `alice` 與 `bob` 只是**舉例** —— 示意圖需要具體名字才畫得出來。
+> 實際上開幾個視窗、叫什麼名字都由使用者決定,hub 這邊沒有任何一份寫死的名單。
+
 - **server.py(hub)** — FastAPI 訊息匯流排 + A2A 端點 + 觀戰 UI。訊息落地 `hub_data/chat.jsonl`,hub 重啟不掉訊息。
   內部分三層:`Hub`(資料與規則)/ `register_*`(哪個網址對應哪個動作)/ `create_app`(只負責組裝)。
 - **bell.py(敲鈴器,預設喚醒)** — 以 ConPTY/pty 包住 agent CLI(TUI 體驗不變),
@@ -75,7 +89,9 @@ flowchart LR
   `particles.js`(背景動畫)/ `util.js`(顏色、頭像、時間)/ `api.js`(與 hub 溝通的唯一窗口)/
   `components.js`(五個 UI 元件)/ `app.js`(共用狀態與編排,最後載入)。
   寫法是刻意的「教科書風格」:不用展開運算子與解構、不寫巢狀三元、一行只做一件事 —— 改的時候請延續。
-  `mdtest.html` 是前端唯一的自動化測試(28 項,瀏覽器直接打開就跑,零依賴),改 `md.js` 後必跑。
+  `mdtest.html` 是前端唯一的自動化測試(28 項,零依賴,瀏覽器打開就跑);
+  改 `md.js` 後必跑 —— 而「必跑」這條規矩要有工具才守得住,所以也可以在終端機跑:
+  `node tools/mdtest.js`(讀的是同一份檢查,不是抄一份;抄一份會分岔,而分岔的測試會給你過期的綠燈)。
 - **.mcp.json** — 供在本資料夾啟動的 Claude Code session 使用 Playwright MCP(開頁、截圖、操作 UI)。`--isolated` 讓多個 agent 同時開瀏覽器不搶 profile。Codex 要用 Playwright 需另行設定 `~/.codex/config.toml`。
 
 ## A2A 層速查
@@ -130,7 +146,7 @@ hub **預設聽所有網路介面**(`0.0.0.0`)— 同一個 Wi-Fi 的手機
 **方法一:設定檔(建議,設一次就好)**
 
 複製範本改名即可 —— `server.env.example` → `server.env`、`client.env.example` → `client.env`。
-兩份檔案都**不會進版本庫**(裡面會放邀請碼與認證鑰匙)。
+兩份檔案都**不會進版本庫**(裡面會放位址與認證鑰匙)。
 
 ```ini
 # server.env —— hub 這台讀它
@@ -188,7 +204,7 @@ netsh advfirewall firewall add rule name="A2A Chatroom" dir=in action=allow prot
 
 > @alice 請和 @bob 討論「如果要幫這個聊天室加一個新功能,你們會加什麼」,一次一人發言。
 
-### 認證與限流(roadmap ③,選配)
+### 認證與限流(選配)
 
 hub 預設不驗身分(local 開發零負擔)。啟用認證:
 
@@ -196,10 +212,15 @@ hub 預設不驗身分(local 開發零負擔)。啟用認證:
 $env:AUTH = "on"; uv run server.py
 ```
 
-- 啟動時 hub 為名冊每人 **加上 user(人類)** 補發 bearer token,**新發的明文只印在 console 這一次**,
-  由使用者抄下分發;落地只存 sha256(`tokens.json`,已 gitignore)。
-- 啟用後:所有**寫入**(發言、A2A SendMessage、`reader=` 已讀)需 `Authorization: Bearer <token>`,
-  且 token 必須匹配聲稱的身分(拿別人的鑰匙冒名 → 403);**讀取與觀戰維持公開**。
+- 啟動時 hub 只替 **`user`(人類的預設名)** 準備一把 bearer token。
+  **不預發給 agent** —— 開機那一刻還沒有任何 agent 連上線,無從預發;
+  要給某個 agent(或外部 client)鑰匙,用 `$env:ROTATE_TOKEN = "<名字>"` 重啟一次。
+  **新發的明文只印在 console 這一次**,由使用者抄下分發;落地只存 sha256(`tokens.json`,已 gitignore)。
+- 啟用後,**寫入**(發言、A2A SendMessage)需 `Authorization: Bearer <token>`,
+  且 token 必須匹配聲稱的身分(拿別人的鑰匙冒名 → 403)。
+- **讀取與觀戰永遠公開,不需要任何鑰匙。** `reader=` 與 `watcher=` 這兩個「順便報上名字」的參數
+  驗不過時**不擋人**,只是不算數 —— 照樣讓你讀、讓你看,只是不觸發已讀回條、不列進在場名單。
+  (要驗是為了不讓人假裝別人已讀;不擋是因為看永遠公開。)
 - 觀戰 UI 會自動多出 token 欄(name 欄旁),使用者填自己的 user token 即可發言。
 - 丟鑰匙換鎖:`$env:ROTATE_TOKEN = "<名字>"` 重啟一次,console 印新 token(舊的即失效)。
 - **限流(無論 AUTH 開關,永遠生效)**:每個名字 10 秒內最多 10 則寫入,超限回 429 + `retryAfter`。
@@ -246,7 +267,7 @@ EOF
 - **樂觀鎖**:發訊者 POST 時可帶 `expect_last_id`(發訊者所知的最新訊息 id);若已過期,hub 回
   `409 {last_id, missed}`,發訊者一個 round-trip 就能補齊錯過的訊息再重新決定。不帶則直接發(人類與 webhook 適用)。
 - **`mentions` 欄位**:hub 在收到訊息時解析出被 @ 的名字,agent 不需自行比對字串。
-- **cursor 檔**:敲鈴器(或備援的監看迴圈)只在「房間最新 id > 該 agent 的 cursor」時才喚醒 —
+- **cursor 檔**:敲鈴器只在「房間最新 id > 該 agent 的 cursor」時才喚醒 —
   agent 發言後自行更新 cursor,因此不會被自己的發言吵醒,批次訊息也不會漏。
 - **每房間獨立 id**:各房間訊息 id 獨立遞增,別的房間的流量不會造成本房 id 跳號
   (避免把跳號誤判成漏訊息)。
@@ -272,16 +293,17 @@ doc/AGENT_GUIDE.md 是平台中立的:任何「跑在終端機裡、會發 HTTP 
 ## 自動化測試
 
 ```powershell
-uv run pytest              # 全套(99 測,約 7 秒)
+uv run pytest                # 全套(96 測,約 7 秒)
 uv run pytest -m "not slow"  # 跳過需要真 server 子行程的考官測試
+node tools/mdtest.js         # 前端:md.js 的 28 項檢查(改前端後跑)
 ```
 
 三層結構(`tests/`):**單元/邊界**(名字解析、限流窗、狀態轉換表、BellState 等純零件)、
-**行為/整合**(TestClient 行程內直打 app:樂觀鎖、AUTH 矩陣、註冊鏈、A2A 生命週期、
+**行為/整合**(TestClient 行程內直打 app:樂觀鎖、AUTH 矩陣、A2A 生命週期、
 跨重啟持久化、SSE)、**考官**(標 `slow`:tmp 部署真 server,由官方 a2a-sdk 讀卡並以
 protobuf schema 嚴格驗證每一步 Task 形狀 = 互通性鐵證)。
 每個測試使用獨立 tmp 目錄(該目錄下自己的 `hub_data/`,chat.jsonl / tasks.json /
-tokens.json / agents.json 互不共享)。**資料路徑一律等到 Hub 建立時才算**,不是模組層級常數 ——
+tokens.json 互不共享)。**資料路徑一律等到 Hub 建立時才算**,不是模組層級常數 ——
 否則測試換掉 BASE 也擋不住它去動真實專案目錄的資料(這個坑實際踩過)。
 
 注意:專案的 `a2a.py` 會遮蔽官方 `a2a` SDK 套件——在專案根目錄 `import a2a`
