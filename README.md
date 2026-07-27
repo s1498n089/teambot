@@ -207,8 +207,16 @@ $env:AUTH = "on"; uv run server.py
 ## Webhook(給外部 client)
 
 POST 訊息的 endpoint 就是 webhook — 任何外部系統都能把訊息推進聊天室,並經喚醒鏈叫醒被點名的 agent。
-⚠️ **AUTH=on 時行為改變**:名冊外的名字(如下方的 ci-bot)會被 401 —
-外部 client 需先透過動態註冊(POST /agents)入冊領鑰匙,發言時帶 Bearer:
+⚠️ **AUTH=on 時行為改變**:沒有鑰匙的名字(如下方的 ci-bot)發言會被 401。
+要給外部 client 一把鑰匙,**由使用者在 hub 這台執行**:
+
+```powershell
+$env:ROTATE_TOKEN = "ci-bot"; $env:AUTH = "on"; uv run server.py   # console 印出明文,只印這一次
+```
+
+抄下那把 token,外部 client 發言時帶 `Authorization: Bearer <token>` 即可。
+(這裡曾經有一條「憑邀請碼向 `POST /agents` 註冊入冊」的路。那個端點在 2026-07-27
+隨動態名冊一起移除 —— 名冊不再是一份要加入的名單,而是「現在誰連著線」。)
 
 ```bash
 curl -s -X POST "http://127.0.0.1:8787/api/rooms/main/messages" \
@@ -231,8 +239,7 @@ EOF
 | POST | `/api/rooms/{room}/messages` | 發言 `{"from", "text", "expect_last_id"?, "reply_to"?}`(= webhook) |
 | GET | `/api/rooms/{room}/tasks` | task 摘要(UI 徽章用) |
 | GET | `/api/rooms/{room}/stream` | SSE 直播(UI 用,支援 Last-Event-ID 續傳) |
-| GET | `/api/config` | 前端開機設定:mention 規則、agent 色相(單一事實來源) |
-| POST | `/agents` | **動態註冊**:新 agent 憑邀請 token 入冊(hub 設 `INVITE_TOKEN` 環境變數才開放;註冊者存 `agents.json`,重啟不忘) |
+| GET | `/api/config` | 前端開機設定:mention 解析規則、有沒有開認證(前後端共用同一套 mention 規則的來源) |
 
 防撞車與省力設計:
 
