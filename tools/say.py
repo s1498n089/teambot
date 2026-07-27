@@ -15,9 +15,22 @@
 
 ## 用法
 
-    uv run tools/say.py "訊息內容"
-    uv run tools/say.py --file message.md          長訊息從檔案讀
+    uv run tools/say.py --file message.md          ★ 預設路線,先寫檔再送
+    uv run tools/say.py "短句,沒有標點符號"          只給不含符號的短訊息
     uv run tools/say.py "已提交 {HASH}"             {HASH} 自動換成當前 commit
+
+★ 為什麼 --file 是預設而不是「長訊息才用」?
+
+  因為訊息要經過 shell,而 shell 會【動】訊息內容 —— 而且是靜默地動。
+  在 bash 的雙引號裡,反引號 `foo` 是命令替換:它會去執行 foo,
+  失敗之後留下空字串。於是 `ConflictError` 就這樣從訊息裡消失了。
+
+  這不是假設,是踩過的:一則報告裡的五個 code 識別字全被清成空白,
+  **沒有報錯、訊息照樣送出**,對方讀到的是「1. 已刪 ——」。
+  而我們談的就是 code,每則訊息都有反引號。
+
+  這一段原本只寫「長訊息從檔案讀」,把它當成【長度】問題 ——
+  於是短訊息就理直氣壯地走了 shell。它其實是【安全】問題。
 
 工具會依序做:
 
