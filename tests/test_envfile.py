@@ -93,3 +93,35 @@ def test_範本檔本身要解析得動(name):
     assert path.exists(), f"{name} 應該存在(它是給使用者複製的範本)"
     parsed = parse_env_file(path)
     assert parsed, f"{name} 應該至少有一個有效設定"
+
+
+def test_壞行會印警告到_stderr(tmp_path, capsys):
+    """★ 略過壞行不能靜悄悄 —— 那正好製造 load_env_file 自己警告過的
+    「我明明設了卻沒生效」。不炸、不擋、但要看得見。"""
+    f = tmp_path / "a.env"
+    f.write_text("好的=1\n這行沒有等號\n", encoding="utf-8")
+
+    parse_env_file(f)
+
+    stderr = capsys.readouterr().err
+    assert "第 2 行" in stderr, "警告要指出是哪一行"
+    assert "已略過" in stderr
+
+
+def test_警告印不出去也不能炸掉呼叫者(tmp_path, monkeypatch):
+    """警告是輔助資訊,絕不該讓程式起不來。
+
+    這裡模擬 cp950 主控台印不出中文的情況(今天真的踩過兩次)——
+    envfile.warn 必須吞掉它,而解析本身要照常完成。
+    """
+    import envfile
+
+    def exploding_print(*args, **kwargs):
+        raise UnicodeEncodeError("cp950", "x", 0, 1, "模擬編碼失敗")
+
+    monkeypatch.setattr("builtins.print", exploding_print)
+
+    f = tmp_path / "a.env"
+    f.write_text("好的=1\n壞行\n", encoding="utf-8")
+
+    assert parse_env_file(f) == {"好的": "1"}   # 照常解析,沒有炸
