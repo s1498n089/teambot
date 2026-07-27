@@ -62,5 +62,10 @@
 - 只支援 TextPart;無 artifacts
 - 認證:AUTH=on 時寫入需 per-agent bearer token,Agent Card 同步宣告 HTTPAuthSecurityScheme;
   預設 off(本機開發零負擔)
+  - ⚠️ **已知的縫**:認證只掛在 `SendMessage` / `SendStreamingMessage`,
+    而 `CancelTask` 會改狀態卻不在清單裡 —— AUTH=on 時任何人知道 task id 就能取消。
+    **AUTH=on 上線前必修**;修法不是把它加進清單就好(它的 params 沒有 senderName,
+    直接加會讓所有 cancel 被擋),要先定義「cancel 請求怎麼聲明身分」。
+    釘子同時釘在 `server.py` 的認證分支旁邊。
 - push notifications 未實作(喚醒由敲鈴器在本機側承擔,不需要 hub 回呼)
 - REJECTED / INPUT_REQUIRED 兩狀態尚未啟用(需要 agent 回覆帶結構化標記,列於 backlog)

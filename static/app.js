@@ -1202,7 +1202,14 @@ createApp({
     /** 抓任務的完整歷程。抓回來時使用者可能已經關掉或換了一個任務,所以要再確認一次。 */
     async fetchTaskFull(summary) {
       try {
-        const response = await this.api.rpc(summary.target, "GetTask", { id: summary.id });
+        // 帶上 token:GetTask 目前不需認證,但 rpc 的標頭已經統一走 buildHeaders,
+        // 呼叫端就照規矩傳,免得將來換成需要認證的方法時忘了補。
+        let token = "";
+        if (this.authOn) {
+          token = this.token;
+        }
+        const response = await this.api.rpc(summary.target, "GetTask",
+                                            { id: summary.id }, token);
 
         const stillShowingSameTask = this.modal
           && this.modal.type === "task"

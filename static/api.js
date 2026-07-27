@@ -11,9 +11,16 @@
    用法:createApi(notify) 回傳一包函式。notify 是「要跟使用者說話時」
    呼叫的函式,由 app.js 傳進來 —— 這個檔案自己不碰畫面。
 
-   兩種回傳風格,刻意不同,原因見各自的說明:
-     - 大部分函式:失敗就 throw,呼叫端用 try/catch 處理
-     - send / sendTask:失敗不 throw,回一個含 ok 的物件
+   三種回傳風格,刻意不同,原因見各自的說明:
+     - 大部分函式        失敗就 throw,呼叫端用 try/catch 處理
+     - send              失敗不 throw,回 { ok, status, data }
+     - sendTask          失敗不 throw,回 { ok, data } —— 沒有 status,見那裡的說明
+
+   ── 這個檔案依賴外面的東西(兩個,都不在這裡定義)─────────────────────
+   API_FAIL_TOAST_THRESHOLD   定義在 app.js。api.js 比 app.js 早載入,
+                              能跑是因為它只在【請求失敗的當下】才被讀到,
+                              而那時畫面早就啟動了。(util.js 依賴 rt 是同一個模式。)
+   notify                     由 app.js 在建立時傳進來 —— 這個檔案自己不碰畫面。
    ═══════════════════════════════════════════════════════════════════════ */
 
 /**
@@ -27,7 +34,14 @@ function createApi(notify) {
 
   /**
    * 組出送給伺服器的標頭。
-   * 抽成函式是因為 send 與 sendTask 本來各寫了一份一模一樣的,兩份逐字相同。
+   *
+   * 抽成函式是因為 send 與 sendTask 本來各寫了一份一模一樣的。
+   *
+   * ★ 其實是【三份】。rpc 也手寫了一份,但它漏掉了 Authorization 那半段,
+   *   所以當初抽的時候它長得不像重複,就被漏掉了 ——
+   *   「因為已經寫錯了,所以看起來不像是同一件事」是很容易漏掉重複的一種樣子。
+   *   (2026-07-27 補上,rpc 現在也走這裡。)
+   *
    * @param {string} token 登入用的憑證,沒有就傳空的
    * @returns {object} 可以直接給 fetch 用的 headers
    */
@@ -101,7 +115,9 @@ function createApi(notify) {
   }
 
   return {
-    /** 開機時拿設定:成員顏色、@某人 規則、有沒有開認證。 */
+    /** 開機時拿設定:@某人 的解析規則、以及伺服器有沒有開認證。
+        (這裡曾經也拿成員顏色。名冊動態化之後伺服器不再下發顏色,
+         改由前端從名字算 —— 見 util.js 的 colorHexOf。) */
     config: function () {
       return request("/api/config");
     },
@@ -111,7 +127,9 @@ function createApi(notify) {
       return request("/api/rooms", undefined, true);
     },
 
-    /** 已註冊的 agent 清單(派任務的下拉選單用)。 */
+    /** 目前連著線的 agent(派任務的下拉選單用)。
+        不是「註冊過的名單」—— 註冊機制已退役,現在有誰算誰,
+        agent 的視窗一關就從這份清單上消失。 */
     agents: function () {
       return request("/agents", undefined, true);
     },
@@ -145,6 +163,14 @@ function createApi(notify) {
      * 這裡刻意**不走上面的 request、失敗也不 throw**,而是回一個含 ok 的物件。
      * 原因:送訊息失敗時伺服器會回一段說明(例如「這個名字不能用」),
      * 那段話是要**原封不動顯示給使用者看**的,不能被通用的錯誤處理吃掉。
+     *
+     * ★ 前端【刻意不帶 expect_last_id】(伺服器支援的樂觀鎖),而 tools/say.py 帶。
+     *   這個不對稱是設計,不是漏做:
+     *
+     *     人在畫面上打字   撞車了就是多一則訊息,對話照樣成立 —— 擋下來反而礙事
+     *     agent 在跑迴圈   它是「讀完再回」,錯過一則就會答錯 —— 必須被擋下來重讀
+     *
+     *   所以同一個機制對人是噪音、對機器是必要。要「補上」之前先想清楚這件事。
      *
      * @param {string} room 房間名
      * @param {object} body 要送出的內容
@@ -209,19 +235,33 @@ function createApi(notify) {
       const data = await readJsonOrEmpty(response);
 
       // A2A 的錯誤是包在正常回應裡的(HTTP 200 但 data.error 有東西),
-      // 所以兩個都要檢查才知道到底成功沒有
+      // 所以兩個都要檢查才知道到底成功沒有。
+      //
+      // ⚠️ 這個 ok 把【兩種完全不同的失敗壓成同一個 false】:
+      //      response.ok 為假  → HTTP 層failed(伺服器掛了、網路斷了)
+      //      data.error 有值   → 協定層拒絕(對方不在線、任務被拒、方法不支援)
+      //    呼叫端想分辨的話,現在得自己去看 data.error 在不在。
+      //    沒有跟著 send 一起回傳 status,是因為目前沒有呼叫端需要它 ——
+      //    哪天需要了,補上 status 比拆開 ok 便宜。
       const succeeded = response.ok && !data.error;
       return { ok: succeeded, data: data };
     },
 
     /**
      * 直接呼叫 A2A 的其他方法(查任務、取消任務等)。
+     *
+     * ★ 標頭走 buildHeaders,所以會帶上 token。它原本手寫 Content-Type、
+     *   沒有 Authorization —— 那讓它在 AUTH=on 時只能打不需要認證的方法。
+     *   現在唯一的呼叫端是 GetTask(讀,不需認證),所以那個缺口一直沒有被踩到,
+     *   但那是「剛好沒事」不是「沒問題」。
+     *
      * @param {string} agent 對象
      * @param {string} method A2A 方法名,例如 "GetTask"
      * @param {object} params 該方法的參數
+     * @param {string} token 認證憑證,沒開認證時傳空的
      * @returns {Promise<object>}
      */
-    rpc: function (agent, method, params) {
+    rpc: function (agent, method, params, token) {
       const requestBody = {
         jsonrpc: "2.0",
         id: 1,
@@ -231,7 +271,7 @@ function createApi(notify) {
 
       return request(`/agents/${agent}/a2a`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: buildHeaders(token),
         body: JSON.stringify(requestBody),
       });
     },

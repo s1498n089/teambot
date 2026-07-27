@@ -961,6 +961,18 @@ def register_a2a_route(app: FastAPI, hub: Hub) -> None:
 
         # 會寫入的方法要先過認證與限流。
         # (協定本身把認證交給 HTTP 層處理,所以檢查放在這裡,而不是放進協定層。)
+        #
+        # ⚠️ 已知的縫:CancelTask 會改狀態(把任務轉成 CANCELED),但【不在這份清單裡】。
+        #    也就是說 AUTH=on 時,任何人只要知道一個 task id,不帶 token 就能取消它。
+        #
+        #    現在沒出事,是因為 AUTH 預設關著、而且只在區網跑。★ 但 AUTH=on 上線前必修。
+        #
+        #    為什麼不是現在順手加進清單:CancelTask 的 params 裡【沒有 senderName】,
+        #    extract_sender_name 會 fallback 成 "a2a-client" —— 直接加進去的結果是
+        #    AUTH=on 時所有 cancel 全部被擋。要修得先定「cancel 請求怎麼聲明身分」,
+        #    那是認證那一輪的設計題,不是一行改動。
+        #
+        #    GetTask / ListTasks / SubscribeToTask 不進清單是對的:它們不改狀態。
         if method in ("SendMessage", "SendStreamingMessage"):
             sender = extract_sender_name(params)
             try:
