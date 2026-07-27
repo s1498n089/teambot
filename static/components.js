@@ -209,11 +209,6 @@ const MessageItem = {
       return colorHexOf(this.m.from);
     },
 
-    /** 這個名字有沒有正式註冊過(沒有的話名牌會加註記)。 */
-    registered: function () {
-      return this.m.from in rt.palette;
-    },
-
     /**
      * 這則訊息是 AI 說的還是人類說的?
      *
@@ -323,7 +318,7 @@ const MessageItem = {
     <div class="msg-body">
       <!-- 名字那一列。連續發言的第二則以後(grouped)不重複顯示 -->
       <div v-if="!grouped" class="msg-head mono">
-        <span class="pill" :class="{ unreg: !registered }"
+        <span class="pill" :class="{ human: !isAgent }"
               :style="{ color: senderColor, borderColor: senderColor }">{{ m.from.toUpperCase() }}</span>
 
         <!-- 種類徽章:一眼看出這句話是 AI 說的還是人類說的。
@@ -331,9 +326,6 @@ const MessageItem = {
         <span class="kind-tag" :class="isAgent ? 'kind-ai' : 'kind-human'"
               :title="isAgent ? '在成員名冊上,可以被派任務' : '不在成員名冊上,不能被派任務'"
         >{{ isAgent ? 'AI' : 'HUMAN' }}</span>
-
-        <!-- 名字既不在名冊、也不是已知的人類預設名時,額外提醒一句 -->
-        <span v-if="!registered && !isAgent" class="unreg-tag">UNREGISTERED</span>
 
         <span v-if="m.task_id" class="task-badge" :class="badge.cls"
               :title="badgeTitle" @click="$emit('open-task', m.task_id)">{{ badgeText }}</span>

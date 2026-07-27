@@ -64,6 +64,20 @@ const toastBus = { show: null };
    少一個狀態就少一份要記的事。 */
 const FOCUS_ME = "@me";
 
+/* 取名時的兩條規則。放在這裡是因為它們是「規則」不是「狀態」——
+   規則不會變,狀態會。
+
+   NAME_PATTERN 與伺服器的名字白名單對齊(中英文、數字、- 和 _)。
+
+   RESERVED_NAMES 對齊伺服器的 a2a.py:RESERVED_NAMES,但【故意少一個 user】:
+   後端擋 user 是為了不讓 agent 註冊走人類的名字;而前端這裡問的對象就是人類,
+   user 又是人類的預設名 —— 選它等於「不特別取名」,當然要允許。
+
+   ★ poller 已經退役了,名字仍然保留(兩邊都是):
+     退役的基礎設施名字被人拿去用,只會讓將來考古的人更困惑。 */
+const NAME_PATTERN = /^[\w\u4e00-\u9fff-]+$/;
+const RESERVED_NAMES = ["admin", "system", "hub", "server", "poller"];
+
 
 /* ───────────────────────────────────────────────────────────────────────
    第二部分:把複雜狀態包起來的小工具
@@ -219,6 +233,11 @@ createApp({
   },
 
   data() {
+    /* 這個人以前取過名字嗎?
+       ★ 要看 getItem 是不是 null,不能看「有沒有值」——
+         因為沒取名時我們給的預設值就是 "user",兩者混在一起就分不出
+         「他自己選了 user」和「他還沒被問過」。 */
+    const hasChosenName = localStorage.getItem("a2a-name") !== null;
     const savedName = localStorage.getItem("a2a-name") || "user";
     const savedToken = localStorage.getItem("a2a-token") || "";
     const savedFont = localStorage.getItem("a2a-font") || "20";
@@ -232,6 +251,11 @@ createApp({
       rooms: [],
       lastId: 0,
       name: savedName,
+      askingName: !hasChosenName,   // 第一次來的人,先問他叫什麼
+      nameDraft: "",                // 取名框裡正在打的字
+      nameError: "",                // 取名框的錯誤訊息(空字串 = 沒問題)
+      nameWarning: "",              // 取名框的提醒(不擋人,再按一次就放行)
+      nameChecking: false,          // 正在跟伺服器查撞名(避免連按)
       token: savedToken,    // 伺服器有開認證時,發言需要的個人憑證
       status: "connecting",
       replyTo: null,
@@ -520,13 +544,131 @@ createApp({
       return stateMeta(state).short;
     },
 
-    isRegistered(name) {
-      return name in rt.palette;
-    },
-
     /** 這個名字是不是 AI?依據是伺服器給的成員名冊(見 rt.agentNames 的說明)。 */
     isAgent(name) {
       return rt.agentNames.indexOf(name) !== -1;
+    },
+
+    /**
+     * 檢查取名框裡的名字能不能用。回傳錯誤訊息;空字串代表可以。
+     *
+     * ★ 這裡擋的都是「會造成混淆」的名字,不是權限控制 ——
+     *   聊天室目前對所有人一視同仁。
+     */
+    validateName(raw) {
+      const name = (raw || "").trim();
+
+      if (!name) {
+        return "要有個名字才能開始";
+      }
+      if (name.length > 32) {
+        return "名字最多 32 個字";
+      }
+      /* 跟伺服器同一套規則:中英文、數字、- 和 _。
+         為什麼一定要擋 @:訊息裡的 @某人 是點名語法,
+         名字帶 @ 會讓點名解析認錯人。 */
+      if (!NAME_PATTERN.test(name)) {
+        return "只能用中英文、數字、- 和 _(不能有空白或 @)";
+      }
+      if (this.isAgent(name)) {
+        return "「" + name + "」是 AI 成員的名字,換一個吧";
+      }
+      /* 系統保留字:被人拿去用會讓訊息看起來像系統發的。
+         與伺服器的保留名單對齊,但【故意不含 user】——
+         user 是人類的預設名,選它等於「不特別取名」,本來就該允許。 */
+      if (RESERVED_NAMES.indexOf(name.toLowerCase()) !== -1) {
+        return "「" + name + "」是系統保留的名字,換一個吧";
+      }
+      return "";
+    },
+
+    /**
+     * 按下「就叫這個」:先檢查格式,再檢查有沒有跟別人撞名,都過了才存。
+     *
+     * ★ 撞名分成兩級,而且【故意】不做成同一種:
+     *
+     *     在線上有人用 → 硬擋。同時有兩個人叫同一個名字,訊息會分不清誰是誰。
+     *     歷史上有人用 → 只提醒一次,再按一次就放行。
+     *
+     *   為什麼歷史不硬擋?因為人類沒有身分系統 —— 名字只存在各自的瀏覽器裡。
+     *   硬擋的話,你清掉瀏覽器紀錄、或換一台電腦,就會【被自己用過的名字擋在門外】,
+     *   而系統分不出「撞名的別人」與「回來的你自己」。
+     *
+     *   要真正保證名字唯一,得靠認證(AUTH=on):鑰匙綁名字,沒有你的鑰匙
+     *   就不能用你的名字發言。這裡做的是防誤撞,不是防冒名。
+     */
+    async confirmName() {
+      if (this.nameChecking) {
+        return;                                  // 連按兩下時,第二下直接忽略
+      }
+      const name = this.nameDraft.trim();
+
+      const error = this.validateName(name);
+      if (error) {
+        this.nameError = error;
+        return;
+      }
+
+      this.nameChecking = true;
+      try {
+        const taken = await this.findNameConflict(name);
+        if (taken === "online") {
+          this.nameError = "「" + name + "」現在有人正在用,換一個吧";
+          return;
+        }
+        if (taken === "history" && !this.nameWarning) {
+          this.nameWarning = "之前有人用過「" + name + "」,訊息會混在一起。"
+                           + "確定的話再按一次「就叫這個」。";
+          return;                                // 第一次只提醒,不擋
+        }
+      } finally {
+        this.nameChecking = false;
+      }
+
+      this.name = name;
+      localStorage.setItem("a2a-name", this.name);
+      this.askingName = false;
+    },
+
+    /**
+     * 這個名字被佔用了嗎?回傳 "online" / "history" / ""(沒撞到)。
+     *
+     * 查不到就當作沒撞 —— 網路出問題不該把人卡在取名框前面進不來。
+     */
+    async findNameConflict(name) {
+      try {
+        const presence = await this.api.presence(this.room);
+        const online = (presence && presence.present) || [];
+        if (online.indexOf(name) !== -1) {
+          return "online";
+        }
+      } catch (error) {
+        return "";                               // 查不到就放行
+      }
+      try {
+        const data = await this.api.members(this.room);
+        const members = (data && data.members) || [];
+        for (const member of members) {
+          if (member.name === name) {
+            return "history";
+          }
+        }
+      } catch (error) {
+        return "";
+      }
+      return "";
+    },
+
+    /** 取名框裡一改字,就把上一次的錯誤與提醒清掉(它們講的是舊名字)。 */
+    onNameDraftInput() {
+      this.nameError = "";
+      this.nameWarning = "";
+    },
+
+    /** 按下「先跳過」:沿用預設的 user,但一樣記下來,不再問第二次。 */
+    skipNaming() {
+      localStorage.setItem("a2a-name", this.name);
+      this.askingName = false;
     },
 
     /**

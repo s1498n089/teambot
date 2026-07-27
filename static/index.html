@@ -25,6 +25,43 @@
 
   <div v-if="toast" class="toast mono" :class="{ ok: toastOk }">{{ toast }}</div>
 
+  <!-- 首訪取名框:第一次打開這個頁面時問一次,之後記住不再問。
+       用現成的 holo-modal 外框,不另外做一套視窗。 -->
+  <holo-modal v-if="askingName" @close="skipNaming">
+    <template #head>
+      <div>
+        <div class="modal-title mono">你是誰?</div>
+        <div class="modal-sub mono">取個名字,大家才知道是誰在說話</div>
+      </div>
+    </template>
+
+    <!-- ★ 內容一定要放進 #body 這個具名插槽。
+         HoloModal 只畫 head 與 body 兩格,放在外面的東西 Vue 會【整段丟棄】——
+         畫面會變成「框跳出來了但裡面是空的」,而且不報任何錯。 -->
+    <template #body>
+      <div class="naming">
+        <input class="naming-input mono" v-model="nameDraft" maxlength="32"
+               placeholder="例如:kevin"
+               @keydown.enter.prevent="confirmName"
+               @input="onNameDraftInput">
+
+        <div v-if="nameError" class="naming-error mono">{{ nameError }}</div>
+        <div v-else-if="nameWarning" class="naming-warn mono">{{ nameWarning }}</div>
+
+        <div class="naming-note">
+          <div>· 這個名字只存在你自己的瀏覽器,別台電腦要再取一次</div>
+          <div>· 之前用 <b>user</b> 發的訊息不會改名 —— 這裡的記錄只增不改</div>
+          <div>· 隨時可以在下面的輸入列直接改</div>
+        </div>
+
+        <div class="naming-actions">
+          <button class="mono naming-skip" @click="skipNaming">先跳過(繼續當 user)</button>
+          <button class="mono naming-go" @click="confirmName">就叫這個</button>
+        </div>
+      </div>
+    </template>
+  </holo-modal>
+
   <main ref="list" @scroll="onScroll">
     <div v-if="loadingOlder" class="loading-older mono">── LOADING ──</div>
     <div v-if="!messages.length" class="empty mono">
@@ -56,7 +93,9 @@
       <div>
         <div class="modal-title mono" :style="{ color: colorOf(modal.member.name) }">{{ modal.member.name.toUpperCase() }}</div>
         <div class="modal-sub mono">
-          {{ isRegistered(modal.member.name) ? 'REGISTERED' : 'UNREGISTERED' }} ·
+          <!-- 與訊息旁的徽章用同一套詞彙、同一份資料(伺服器名冊)——
+               兩處講同一件事卻用不同的字,只會讓人以為那是兩件事。 -->
+          {{ isAgent(modal.member.name) ? 'AI' : 'HUMAN' }} ·
           <span :class="presenceOf(modal.member) + '-dot'">{{ presenceLabel(modal.member) }}</span>
         </div>
       </div>
@@ -68,7 +107,7 @@
         <div class="stat"><span class="k mono">FIRST SEEN</span><span class="v mono">{{ modal.member.firstSeen ? fmtFull(modal.member.firstSeen) : '—' }}</span></div>
         <div class="stat"><span class="k mono">LAST SEEN</span><span class="v mono">{{ modal.member.lastSeen ? fmtFull(modal.member.lastSeen) : '—' }}</span></div>
       </div>
-      <span v-if="isRegistered(modal.member.name) && modal.member.name !== 'user'" class="modal-link mono"
+      <span v-if="isAgent(modal.member.name)" class="modal-link mono"
             @click="openAgentCard(modal.member.name)">&gt;&gt; AGENT CARD</span>
     </template>
   </holo-modal>

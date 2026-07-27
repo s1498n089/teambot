@@ -146,14 +146,30 @@ main {
 .msg.own .msg-body { align-items: flex-end; } /* FOCUS 模式下自己的泡泡貼右緣 */
 .msg-head { display: flex; align-items: baseline; gap: 8px; font-size: var(--ui-md); flex-wrap: wrap; }
 .pill { border: 1px solid; border-radius: 2px; padding: 0 6px; letter-spacing: 1px; font-size: var(--ui-md); }
-.pill.unreg { border-style: dashed; opacity: 0.85; }
-.unreg-tag { color: var(--muted); font-size: var(--ui-sm); letter-spacing: 1px; animation: unregFlicker 4s steps(1) infinite; } /* 白名單 3/3 */
+/* 人類的名字牌用虛線邊框 —— 與 HUMAN 徽章同一個判準(伺服器名冊),多一層視覺提示。 */
+.pill.human { border-style: dashed; opacity: 0.85; }
 /* 種類徽章:AI 還是人類。刻意做得很小 —— 它是輔助資訊,不該搶名字的戲。
    顏色沿用既有語彙:AI 用青色(系統/機器那一側),人類用中性灰。 */
 .kind-tag { font-size: var(--ui-sm); letter-spacing: 1px; border: 1px solid; border-radius: 2px;
             padding: 0 4px; opacity: .75; }
 .kind-tag.kind-ai { color: var(--cyan); border-color: var(--cyan); }
 .kind-tag.kind-human { color: var(--muted); border-color: var(--muted); }
+
+/* 首訪取名框 */
+.naming { display: flex; flex-direction: column; gap: 14px; padding: 4px 0; }
+.naming-input { background: rgba(0,0,0,.4); border: 1px solid var(--cyan); color: var(--fg);
+                padding: 10px 12px; font-size: var(--ui-lg); border-radius: 2px; outline: none; }
+.naming-input:focus { box-shadow: 0 0 10px rgba(0,212,255,.35); }
+.naming-error { color: var(--red); font-size: var(--ui-sm); }
+/* 提醒不是錯誤:用琥珀色而不是紅色,因為再按一次就會放行。 */
+.naming-warn { color: var(--amber); font-size: var(--ui-sm); line-height: 1.7; }
+.naming-note { color: var(--muted); font-size: var(--ui-sm); line-height: 1.9; }
+.naming-actions { display: flex; gap: 10px; justify-content: flex-end; }
+.naming-actions button { padding: 8px 14px; border-radius: 2px; cursor: pointer;
+                         background: transparent; border: 1px solid; letter-spacing: 1px; }
+.naming-skip { color: var(--muted); border-color: var(--muted); }
+.naming-go { color: var(--cyan); border-color: var(--cyan); }
+.naming-go:hover { box-shadow: 0 0 10px rgba(0,212,255,.4); }
 
 .reply-chip { color: var(--cyan); cursor: pointer; letter-spacing: 1px; }
 .reply-chip:hover { text-shadow: 0 0 8px var(--cyan); }
@@ -405,7 +421,6 @@ button.send:hover { box-shadow: var(--shadow-neon-cyan); }
   50% { transform: translate(2px, -1px); } 75% { transform: translate(-1px, -1px); }
   100% { transform: translate(0); }
 }
-@keyframes unregFlicker { 0%, 92%, 100% { opacity: 0.85; } 94% { opacity: 0.2; } 96% { opacity: 0.85; } 98% { opacity: 0.35; } }
 
 /* ═══════════ 10. RWD 與使用者偏好 ═══════════ */
 @media (max-width: 560px) {
@@ -425,6 +440,6 @@ button.send:hover { box-shadow: var(--shadow-neon-cyan); }
 }
 @media (prefers-reduced-motion: reduce) {
   #particles { display: none; } /* 粒子全關,保留靜態 circuit grid */
-  .hdr-title:hover, .lamp-text.glitching, .unreg-tag, .lamp.reconnecting,
+  .hdr-title:hover, .lamp-text.glitching, .lamp.reconnecting,
   .task-badge.open { animation: none !important; }
 }
