@@ -82,7 +82,10 @@ def sanitize_sender(raw: str) -> str | None:
     return None
 
 
-# ---------- 自訂例外(409/422 例外化,B 清單)----------
+# ---------- 自訂例外 ----------
+#
+# 每個都自帶「該回什麼 HTTP 狀態碼」與「該說什麼」,路由裡只管 raise,
+# 統一由 create_app 的 handle_api_error 轉成回應 —— 錯誤格式因此只有一種寫法。
 
 class ApiError(Exception):
     """業務錯誤基底:handler 統一轉成 JSONResponse,路由裡只管 raise。"""
@@ -95,11 +98,6 @@ class ApiError(Exception):
 
 class StaleCursorError(ApiError):
     """樂觀鎖失敗(有人搶先發言),payload 附 missed 讓 agent 一次補齊。"""
-    status = 409
-
-
-class ConflictError(ApiError):
-    """資源衝突(如註冊重名)。"""
     status = 409
 
 
@@ -755,13 +753,15 @@ def register_page_routes(app: FastAPI, hub: Hub) -> None:
 
     @app.get("/api/config")
     async def get_config():
-        """前端開機設定:點名規則與每個 agent 的顏色,都以這裡為準。
+        """前端開機時要知道的兩件事:點名規則、以及伺服器有沒有開認證。
 
-        新註冊的成員,顏色要重新整理頁面後才會生效(已知的時效行為)。
+        點名規則(@某人 怎麼解析)由這裡下發,前後端因此共用同一套規則 ——
+        那是它非在這裡不可的理由:規則若各寫一份,遲早會對不起來。
+
+        ★ 這裡【不再下發 agent 的顏色】。名冊動態化(2026-07-27)之後,
+          伺服器開機時並不知道會有誰連進來,所以顏色改由前端從名字算(同名同色)——
+          少一個要同步的東西,而且新成員第一次出現就有顏色,不必等重整。
         """
-        # 註:這裡曾經下發每個 agent 的指定顏色。名冊動態化之後,
-        # 我們開機時並不知道會有誰連進來 —— 顏色改由前端從名字算出來(同名同色),
-        # 少一個要同步的東西,而且新成員第一次出現就有顏色,不必等重整。
         return {
             "mentionPattern": MentionParser.JS_SOURCE,
             "a2aVersion": a2a_mod.A2A_PROTOCOL_VERSION,
@@ -886,7 +886,7 @@ def register_stream_route(app: FastAPI, hub: Hub) -> None:
 
 
 def register_agent_routes(app: FastAPI, hub: Hub) -> None:
-    """成員名冊:列出有誰、報到加入、查看名片。"""
+    """成員名冊:列出現在有誰在線、查看某個 agent 的名片。"""
 
     @app.get("/agents")
     async def agents_index(room: str = "main"):
@@ -921,6 +921,11 @@ def extract_sender_name(params: dict) -> str:
 
     這個資訊可能出現在兩個地方(訊息裡面、或請求外層),外層優先。
     找不到就給一個預設名字,讓後續流程照樣走得下去。
+
+    ★ 同一套「兩層 metadata 合併」的規則在 a2a.py 的 _create_task 也有一份
+      (那邊還要順便取 deadlineSeconds)。兩處是刻意的重複:
+      要合併就得把目標房間一路傳進協定層,漣漪比這幾行大得多。
+      **但改的時候要一起改** —— 只改一邊,同一個請求會在兩處被解讀成不同的人。
     """
     message = params.get("message") or {}
     metadata = {}

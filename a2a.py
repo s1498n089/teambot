@@ -442,6 +442,10 @@ class A2ALayer:
             if not existing or existing.context_id != context:
                 raise A2AError(-32602, "taskId does not match contextId")
 
+        # 兩層 metadata 合併(外層蓋掉訊息內層)。
+        # ★ 同一套規則在 server.py 的 extract_sender_name 也有一份 ——
+        #   那邊是「發言前要先驗身分」時用的,這裡是「真的要建 task」時用的。
+        #   **改的時候要一起改**:只改一邊,同一個請求會在兩處被解讀成不同的發送者。
         meta_in = {**(message.get("metadata") or {}), **(params.get("metadata") or {})}
         sender = self._sanitize(str(meta_in.get("senderName", ""))) or "a2a-client"
         deadline = float(meta_in.get("deadlineSeconds", DEFAULT_DEADLINE_SECONDS))
