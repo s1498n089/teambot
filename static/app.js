@@ -41,17 +41,6 @@ const rt = reactive({
   palette: { user: "#c9d1d9" },        // 人類的預設顏色;agent 的顏色由伺服器指定
   authEnabled: false,                  // 伺服器有沒有開認證(有的話畫面要多一個 token 欄)
 
-  /* 成員名冊(伺服器給的),用來分辨「這個名字是 AI 還是人類」。
-
-     ★ 為什麼不直接看 palette?因為 palette 裡塞了 user 的預設顏色 ——
-       那是「畫面用的顏色表」,不是「誰是 AI 的名單」。混用會把人類算成 AI。
-
-     判準本身很單純:【在名冊上 = AI,不在名冊 = 人類】。
-     這不是我們自己發明的規則,而是伺服器早就在用的那一條 ——
-     派任務給名冊外的名字會被協定層當場擋掉(unknown agent)。
-     所以畫面上的標記與「能不能接任務」永遠一致,
-     不可能出現「看起來是 AI 卻派不了任務」這種矛盾。 */
-  agentNames: [],
 });
 
 /* api.js 需要「跟使用者說話」的能力,但它在畫面建好之前就先造好了。
@@ -297,9 +286,14 @@ createApp({
     },
 
     /**
-     * 可以派任務的對象:只有註冊過的 agent(協定層本來就擋沒註冊的),
-     * 並標記他現在在不在 —— 派給沒人在的 agent 只會白等到逾時,
-     * 這件事該在選之前就看得見。
+     * 可以派任務的對象 = 現在連著線的 agent。
+     *
+     * ★ 這份清單會隨著 agent 上下線變動(2026-07-27 起)——
+     *   以前它是開機載入一次的靜態名冊,現在伺服器只回「此刻在線的」,
+     *   所以要跟著在場名單一起定時重載(見 startTimers)。
+     *
+     *   沒有任何 agent 在線時這裡是空的 —— 那不是壞掉,
+     *   那就是「現在房間裡只有人類」。畫面上要講清楚,不能只給一個空選單。
      */
     taskTargets() {
       const targets = [];
@@ -461,15 +455,9 @@ createApp({
         rt.mentionPattern = config.mentionPattern;
         rt.authEnabled = !!config.authEnabled;
 
-        const palette = { user: "#c9d1d9" };
-        const agentNames = [];
-
-        for (const name of Object.keys(config.agents)) {
-          palette[name] = config.agents[name].color;
-          agentNames.push(name);
-        }
-        rt.palette = palette;
-        rt.agentNames = agentNames;
+        /* 註:伺服器以前會在這裡下發每個 agent 的指定顏色。名冊動態化之後
+           它開機時並不知道會有誰連進來,所以顏色改由前端從名字算(同名同色)——
+           新成員第一次出現就有顏色,不必等重整。 */
       } catch (error) {
         // 預設值已經在 rt 裡了,不做事就是正確的處理
       }
@@ -530,6 +518,10 @@ createApp({
 
       setInterval(function () {
         self.loadPresence();
+        // ★ 名冊也要跟著重載:2026-07-27 起它是「現在誰連著線」,會隨 agent
+        //   開關視窗變動。以前它是開機載入一次的靜態清單,現在不重載的話,
+        //   一個剛上線的 agent 要等到你重整頁面才會出現在派任務選單裡。
+        self.loadAgents();
       }, PRESENCE_POLL_MS);
     },
 
@@ -588,9 +580,9 @@ createApp({
       return stateMeta(state).short;
     },
 
-    /** 這個名字是不是 AI?依據是伺服器給的成員名冊(見 rt.agentNames 的說明)。 */
+    /** 這個名字現在有沒有 AI 在線上用?(取名框用:擋人類取到 AI 的名字) */
     isAgent(name) {
-      return rt.agentNames.indexOf(name) !== -1;
+      return this.agents.some(function (agent) { return agent.name === name; });
     },
 
     /**

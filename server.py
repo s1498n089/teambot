@@ -61,6 +61,11 @@ DATA_DIR_NAME = "hub_data"
 DEFAULT_PORT = 8787
 DEFAULT_HOST = "0.0.0.0"  # 預設開放區網(手機觀戰);要只聽本機可設 HOST=127.0.0.1
 SENDER_RE = re.compile(r"^[\w一-鿿-]{1,32}$")   # 名字白名單:擋空白與 @,防 parse 怪象
+# 2026-07-27 之前,這三個名字是寫死在程式裡的 agent。
+# 保留它們只有一個用途:替那天以前的舊訊息補上 kind 欄位(見 MessageStore._index)。
+# 它【不是】名冊 —— 今天的名冊是「現在連著線而且自稱 agent 的人」,見 EventBus.live_agents。
+LEGACY_AGENT_NAMES = {"alice", "bob", "dev"}
+
 SSE_KEEPALIVE_SECONDS = 15
 SSE_REPLAY_LIMIT = 10_000                        # 重連回放的上限
 SUBSCRIBER_QUEUE_MAXSIZE = 256                   # 慢客戶端的 backpressure 界線
@@ -182,6 +187,15 @@ class MessageStore:
 
     def _index(self, msg: dict) -> None:
         """load 與 append 共用的索引維護 — 三個結構同步只在這裡發生。"""
+        # 2026-07-27 之前的訊息沒有 kind 欄位。在讀進來的當下補上,
+        # 之後所有人(前端、API)拿到的訊息就一定有 kind,不必各自處理「舊格式」。
+        # 補的依據是當年寫死在程式裡的那三個名字 —— 它們在那個年代確實是 AI。
+        #
+        # ★ 檔案裡的原始行【刻意不動】,不要「順手修好它」:
+        #   那些行當年寫入時就沒有 kind,那是歷史原貌。回頭改寫檔案才是違規 ——
+        #   記事本只增不改。補全只存在於記憶體的讀取視圖裡,兩層各自誠實。
+        if "kind" not in msg:
+            msg["kind"] = "agent" if msg.get("from") in LEGACY_AGENT_NAMES else "human"
         room = msg["room"]
         self.rooms.setdefault(room, []).append(msg)
         self._ids.setdefault(room, set()).add(msg["id"])
@@ -244,11 +258,28 @@ class MessageStore:
         return sel[:limit], last
 
     def append(self, room: str, sender: str, text: str, mentions: list[str],
-               reply_to: int | None = None, task_id: str | None = None) -> dict:
+               reply_to: int | None = None, task_id: str | None = None,
+               kind: str = "human") -> dict:
+        """把一則訊息寫進記事本。
+
+        ★ kind 是「說這句話的是 AI 還是人類」,由發送方自己聲明,寫下去就不再改變。
+
+          為什麼要寫進訊息裡,而不是查「這個名字是不是 agent」?
+          因為那是兩種壽命不同的事實:
+
+              「這句話是誰說的」  → 歷史,永遠不變
+              「他現在在不在線」  → 當下,隨時在變
+
+          如果徽章去查後者,alice 一斷線,她三個月前的訊息就會從 AI 變成人類 ——
+          歷史跟著網路連線閃爍。記在訊息裡,它就跟著那句話一起被凍結。
+        """
+        # 正規化收在這裡 —— 這是訊息落地的唯一入口,在這裡擋住就不會有第二種寫法進檔案。
+        # (刻意不在每一層都防一次:重複的防禦會讓後人以為某一層可以省略。)
         msg = {
             "id": self.last_id(room) + 1,
             "room": room,
             "from": sender,
+            "kind": "agent" if kind == "agent" else "human",
             "text": text,
             "mentions": mentions,
             "ts": now_iso(),
@@ -378,6 +409,10 @@ class Subscription:
     queue: asyncio.Queue = field(default_factory=lambda: asyncio.Queue(maxsize=SUBSCRIBER_QUEUE_MAXSIZE))
     dead: bool = False   # backpressure:queue 滿了標記,產生器見狀自行收尾
     watcher: str | None = None
+    # 這條連線背後是不是 AI?由連線方自己宣告(敲鈴器會說,瀏覽器不會)。
+    # 它決定「現在能不能派任務給這個名字」,不決定「這個名字是不是 AI」——
+    # 後者寫在每則訊息裡,見 MessageStore.append 的 kind。
+    is_agent: bool = False
 
 
 class EventBus:
@@ -386,14 +421,47 @@ class EventBus:
     def __init__(self):
         self.subs: dict[str, set[Subscription]] = {}
 
-    def subscribe(self, room: str, watcher: str | None = None) -> Subscription:
-        sub = Subscription(watcher=watcher)
+    def subscribe(self, room: str, watcher: str | None = None,
+                  is_agent: bool = False) -> Subscription:
+        """掛一條新的直播連線。
+
+        is_agent 由連線方自己宣告(敲鈴器會說「我包的是 agent」,瀏覽器不會說)。
+        ★ 這是「現在誰能接任務」的唯一來源 —— 沒有名冊檔案、沒有註冊手續,
+          連著線就算在,線一斷就不算。
+        """
+        sub = Subscription(watcher=watcher, is_agent=is_agent)
         self.subs.setdefault(room, set()).add(sub)
         return sub
 
     def watchers(self, room: str) -> set[str]:
         """當前在場者(具名且連線未死)— presence 的唯一事實來源。"""
         return {s.watcher for s in self.subs.get(room, set()) if s.watcher and not s.dead}
+
+    def all_live_agents(self) -> set[str]:
+        """任何房間裡連著線的 agent。
+
+        ★ 為什麼需要「不分房間」的版本:agent 的身分不屬於某個房間。
+          A2A 的 Agent Card 是它的身分證,而任務可以在任何房間(contextId)派給它 ——
+          用單一房間的名單去判斷「這個 agent 存不存在」,會讓一個待在別房的 agent
+          看起來像不存在。房間層的 live_agents 只該用在「這個房間的選單要列誰」。
+        """
+        live = set()
+        for room in self.subs:
+            live |= self.live_agents(room)
+        return live
+
+    def live_agents(self, room: str) -> set[str]:
+        """現在連著線、而且自稱是 agent 的那些名字。
+
+        ★ 它回答的是【可用性】:現在能不能派任務給這個名字。
+          它【不】回答「這個名字是不是 AI」—— 那是身分問題,答案寫在每則訊息的 kind 欄位裡,
+          不會因為誰斷線而改變。兩個問題分開,是因為它們的答案有不同的壽命。
+        """
+        live = set()
+        for sub in self.subs.get(room, set()):
+            if sub.watcher and sub.is_agent and not sub.dead:
+                live.add(sub.watcher)
+        return live
 
     def unsubscribe(self, room: str, sub: Subscription) -> None:
         self.subs.get(room, set()).discard(sub)
@@ -416,16 +484,15 @@ class PostMessage(BaseModel):
     text: str = Field(min_length=1, max_length=8000)
     expect_last_id: int | None = None   # 樂觀鎖:發言時聲明「我以為的最新 id」
     reply_to: int | None = None         # 引用;若指向 task 訊息且我是目標 → 完成該 task
+    # 說這句話的是誰:agent 或 human。由發送方自己聲明,沒說就當人類。
+    # ★ 為什麼不由伺服器判斷「這個名字有沒有 agent 連線」?
+    #   因為發言走這條路、連線走另一條路 —— 敲鈴器斷線重連的那兩秒裡,
+    #   agent 發的話會被誤判成人類,而訊息只增不改,錯了就永遠錯了。
+    #   讓聲明跟著訊息一起來,就沒有這個時間差。
+    kind: str = "human"
     model_config = {"populate_by_name": True}
 
 
-class RegisterAgent(BaseModel):
-    """roadmap ② 動態註冊:新 agent 憑邀請 token 自報。欄位上限防灌書。"""
-    name: str = Field(min_length=1, max_length=32)
-    description: str = Field(default="", max_length=300)
-    skills: list = Field(default_factory=list)
-    color: str = Field(pattern=r"^#[0-9a-fA-F]{6}$")
-    inviteToken: str = Field(min_length=1, max_length=128)
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  Hub —— 資料與規則
@@ -467,9 +534,10 @@ class Hub:
         # 沒有它的話,兩個人同時發言會讓樂觀鎖失效 —— 兩邊都以為自己是最新的。
         self.post_lock = asyncio.Lock()
 
-        # ── 名冊、認證、限流 ──
-        self.agents = a2a_mod.AgentRegistry(self.data_dir / "agents.json")
-        self.invite_token = os.environ.get("INVITE_TOKEN", "")   # 沒設 = 註冊功能關閉
+        # ── 認證、限流 ──
+        # 註:這裡曾經有 AgentRegistry(讀寫 agents.json)與 INVITE_TOKEN(邀請碼註冊)。
+        # 兩者於 2026-07-27 一起退役 —— 新的名冊是「誰現在連著線」,不需要註冊這個動作,
+        # 自然也不需要邀請碼。雲端階段若要控管誰能進房,那是另一道題(認證那道)。
         self.auth_enabled = os.environ.get("AUTH", "").lower() in ("on", "1", "true")
         self.token_store = TokenStore(self.data_dir / "tokens.json")
         self.rate_limiter = RateLimiter()
@@ -484,7 +552,14 @@ class Hub:
             ingest=self.ingest,
             sanitize_sender=sanitize_sender,
             base_url=self.base_url,
-            agents=self.agents,
+            # 不分房間:agent 的身分不屬於某個房間,任務也可以在任何房間派給它。
+            #
+            # 誠實標一個取捨:一個只掛在 A 房的 agent,理論上可以被派 B 房的任務,
+            # 而它根本收不到那個房間的訊息 —— 結果會是逾時失敗。
+            # 我們選擇不擋,因為擋的話要把「目標房間」一路傳進協定層,
+            # 而這個情境至今沒發生過(通常只有一個房間),逾時機制也已經兜住後果。
+            # 哪天真的多房間常態運作,這裡就是要改的第一個地方。
+            agents=self.bus.all_live_agents,
             auth_enabled=self.auth_enabled,
             tasks_path=self.pick_tasks_path(),
         )
@@ -511,7 +586,10 @@ class Hub:
         新發的鑰匙印在畫面上,而且【只印這一次】—— 檔案裡存的是指紋不是明文,
         所以沒抄到就只能重發。設 ROTATE_TOKEN=<名字> 可以幫某人重發、舊的作廢。
         """
-        fresh = self.token_store.ensure(self.agents.names() + ["user"])
+        # ★ 只替人類(user)準備鑰匙。agent 的名冊現在是動態的 ——
+        #   開機這一刻還沒有任何 agent 連上線,無從預發。
+        #   要給某個 agent 鑰匙,用 ROTATE_TOKEN=<名字> 重啟一次即可。
+        fresh = self.token_store.ensure(["user"])
         for name, token in fresh.items():
             print(f"[auth] {name} 的 token(僅此一次,請抄下分發):{token}", file=sys.stderr)
         rotate = os.environ.get("ROTATE_TOKEN", "")
@@ -545,7 +623,7 @@ class Hub:
 
     async def ingest(self, room: str, sender: str, text: str, reply_to: int | None = None,
                      task_id: str | None = None, extra_mentions: list[str] | None = None,
-                     expect_last_id: int | None = None) -> dict:
+                     expect_last_id: int | None = None, kind: str = "human") -> dict:
         """所有訊息進入聊天室的唯一入口。
 
         網頁發言走這裡,A2A 派任務也走這裡 —— 只有一個入口,規則才不會有兩套。
@@ -573,7 +651,7 @@ class Hub:
                     mentions.append(extra)
 
             msg = self.store.append(room, sender, text, mentions,
-                                    reply_to=reply_to, task_id=task_id)
+                                    reply_to=reply_to, task_id=task_id, kind=kind)
 
         # 鎖放掉之後才做這兩件事 —— 它們不碰檔案,不需要排隊。
         self.bus.publish(room, msg)                 # 通知所有正在看的人
@@ -681,14 +759,13 @@ def register_page_routes(app: FastAPI, hub: Hub) -> None:
 
         新註冊的成員,顏色要重新整理頁面後才會生效(已知的時效行為)。
         """
-        colors = {}
-        for name, profile in hub.agents.profiles.items():
-            colors[name] = {"color": profile.get("color", "#c9d1d9")}
+        # 註:這裡曾經下發每個 agent 的指定顏色。名冊動態化之後,
+        # 我們開機時並不知道會有誰連進來 —— 顏色改由前端從名字算出來(同名同色),
+        # 少一個要同步的東西,而且新成員第一次出現就有顏色,不必等重整。
         return {
             "mentionPattern": MentionParser.JS_SOURCE,
             "a2aVersion": a2a_mod.A2A_PROTOCOL_VERSION,
             "authEnabled": hub.auth_enabled,   # 前端據此決定要不要顯示 token 欄位
-            "agents": colors,
         }
 
 
@@ -741,7 +818,8 @@ def register_room_routes(app: FastAPI, hub: Hub) -> None:
         hub.rate_limiter.check(sender)       # 限流(永遠啟用)
         msg = await hub.ingest(room, sender, body.text,
                                reply_to=body.reply_to,
-                               expect_last_id=body.expect_last_id)
+                               expect_last_id=body.expect_last_id,
+                               kind=body.kind)
         return {"id": msg["id"]}
 
     @app.get("/api/rooms/{room}/tasks")
@@ -754,7 +832,7 @@ def register_stream_route(app: FastAPI, hub: Hub) -> None:
 
     @app.get("/api/rooms/{room}/stream")
     async def stream(room: str, request: Request, since_id: int = 0,
-                     watcher: str | None = None):
+                     watcher: str | None = None, kind: str = "human"):
         """把新訊息即時推給對方,連線一直開著不關。
 
         watcher=<名字> 讓訂閱者報上身分,才會被算進在場名單;
@@ -768,7 +846,9 @@ def register_stream_route(app: FastAPI, hub: Hub) -> None:
             since_id = int(last_event_id)
 
         who = hub.identify_optional_reader(watcher, request)
-        subscription = hub.bus.subscribe(room, watcher=who)
+        # kind=agent 代表「這條線後面是 AI,可以派任務給它」。敲鈴器會這樣宣告,
+        # 瀏覽器不會 —— 所以人類永遠不會出現在派任務的選單裡。
+        subscription = hub.bus.subscribe(room, watcher=who, is_agent=(kind == "agent"))
 
         def to_sse(msg: dict) -> str:
             """把一則訊息包成直播的格式(id 那行讓瀏覽器記住進度)。"""
@@ -809,63 +889,29 @@ def register_agent_routes(app: FastAPI, hub: Hub) -> None:
     """成員名冊:列出有誰、報到加入、查看名片。"""
 
     @app.get("/agents")
-    async def agents_index():
+    async def agents_index(room: str = "main"):
+        """現在可以接任務的 agent —— 也就是【此刻連著線且自稱 agent】的那些。
+
+        ★ 這裡回答的是「現在能派給誰」,不是「歷史上有誰」。
+          一個 agent 關掉視窗就會從這裡消失,重開又回來 —— 這正是我們要的:
+          派任務給一個沒在跑的 agent,結果只會是逾時失敗,不如一開始就不讓你選。
+        """
         listing = []
-        for name in hub.agents.names():
+        for name in sorted(hub.bus.live_agents(room)):
             listing.append({"name": name,
                             "card": f"/agents/{name}/.well-known/agent-card.json"})
         return {"agents": listing}
 
-    @app.post("/agents", status_code=201)
-    async def register_agent(body: RegisterAgent):
-        """報到窗口:新成員憑邀請碼加入名冊,加入後回一張名片給他。
-
-        檢查順序固定,由寬到嚴:
-            功能有沒有開 → 邀請碼對不對 → 名字合不合法 → 是不是保留名
-            → 顏色有沒有搶系統色 → 資料會不會太大 → (上鎖)名字有沒有被用走
-        """
-        if not hub.invite_token:
-            return JSONResponse(status_code=403, content={
-                "error": "registration_closed",
-                "detail": "hub 未設定 INVITE_TOKEN,註冊功能關閉"})
-        if body.inviteToken != hub.invite_token:
-            return JSONResponse(status_code=403, content={"error": "bad_invite_token"})
-
-        name = sanitize_sender(body.name)
-        if name is None:
-            raise BadSenderError({"error": "bad_name",
-                                  "detail": "名字限 1-32 字的中英數與 - _,不含空白與 @"})
-        if name.lower() in a2a_mod.RESERVED_NAMES:
-            raise BadSenderError({"error": "reserved_name",
-                                  "detail": f"「{name}」是保留名(人類/基礎設施專用)"})
-        if body.color.lower() == a2a_mod.SEMANTIC_GREEN:
-            raise BadSenderError({"error": "semantic_color",
-                                  "detail": "語意綠 #00ff88 為系統獨占(點名/連線/NEW),sender 禁用"})
-        skills_text = json.dumps(body.skills, ensure_ascii=False)
-        if len(skills_text) > 2000 or len(body.skills) > 10:
-            raise BadSenderError({"error": "skills_too_large",
-                                  "detail": "skills 最多 10 項、總長 2000 字"})
-
-        # 上鎖是為了「兩個人同時用同一個名字報到」這種情況 —— 只能有一個成功。
-        async with hub.post_lock:
-            if hub.agents.taken_ci(name):
-                raise ConflictError({"error": "name_taken",
-                                     "detail": f"名字「{name}」已被使用(不分大小寫)"})
-            hub.agents.register(name, {"color": body.color.lower(),
-                                       "description": body.description,
-                                       "skills": body.skills})
-
-        # 開了認證才需要發鑰匙(沒開的話發了也沒人會驗)。
-        # 明文只在這裡出現這一次,之後檔案裡存的是指紋。
-        token = None
-        if hub.auth_enabled:
-            token = hub.token_store.issue(name)
-        return {"agentCard": hub.a2a_layer.agent_card(name), "token": token}
+    # 註:這裡曾經有一個 POST /agents 的報到窗口(憑邀請碼註冊、寫進 agents.json)。
+    # 2026-07-27 隨名冊動態化一起退役 —— 現在連上線就算成員,沒有註冊這個動作。
+    # 那扇門從開通到拆除,一次都沒有人走過。考古請看 git 歷史。
 
     @app.get("/agents/{name}/.well-known/agent-card.json")
     @app.get("/agents/{name}/.well-known/a2a-agent-card")   # 常見的路徑別名,一併支援
     async def agent_card(name: str):
-        if hub.agents.get(name) is None:
+        # 「這個 agent 存在嗎」= 「它現在連著線嗎」(不分房間 —— 名片是身分證,不是房卡)。
+        # 離線的 agent 沒有名片,因為你就算拿到名片也派不了任務給它。
+        if name not in hub.bus.all_live_agents():
             return JSONResponse(status_code=404, content={"error": "unknown agent"})
         return hub.a2a_layer.agent_card(name)
 
@@ -962,6 +1008,10 @@ def create_app(port: int | None = None, host: str | None = None,
         return JSONResponse(status_code=exc.status, content=exc.payload)
 
     app.add_exception_handler(ApiError, handle_api_error)
+
+    # 把 hub 掛在 app 上:測試(以及任何需要「從 app 取得內部狀態」的工具)
+    # 才有一個正式的入口,不必去猜閉包裡有什麼。
+    app.state.hub = hub
 
     register_page_routes(app, hub)
     register_room_routes(app, hub)

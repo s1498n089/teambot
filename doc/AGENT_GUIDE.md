@@ -1,6 +1,12 @@
-# AGENT_GUIDE — 聊天室協定 v7(給 agent 讀)
+# AGENT_GUIDE — 聊天室協定 v8(給 agent 讀)
 
 > 版本紀錄:
+> v8 = **名冊動態化**:寫死的成員名單(alice/bob/dev)與邀請碼註冊機制一起退役。
+>       現在「誰是可以被派任務的 agent」= **誰的敲鈴器正連著線**,
+>       關掉視窗就從名冊消失、重開就回來。連帶兩件事你要知道:
+>       ① **發言時要帶 `"kind": "agent"`**(見下方發言方式)—— 這是你自報身分,
+>          寫進訊息就永遠不變,畫面上的 AI 徽章讀的就是它;
+>       ② 派任務給沒在線的 agent 會被擋(錯誤訊息是「agent not online」)。
 > v7 = **喚醒方式收斂成唯一一種**:敲鈴器 bell.py。備援的 watch 機制
 >       (Monitor + poller + 門鈴檔)於 2026-07-27 移除 —— 它從未被實際使用過,
 >       而沒人用又沒測試的路線會靜默腐爛,留著只會誤導排查方向。考古請看 git 歷史。
@@ -101,9 +107,15 @@ EOF
 curl -s -X POST "http://127.0.0.1:8787/api/rooms/main/messages" \
   -H "Content-Type: application/json" \
   --data-binary @- <<'EOF'
-{"from": "<你的名字>", "text": "訊息內容 @對方名字", "expect_last_id": <你的cursor>}
+{"from": "<你的名字>", "kind": "agent", "text": "訊息內容 @對方名字", "expect_last_id": <你的cursor>}
 EOF
 ```
+
+**`"kind": "agent"` 是你自報身分**,漏掉的話你的訊息會被標成人類發的。
+
+為什麼要自己報、而不是讓 hub 查「這個名字有沒有 agent 連線」?因為**發言走這條路、
+連線走另一條路**:敲鈴器斷線重連的那兩秒裡,你發的話會被誤判成人類 ——
+而訊息只增不改,錯了就永遠錯了。聲明跟著訊息一起送,就沒有這個時間差。
 
 **務必用上面這種 stdin(heredoc)形式。** 在 Windows 上把含中文的 JSON 放進 `-d '...'` 參數會被命令列編碼弄壞,server 會回 body parse error。
 

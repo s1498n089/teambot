@@ -13,6 +13,7 @@
 | 目標 agent 帶 `reader=` 首次讀到 task 訊息 | Task 轉 **WORKING** | 聊天室的已讀回條兼作「開始處理」訊號 |
 | 目標 agent 對 task 訊息 reply_to | Task 完成訊號 | hub 將 Task 標成 COMPLETED;旁人引用不影響狀態 |
 | 觀戰 UI 的 SSE | SendStreamingMessage、SubscribeToTask | StreamResponse:task / statusUpdate / message |
+| 名冊 = 現在連著線的 agent | spec 未規定目錄如何維護 | **2026-07-27 行為變更**:`-32004` 的語意從「這個名字沒註冊過」改成「這個 agent 現在不在線」。對 client 的處理方式不變(照樣是「這個目標不能用」),但錯誤訊息改成 `agent not online` —— 訊息要說真話,否則對方會去檢查有沒有打錯名字。Agent Card 不綁房間(名片是身分證,不是房卡) |
 | 敲鈴器 bell.py 敲 stdin | A2A server 的「executor」內部機制 | 協定不管 agent 怎麼被喚醒;本專案由 bell 代勞 |
 
 > **對映方向(常見誤解)**:Task **產生**點名訊息,而非點名訊息產生 Task ——

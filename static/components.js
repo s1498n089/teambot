@@ -212,12 +212,16 @@ const MessageItem = {
     /**
      * 這則訊息是 AI 說的還是人類說的?
      *
-     * 判準是「在不在伺服器的成員名冊上」,不是另外標記的欄位 ——
-     * 因為那份名冊同時決定了「能不能被派任務」,兩者用同一份資料才不會打架。
-     * 人類接不了任務,所以名冊外的一律顯示成 HUMAN。
+     * ★ 直接讀訊息自己帶的 kind —— 不去查「這個名字現在是不是 agent」。
+     *
+     *   因為那是兩種壽命不同的事實:「這句話是誰說的」是歷史,永遠不變;
+     *   「他現在在不在線」是當下,隨時在變。如果拿後者來畫徽章,
+     *   alice 一斷線,她三個月前的訊息就會從 AI 變成人類 —— 歷史跟著網路閃爍。
+     *
+     *   舊訊息沒有 kind 欄位,但伺服器讀進來時已經補好了,這裡不必處理。
      */
     isAgent: function () {
-      return rt.agentNames.indexOf(this.m.from) !== -1;
+      return this.m.kind === "agent";
     },
 
     /**
@@ -324,7 +328,7 @@ const MessageItem = {
         <!-- 種類徽章:一眼看出這句話是 AI 說的還是人類說的。
              人類接不了 A2A 任務,所以這個區分在派任務時很實際。 -->
         <span class="kind-tag" :class="isAgent ? 'kind-ai' : 'kind-human'"
-              :title="isAgent ? '在成員名冊上,可以被派任務' : '不在成員名冊上,不能被派任務'"
+              :title="isAgent ? '這則訊息由 AI 發出' : '這則訊息由人類發出'"
         >{{ isAgent ? 'AI' : 'HUMAN' }}</span>
 
         <span v-if="m.task_id" class="task-badge" :class="badge.cls"
@@ -528,8 +532,10 @@ const ChatComposer = {
     <div class="task-bar mono" v-if="isTask">
       <span class="task-tag">TASK</span>
       <label>TO
-        <select v-model="target">
-          <option value="">選一位…</option>
+        <!-- 沒有 AI 在線時選單是空的 —— 那不是壞掉,是這個房間現在只有人類。
+             與其給一個點不出東西的空選單,不如直接說明白。 -->
+        <select v-model="target" :disabled="!targets.length">
+          <option value="">{{ targets.length ? "選一位…" : "目前沒有 AI 在線" }}</option>
           <option v-for="t in targets" :key="t.name" :value="t.name">
             {{ t.name }} {{ t.present ? "●" : "○" }}
           </option>
@@ -538,7 +544,8 @@ const ChatComposer = {
       <label>逾時
         <input class="deadline" type="number" min="5" max="3600" v-model="deadline"> 秒
       </label>
-      <span class="hint">送出後對方會收到帶 TASK 徽章的交辦,狀態全程可追蹤</span>
+      <span v-if="targets.length" class="hint">送出後對方會收到帶 TASK 徽章的交辦,狀態全程可追蹤</span>
+      <span v-else class="hint">任務只能派給 AI —— 把某個 agent 的敲鈴器開起來,它就會出現在這裡</span>
     </div>
 
     <div class="input-row">

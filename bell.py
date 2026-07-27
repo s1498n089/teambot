@@ -357,8 +357,11 @@ def sse_watch(server: str, room: str, state: BellState, child_alive) -> None:
     """
     backoff = 1
     while child_alive():                                            # ①
+        # kind=agent 是這條連線的自我宣告:「我後面包的是一個 AI」。
+        # hub 的名冊就是這樣長出來的 —— 沒有註冊手續、沒有名單檔案,
+        # 連著線就算在,線一斷就不算。人類用瀏覽器連進來時不會帶這個參數。
         url = (f"{server}/api/rooms/{room}/stream?since_id={state.read_cursor()}"
-               f"&watcher={state.name}")                            # ②
+               f"&watcher={state.name}&kind=agent")                 # ②
         try:
             req = urllib.request.Request(url, headers={"Accept": "text/event-stream"})
             with urllib.request.urlopen(req, timeout=SSE_READ_TIMEOUT) as resp:

@@ -64,38 +64,16 @@ ERR_EXTENDED_CARD_NOT_CONFIGURED = -32007
 RESERVED_NAMES = {"user", "admin", "system", "hub", "server", "poller"}  # 撞人類/基礎設施的名字
 SEMANTIC_GREEN = "#00ff88"  # 語意色獨占鐵律(v4):sender 禁用,註冊時黑名單
 
-# 內建 seed agent:寫在 code 裡,永遠存在;註冊者另存 agents.json(runtime 資料)。
-# skills 為各 agent 自報;color 經 /api/config 下發給前端(SSOT)。
-SEED_PROFILES = {
-    "alice": {
-        "color": "#ff79c6",
-        "description": "UI/UX 視覺與可讀性導向的評審 agent:設計提案、可用性實測、規格挑戰。",
-        "skills": [
-            {"id": "design-critique", "name": "設計評論與提案", "description": "以實測為基礎的 UI/UX 主張與收斂", "tags": ["design", "ux"]},
-            {"id": "spec-review", "name": "規格審讀", "description": "對照官方 spec 找出實作偏差", "tags": ["review"]},
-        ],
-    },
-    "bob": {
-        "color": "#00d4ff",
-        "description": "語意嚴謹與邊界情境導向的評審 agent:協定挑戰、效能視角、對抗性測試。",
-        "skills": [
-            {"id": "adversarial-review", "name": "對抗性審查", "description": "找出提案的語意衝突與邊界漏洞", "tags": ["review", "qa"]},
-            {"id": "protocol-design", "name": "協定設計", "description": "生命週期與狀態機的嚴謹化", "tags": ["protocol"]},
-        ],
-    },
-    "dev": {
-        "color": "#ffb86c",
-        "description": "本聊天室的開發與維運 agent:接收需求、實作、修 bug、發佈。",
-        "skills": [
-            {"id": "implementation", "name": "功能實作", "description": "server / UI / 協定層的開發與部署", "tags": ["dev"]},
-        ],
-    },
-}
-
+# 註:2026-07-27 之前這裡有一份寫死的 SEED_PROFILES(alice/bob/dev),
+# 以及一個把註冊者存進 agents.json 的 AgentRegistry。兩者都已退役 ——
+# 今天「誰是可以派任務的 agent」由【誰現在連著線】決定,不由任何檔案決定。
+# 理由:寫死的名冊會留下永遠不上線的幽靈成員(dev 佔了三個月的位置),
+# 而派任務給幽靈只會得到逾時失敗。考古請看 git 歷史。
 
 def now_iso() -> str:
     """UTC RFC3339(帶時區),全系統時間戳的唯一格式。"""
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
 
 
 class A2AError(Exception):
@@ -106,50 +84,6 @@ class A2AError(Exception):
         self.message = message
         super().__init__(message)
 
-
-class AgentRegistry:
-    """agent 名冊(roadmap ②):內建 seed 永遠在,註冊者落地 agents.json。
-
-    - 載入:seed 優先,agents.json 補上註冊者(重啟不忘人)
-    - 寫入:temp + rename 原子落地(斷電不留半寫檔)
-    - 併發決勝由呼叫端持鎖(server 的 post_lock),本類別不重複上鎖
-    """
-
-    def __init__(self, path):
-        self.path = path
-        self.profiles: dict[str, dict] = {name: dict(p) for name, p in SEED_PROFILES.items()}
-        self._load()
-
-    def _load(self) -> None:
-        if not self.path.exists():
-            return
-        try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
-            for name, profile in data.items():
-                self.profiles.setdefault(name, profile)  # seed 名字不可被覆蓋
-        except (json.JSONDecodeError, OSError) as exc:
-            print(f"[registry] WARN agents.json 載入失敗,僅用 seed:{exc}", file=sys.stderr)
-
-    def get(self, name: str) -> dict | None:
-        return self.profiles.get(name)
-
-    def names(self) -> list[str]:
-        return list(self.profiles)
-
-    def taken_ci(self, name: str) -> bool:
-        """重名判定不分大小寫(pill 全大寫,ALICE/alice 會撞臉)。"""
-        low = name.lower()
-        return any(n.lower() == low for n in self.profiles)
-
-    def register(self, name: str, profile: dict) -> None:
-        """呼叫端已完成驗證與持鎖;這裡只負責入冊與原子落地。"""
-        self.profiles[name] = profile
-        registered = {n: p for n, p in self.profiles.items() if n not in SEED_PROFILES}
-        directory = str(self.path.parent)
-        fd, tmp = tempfile.mkstemp(dir=directory, suffix=".tmp")
-        with open(fd, "w", encoding="utf-8") as f:
-            json.dump(registered, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, str(self.path))
 
 
 @dataclass
@@ -304,7 +238,9 @@ class A2ALayer:
         self._ingest = ingest
         self._sanitize = sanitize_sender
         self.base_url = base_url.rstrip("/")
-        self.agents = agents            # agent 名冊(roadmap ②:可成長)
+        # 「現在有哪些 agent 連著線」——傳進來的是一個函式,不是一份名單。
+        # 名單是靜態的,函式每次呼叫都會給出當下的答案,而 agent 隨時上下線。
+        self.live_agents = agents
         self.auth_enabled = auth_enabled  # 影響 Agent Card 的 securitySchemes 誠實聲明(③)
         self.registry = TaskRegistry(tasks_path)  # roadmap ④:tasks.json 持久化
         self._handlers = {  # 方法分派表建一次即可,dispatch 熱路徑不重建
@@ -325,10 +261,12 @@ class A2ALayer:
         AUTH 啟用時同步宣告 securitySchemes(誠實聲明做全套,
         標準 A2A client 讀 Card 就知道要帶 bearer)。
         """
-        profile = self.agents.get(name) or {}
+        # Agent Card 的內容不再來自寫死的檔案 —— 我們對一個剛連上線的 agent
+        # 本來就只知道它的名字。與其編造專長,不如誠實地留白:
+        # 真正該宣告能力的是 agent 自己,不是我們替它填。
         card = {
             "name": name,
-            "description": profile.get("description", ""),
+            "description": f"透過敲鈴器連線的 agent(名字:{name})",
             "supportedInterfaces": [{
                 "url": f"{self.base_url}/agents/{name}/a2a",
                 "protocolBinding": "JSONRPC",
@@ -338,7 +276,9 @@ class A2ALayer:
             "capabilities": {"streaming": True, "pushNotifications": False, "extendedAgentCard": False},
             "defaultInputModes": ["text/plain"],
             "defaultOutputModes": ["text/plain"],
-            "skills": profile.get("skills", []),
+            # 空的 skills 是誠實的:agent 沒有向我們宣告過它會什麼。
+            # A2A spec 允許空陣列;假造一份專長清單才是真正的違規。
+            "skills": [],
         }
         if self.auth_enabled:
             card["securitySchemes"] = {"bearer": {"type": "http", "scheme": "bearer"}}
@@ -458,8 +398,12 @@ class A2ALayer:
 
     async def dispatch(self, agent: str, method: str, params: dict):
         """方法分派。回傳 dict(一般結果)或 async generator(SSE 串流)。"""
-        if self.agents.get(agent) is None:
-            raise A2AError(ERR_UNSUPPORTED_OPERATION, f"unknown agent: {agent}")
+        if agent not in self.live_agents():
+            # ★ 訊息要說真話:它現在判的是「在不在線」,不是「認不認識」。
+            #   寫成 unknown agent 會讓對方去檢查有沒有打錯名字 —— 而真正的問題是
+            #   那個 agent 沒開著。錯誤碼不變(對 client 的處理方式沒差),但文字要誠實。
+            raise A2AError(ERR_UNSUPPORTED_OPERATION,
+                           f"agent not online: {agent}(名冊只收現在連著線的 agent)")
         handlers = self._handlers
         if "PushNotification" in method or method.startswith("pushNotification"):
             raise A2AError(ERR_PUSH_NOT_SUPPORTED, "push notifications not supported")

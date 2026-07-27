@@ -40,13 +40,36 @@ def make_app(isolated_base, monkeypatch):
     def _make(**env):
         for key, value in env.items():
             monkeypatch.setenv(key, value)
-        return server_mod.create_app(host="127.0.0.1")
+        app = server_mod.create_app(host="127.0.0.1")
+
+        # ★ 建好就讓 alice / bob「上線」。
+        #
+        #   2026-07-27 之前不需要這一步:名冊寫死在程式裡,誰都永遠在。
+        #   現在名冊是「誰連著線」,所以要派任務給 bob 之前得先有它的連線 ——
+        #   就像真實世界裡你得先把它的敲鈴器開起來。
+        #
+        #   放在這裡(而不是每個測試各寫一次)是因為絕大多數案例都需要它,
+        #   而「重啟」類的測試會建好幾個 app,漏掉任何一個都會得到看不懂的 -32004。
+        #   要測「派給離線的 agent」,自己 unsubscribe 掉即可。
+        for name in ("alice", "bob"):
+            bring_agent_online(app, name)
+        return app
     return _make
 
 
 @pytest.fixture
 def client(make_app):
-    """預設組態(AUTH off、註冊關閉)的 TestClient;with 觸發 lifespan(restore)。"""
+    """預設組態(AUTH off)的 TestClient;with 觸發 lifespan(restore)。
+
+    ★ 預設讓 alice 與 bob「上線」。
+
+      2026-07-27 之前不需要這一步,因為名冊寫死在程式裡,誰都永遠在。
+      現在名冊是「誰連著線」,所以測試要派任務給 bob 之前,
+      得先讓 bob 有一條連線 —— 就像真實世界裡你得先把它的敲鈴器開起來。
+
+      放在 fixture 而不是每個案例各寫一次,是因為絕大多數案例都需要它;
+      要測「派給離線的 agent」那種案例,自己 unsubscribe 掉即可。
+    """
     with TestClient(make_app()) as c:
         yield c
 
@@ -65,6 +88,19 @@ async def live_client(app):
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
             yield c
+
+
+def bring_agent_online(app, name: str, room: str = "main"):
+    """讓某個 agent「上線」—— 動態名冊時代的測試前置動作。
+
+    為什麼需要這個:名冊不再是寫死的清單,而是「現在誰連著線」。
+    所以測試裡要派任務給 bob 之前,得先讓 bob 有一條連線 ——
+    就像真實世界裡,你得先把 bob 的敲鈴器開起來。
+
+    直接建立訂閱而不是真的開一條 SSE,是因為測試要的只是「名冊上有他」這個事實,
+    不需要真的收推播。回傳那個訂閱,測試可以用它模擬離線(bus.unsubscribe)。
+    """
+    return app.state.hub.bus.subscribe(room, watcher=name, is_agent=True)
 
 
 def post_msg(client, room: str, sender: str, text: str, **kw):

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 
 import httpx
 import pytest
@@ -96,54 +97,6 @@ class TestAuth:
 
 # ---------- 動態註冊鏈 ----------
 
-class TestRegister:
-    PAYLOAD = {"name": "eve", "description": "d", "skills": [],
-               "color": "#aabbcc", "inviteToken": "secret"}
-
-    def test_closed_by_default_403(self, client):
-        assert client.post("/agents", json=self.PAYLOAD).status_code == 403
-
-    def test_wrong_token_403(self, make_app):
-        with TestClient(make_app(INVITE_TOKEN="right")) as c:
-            r = c.post("/agents", json={**self.PAYLOAD, "inviteToken": "wrong"})
-            assert r.status_code == 403
-
-    def test_full_chain(self, make_app):
-        with TestClient(make_app(INVITE_TOKEN="secret")) as c:
-            ok = c.post("/agents", json=self.PAYLOAD)
-            assert ok.status_code == 201 and ok.json()["agentCard"]["name"] == "eve"
-            # 保留名 / 語意綠 / 大小寫重名
-            assert c.post("/agents", json={**self.PAYLOAD, "name": "user"}).status_code == 422
-            assert c.post("/agents", json={**self.PAYLOAD, "name": "g",
-                                           "color": "#00FF88"}).status_code == 422
-            assert c.post("/agents", json={**self.PAYLOAD, "name": "EVE"}).status_code == 409
-            # 名冊與 config 即時可見
-            names = [a["name"] for a in c.get("/agents").json()["agents"]]
-            assert "eve" in names
-            assert "eve" in c.get("/api/config").json()["agents"]
-
-    def test_concurrent_same_name_single_winner(self, make_app):
-        app = make_app(INVITE_TOKEN="secret")
-
-        async def race():
-            transport = httpx.ASGITransport(app=app)
-            async with httpx.AsyncClient(transport=transport, base_url="http://t") as ac:
-                return await asyncio.gather(
-                    ac.post("/agents", json={**self.PAYLOAD, "name": "dave"}),
-                    ac.post("/agents", json={**self.PAYLOAD, "name": "DAVE"}))
-
-        r1, r2 = asyncio.run(race())
-        assert sorted([r1.status_code, r2.status_code]) == [201, 409]  # 一勝一敗
-
-    def test_registration_persists_across_restart(self, make_app):
-        with TestClient(make_app(INVITE_TOKEN="secret")) as c:
-            c.post("/agents", json=self.PAYLOAD)
-        with TestClient(make_app()) as c2:  # 同一個 BASE 重建 = 重啟
-            assert c2.get("/agents/eve/.well-known/agent-card.json").status_code == 200
-
-
-# ---------- SSE ----------
-
 async def collect_sse_frames(app, path: str, headers: list, n_frames: int, timeout: float = 5.0):
     """手動 ASGI 驅動 SSE 端點:收滿 n 個 data 幀就送 http.disconnect 終止串流。
 
@@ -172,6 +125,12 @@ async def collect_sse_frames(app, path: str, headers: list, n_frames: int, timeo
              "client": ("test", 1), "server": ("test", 80)}
     await asyncio.wait_for(app(scope, receive, send), timeout=timeout)
     return frames
+
+
+
+# 註:這裡曾經有 TestRegister —— 測「憑邀請碼註冊成員」的那套流程。
+# 2026-07-27 名冊改成「誰現在連著線」之後,註冊這個動作本身就不存在了,
+# 測試隨功能一起退役。考古請看 git 歷史。
 
 
 class TestSSE:
@@ -285,3 +244,53 @@ class TestPresence:
                 return names
 
             assert asyncio.run(flow())[0] == []  # 無 token 冒名 → 不計入
+
+
+class TestAgentKindWiring:
+    """「連線宣告自己是 agent」這條線的兩端。
+
+    bob 驗收時點出:其他測試用 conftest 的 bring_agent_online 直接建 Subscription,
+    那繞過了真實通道 —— 從網址上的 kind=agent 到伺服器內部的 is_agent 旗標。
+    線斷了的話所有測試照樣綠,而真實世界裡沒有 agent 進得了名冊。
+
+    ★ 覆蓋範圍:這裡測的是【兩端】——
+        送出端:敲鈴器組出來的網址確實帶 kind=agent
+        接收端:is_agent=True 的訂閱確實會進 live_agents、False 的不會
+
+      中間那段(HTTP query → FastAPI 參數 → subscribe)在這一層【故意不測】:
+      SSE 的連線永遠不會結束,同步客戶端進得去出不來 —— 第一版就是這樣掛死 120 秒的。
+
+      但它並非無人看守:考官測試(test_examiner_sdk,slow 層)跑的是真 server,
+      而且會【真的開一條 SSE 連線】宣告 kind=agent,再從 /agents 目錄確認它進了名冊 ——
+      那就是這條通道的端對端閉環。分層是刻意的:
+      快測試鎖兩端(毫秒級、跑得勤),慢測試驗整條線(秒級、跑得少)。
+    """
+
+    def test_送出端_敲鈴器的網址帶著_kind_agent(self):
+        import bell as bell_mod
+        source = inspect.getsource(bell_mod.sse_watch)
+        assert "kind=agent" in source, "敲鈴器沒有宣告自己包的是 agent"
+        assert "watcher=" in source
+
+    def test_接收端_宣告_agent_的訂閱會進名冊(self, make_app):
+        bus = make_app().state.hub.bus
+        bus.subs.clear()
+        bus.subscribe("w", watcher="zed", is_agent=True)
+        assert "zed" in bus.live_agents("w")
+
+    def test_接收端_沒宣告的訂閱只算在場_不算_agent(self, make_app):
+        """瀏覽器就是這樣連的 —— 人類要算在場,但不該出現在派任務名冊。"""
+        bus = make_app().state.hub.bus
+        bus.subs.clear()
+        bus.subscribe("w", watcher="kevin")
+        assert "kevin" not in bus.live_agents("w")
+        assert "kevin" in bus.watchers("w")
+
+    def test_連線消失後就不在名冊上(self, make_app):
+        """這正是 dev 問題的解法:關掉視窗就從名冊消失。"""
+        bus = make_app().state.hub.bus
+        bus.subs.clear()
+        sub = bus.subscribe("w", watcher="zed", is_agent=True)
+        assert "zed" in bus.live_agents("w")
+        bus.unsubscribe("w", sub)
+        assert "zed" not in bus.live_agents("w")

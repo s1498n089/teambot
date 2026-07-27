@@ -11,6 +11,7 @@ tmp 部署副本 → 真 uvicorn 子行程 → 官方 SDK 型別逐一驗證回�
 """
 from __future__ import annotations
 
+import json
 import shutil
 import socket
 import subprocess
@@ -126,6 +127,23 @@ def test_official_sdk_examiner(tmp_path):
         else:
             pytest.fail("server 子行程未在時限內就緒")
 
+        # ★ 讓 bob「上線」—— 這裡跑的是真 server,所以要用真實的方式:開一條直播連線,
+        #   並在網址上宣告 kind=agent。這正是敲鈴器每次啟動時做的事。
+        #
+        #   2026-07-27 之前不需要這步:名冊寫死在程式裡,bob 永遠存在。
+        #   現在名冊是「誰連著線」,沒有這條連線,bob 連 Agent Card 都拿不到(404)。
+        agent_link = urllib.request.urlopen(
+            f"{base}/api/rooms/exam/stream?watcher=bob&kind=agent", timeout=5)
+        for _ in range(25):   # 等 hub 那邊真的把這條連線登記進名冊
+            # /agents 是 per-room 的(UI 的派任務選單要知道「這個房間有誰」),
+            # 而 bob 掛在 exam 房 —— 不帶 room 會查到 main,永遠等不到。
+            listing = json.load(urllib.request.urlopen(f"{base}/agents?room=exam"))
+            if any(a["name"] == "bob" for a in listing["agents"]):
+                break
+            time.sleep(0.2)
+        else:
+            pytest.fail("bob 的連線沒有進到名冊")
+
         exam = tmp_path / "examiner.py"  # 放在專案外,import a2a = 官方 SDK
         exam.write_text(EXAMINER_SCRIPT, encoding="utf-8")
         result = subprocess.run([PYTHON, str(exam), base], cwd=tmp_path,
@@ -133,4 +151,8 @@ def test_official_sdk_examiner(tmp_path):
         assert result.returncode == 0, f"考官失敗:\n{result.stdout}\n{result.stderr}"
         assert "EXAMINER PASS" in result.stdout
     finally:
+        try:
+            agent_link.close()
+        except Exception:
+            pass
         proc.kill()
