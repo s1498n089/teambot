@@ -49,6 +49,24 @@
    第一部分:找出文字裡的特殊語法用的規則(正規表示式)
    ─────────────────────────────────────────────────────────────────────── */
 
+/* ★ 先講這一區三顆規則的 g 旗標,因為它決定了它們【能怎麼用】。
+
+   帶 g 的正規表示式【有記憶】:它會記住上次比對到哪裡(lastIndex),
+   下次從那裡繼續。這對「一次找出全部」很方便,對「問一個是非題」是災難 ——
+   同一顆規則連續 .test() 同一段文字,答案會 true、false、true、false 交替出現。
+
+   這裡的分工是:
+
+     URL_PATTERN      帶 g,只餵給 .split()   —— split 不看 lastIndex,安全
+     getMentionRegex  帶 g,只餵給 .split()   —— 同上,而且它還被快取重複使用
+     INLINE_SYNTAX    不帶 g,餵給 .exec()    —— 靠外面的 slice 自己往前走
+
+   ⚠️ 帶 g 的那兩顆【不准拿去 .test() 或 .exec()】。
+      最容易犯的是拿 getMentionRegex 去問「這則訊息有沒有點名我」——
+      那會是隔一次才對的鬼故障(true、false、true……),
+      而且看起來完全不像跟這裡有關。
+      真要做那種判斷,現場 new RegExp(pattern) 建一顆乾淨的。 */
+
 // 網址。只吃 ASCII 字元,所以中文和全形標點會自然成為網址的結尾。
 const URL_PATTERN = /(https?:\/\/[A-Za-z0-9\-._~:/?#@!$&*+;=%()\[\]]+)/g;
 
@@ -74,8 +92,25 @@ const INLINE_SYNTAX = new RegExp(
   "(`[^`\\n]+`)" +                      // 群組 1:`程式碼`
   "|(\\*\\*\\S(?:[^*]*\\S)?\\*\\*)" +   // 群組 2:**粗體**
   "|(\\*\\S(?:[^*\\n]*\\S)?\\*)" +      // 群組 3:*斜體*
-  "|(!?\\[[^\\]\\n]*\\]\\([^)\\s]+\\))" // 群組 4:[文字](網址) 或 ![說明](圖片網址)
+  "|(!?\\[[^\\]\\n]*\\]\\([^)\\s]+\\))" // 群組 4:[文字](網址),開頭的 ! 也吃(見下)
 );
+
+/* ★ 圖片語法 ![說明](網址) 會被認出來,但【故意只做成連結,不做成圖片】。
+   上面群組 4 開頭那個 !? 就是在吃那個驚嘆號;吃完之後走的是連結那條路,
+   所以 ![貓](https://x/cat.png) 顯示成一個文字是「貓」的可點連結。
+
+   這【不是還沒做】,是刻意不做,理由有兩層:
+
+     ① 隱私:自動載圖等於【每個看聊天室的人都對那個網址發出一次請求】。
+        貼圖的人因此拿得到所有讀者的 IP 與讀訊息的時間 —— 一則訊息變成追蹤器。
+     ② 版面:外部圖片的尺寸不受控,一張大圖就能把整個聊天室的排版壓垮。
+
+   降級成連結的意思是「你想看就自己點,自己承擔」。
+   這跟檔案開頭那條「不產生任何 HTML」是同一條防線的延伸:
+   別人的文字不該讓我的瀏覽器替他做事。
+
+   ⚠️ 這條有測試鎖著:mdtest.html 的「安全:圖片語法只做成連結」。
+      想加圖片支援的人會在這裡與那裡各被擋一次 —— 理由在源頭,鎖在測試。 */
 
 // 把 [文字](網址) 拆成「文字」和「網址」兩部分。開頭的驚嘆號(圖片語法)一起吃掉。
 const LINK_PARTS = /^!?\[([^\]\n]*)\]\(([^)\s]+)\)$/;
@@ -88,7 +123,7 @@ const SAFE_URL_PREFIX = /^https?:\/\//i;
 const CODE_FENCE = /^\s*```(.*)$/;                    // ``` 開始或結束一段程式碼
 const HEADING = /^\s*(#{1,6})\s+(.*)$/;               // # 標題,井字號數量就是層級
 const LIST_ITEM = /^\s*(?:[-*+]|\d+\.)\s+(.*)$/;      // - 項目 或 1. 項目
-const QUOTE_LINE = /^\s*>\s?(.*)$/;                   // > 引用
+const QUOTE_LINE = /^\s*>\s?(.*)$/;                   // > 引用(括號裡是去掉 > 之後的內容)
 const TABLE_ROW = /^\s*\|(.*)\|\s*$/;                 // | 欄 | 欄 |
 const TABLE_SEPARATOR = /^\s*\|[\s:|-]+\|\s*$/;       // |---|---| 這種分隔線
 
@@ -346,6 +381,32 @@ function parseTableRow(line, mentionPattern) {
    ─────────────────────────────────────────────────────────────────────── */
 
 /**
+ * 判斷第 index 行是不是一張表格的開頭。
+ *
+ * 為什麼要三個條件而不是「這行是表格列」就好:句子裡出現的直線很常見
+ * (例如「A | B 二選一」),只看這一行會把普通句子誤判成表格。
+ * 必須下一行是 |---|---| 那種分隔線才算數。
+ *
+ * ★ 抽成函式是因為這個條件【原本一字不差地寫了兩遍】——
+ *   startsNewBlock 一份、parseMarkdownBlocks 一份。三段式條件抄兩份很危險:
+ *   哪天放寬表格規則卻只改了一處,結果會是「表格被段落吃掉」
+ *   或「段落被當成表格」,而且兩種都不會報錯,只會默默畫錯。
+ *
+ * @param {Array}  lines 全部的行
+ * @param {number} index 要判斷第幾行
+ * @returns {boolean} 這一行是不是表格的開頭
+ */
+function looksLikeTableAt(lines, index) {
+  if (!TABLE_ROW.test(lines[index])) {
+    return false;
+  }
+  if (index + 1 >= lines.length) {
+    return false;
+  }
+  return TABLE_SEPARATOR.test(lines[index + 1]);
+}
+
+/**
  * 判斷某一行是不是「新的一塊」的開頭。
  * 段落會一直往下吃,直到遇到空行或另一塊的開頭為止 —— 所以每次新增一種
  * 塊,這裡就要跟著讓一次路,否則新的塊會被段落吃掉。
@@ -366,11 +427,10 @@ function startsNewBlock(lines, index) {
   if (LIST_ITEM.test(line)) {
     return true;
   }
-  if (line.trim().charAt(0) === ">") {
+  if (QUOTE_LINE.test(line)) {
     return true;
   }
-  // 表格要「這一行是表格列」而且「下一行是分隔線」才算數
-  if (TABLE_ROW.test(line) && index + 1 < lines.length && TABLE_SEPARATOR.test(lines[index + 1])) {
+  if (looksLikeTableAt(lines, index)) {
     return true;
   }
   return false;
@@ -433,12 +493,9 @@ function parseMarkdownBlocks(text, mentionPattern) {
     }
 
     // ── 情況三:表格 ──
-    // 必須「表頭 + 分隔線」都在才算表格,否則句子裡出現的直線會被誤判
-    const looksLikeTable = TABLE_ROW.test(line)
-      && index + 1 < lines.length
-      && TABLE_SEPARATOR.test(lines[index + 1]);
-
-    if (looksLikeTable) {
+    // 判斷條件抽在 looksLikeTableAt,startsNewBlock 用的是同一個 ——
+    // 兩處必須永遠一致,否則段落與表格會互相吃掉對方。
+    if (looksLikeTableAt(lines, index)) {
       const header = parseTableRow(line, mentionPattern);
       index = index + 2;                    // 跳過表頭與分隔線
 
@@ -468,10 +525,12 @@ function parseMarkdownBlocks(text, mentionPattern) {
     }
 
     // ── 情況五:> 引用 ──
-    if (line.trim().charAt(0) === ">") {
+    // 用 QUOTE_LINE.test 而不是手寫 charAt 檢查:六種塊、六條規則、
+    // 六個長得一樣的判斷句 —— 下一個要加第七種塊的人才有明確的樣板可抄。
+    if (QUOTE_LINE.test(line)) {
       const quoteLines = [];
 
-      while (index < lines.length && lines[index].trim().charAt(0) === ">") {
+      while (index < lines.length && QUOTE_LINE.test(lines[index])) {
         const quoteText = lines[index].match(QUOTE_LINE)[1];
         quoteLines.push(parseInline(quoteText, {}, mentionPattern));
         index = index + 1;
