@@ -12,7 +12,8 @@
 就往子行程的 stdin 敲一行固定鈴聲。agent 看到鈴聲照對帳鐵則辦事。
 
 設計要點:
-- 鈴聲固定單行:BELL_TEXT + BELL_SUBMIT(ConPTY 的送出鍵是 \r,不是 \n — T2.5 生死關卡)
+- 鈴聲固定單行:BELL_TEXT + BELL_SUBMIT。**送出鍵一定要用 \r,不能用 \n** ——
+  實測過:對真正的 CLI 送 \n,鈴聲只會躺在輸入框裡不送出,agent 永遠不會醒
 - 自己發言不會被敲:發言後 cursor 已推進,last_id 不再領先(老規矩,零額外機制)
 - 重敲保險:敲後 RE_RING_SECONDS 內 cursor 未推進且仍落後 → 再敲,上限 MAX_RINGS 次
   (agent 可能正在生成中漏聽;超過上限就安靜,印警告請人類看一眼)
@@ -118,7 +119,9 @@ from envfile import load_env_file
 BASE = Path(__file__).resolve().parent
 
 BELL_TEXT = "[A2A-BELL] cursor updated"
-BELL_SUBMIT = "\r"          # ConPTY/TUI 的送出鍵(T2.5:對真 CLI 驗證會自動成為 prompt)
+# 送出鍵。★ 一定是 \r 不是 \n:實測對真正的 CLI 送 \n,那行字會躺在輸入框裡
+# 不送出,agent 就永遠不會醒 —— 而且畫面上看起來「鈴有敲到」,最難查的那種。
+BELL_SUBMIT = "\r"
 RE_RING_SECONDS = 90        # 敲後多久 cursor 仍未推進就重敲
 MAX_RINGS = 3               # 同一段落後最多敲幾次,之後改印警告(不騷擾設計)
 SSE_READ_TIMEOUT = 60       # server 每 15 秒有 keep-alive,60 秒沒動靜視為死連線
@@ -204,9 +207,19 @@ class BellState:
       (這個「一邊寫、另一邊讀、彼此不協調」的結構,來歷見 doc/TUTORIAL.md 第 3 章)
     """
 
-    def __init__(self, cursor_path: Path, ring_fn):
+    def __init__(self, cursor_path: Path, ring_fn, name: str, server: str, room: str):
         self.cursor_path = cursor_path
         self.ring_fn = ring_fn
+
+        # 這三個是「我是誰、要盯哪台的哪個房間」——sse_watch 會用到。
+        # ★ 它們曾經是建好物件之後才從外面塞進來的(state.name = ...)。
+        #   那樣做程式照跑,但有兩個實際壞處:讀這個類別的定義看不出它有這些欄位,
+        #   而且漏塞其中一個,錯誤要等到 sse_watch 連線時才炸。
+        #   收進建構式之後,「少給一個就建不起來」變成結構保證,不必靠記性。
+        self.name = name
+        self.server = server
+        self.room = room
+
         self.known_last_id = 0
         self.rings_this_gap = 0
         self.last_ring_at = 0.0
@@ -214,6 +227,17 @@ class BellState:
         self.lock = threading.Lock()
 
     def read_cursor(self) -> int:
+        """讀這個 agent 的進度書籤。讀不到就回 0。
+
+        ★ 回 0 的意思是「當作他一則都沒讀過」,所以他會被叫醒。這是刻意選的方向:
+
+            回 0        → 最壞情況是白醒一次(無害,他對帳後發現沒新訊息就回去睡)
+            回最新編號  → 最壞情況是【永遠不叫他】,而且安靜到沒有人會發現
+
+        兩種錯的代價差很多,所以寧可吵也不要漏 —— 檔案讀不到(還沒建立、
+        權限問題、內容壞掉)本來就是異常狀態,異常時要往「會被注意到」的方向倒。
+        別把它「優化」成安靜的那一邊。
+        """
         try:
             return int(self.cursor_path.read_text(encoding="utf-8").strip() or "0")
         except (OSError, ValueError):
@@ -348,6 +372,18 @@ def sse_watch(server: str, room: str, state: BellState, child_alive) -> None:
         如果 hub 掛了,你每秒重連一次,等於在對方最脆弱的時候一直敲門。
         所以等待時間是 1 → 2 → 4 → 8 → 16 → 30 → 30…(封頂 30 秒)。
         封頂是另一個考量:不能無限加倍,否則對方復活了你還要等好幾分鐘才發現。
+
+    ── 一個平台差異,讀這裡的人容易漏掉 ──
+
+        `child_alive` 在 Windows 是真的去問子行程還在不在;
+        **但在 POSIX 端它永遠回 True**(見 run_posix 裡 alive() 的說明)。
+
+        也就是說:**POSIX 上這個函式的外層迴圈永遠不會自己結束**,
+        連 ⑤ 那個 return 也不會發生。它靠的是執行緒被標記為 daemon ——
+        主迴圈(讀子行程輸出那個)收工時,整個程式退出,這條執行緒跟著被回收。
+
+        這不是疏漏,是兩邊各自選了最省事的做法。但如果你在改結束邏輯,
+        要記得「有一邊根本不看 child_alive」。
 
     ── 最後,這裡藏著整個專案的鐵則 ──
 
@@ -834,11 +870,10 @@ def main() -> int:
             """真正的「敲鈴」動作:往子行程送一行固定暗號 + 送出鍵。"""
             return write_fn(BELL_TEXT + BELL_SUBMIT)
 
-        state = BellState(cursor_path, ring_the_bell)
-        state.name = args.name
-        state.server = args.server.rstrip("/")
-        state.room = args.room
-        return state
+        return BellState(cursor_path, ring_the_bell,
+                         name=args.name,
+                         server=args.server.rstrip("/"),
+                         room=args.room)
 
     log(f"啟動:name={args.name} server={args.server} room={args.room} cmd={' '.join(cmd)}")
     # 為什麼是 "nt" 不是 "windows"?os.name 只有 'posix' 與 'nt' 兩個值(官方原話),

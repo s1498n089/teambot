@@ -278,7 +278,10 @@ class TestBellState:
         cursor_file = tmp_path / "cursor-x.txt"
         cursor_file.write_text(str(cursor), encoding="utf-8")
         rings = []
-        state = bell_mod.BellState(cursor_file, lambda: rings.append(1))
+        # name/server/room 是建構需求(2026-07-27 起收進 __init__)——
+        # 這幾個測試不碰它們,但少給就建不起來,那正是把它們收進來的目的。
+        state = bell_mod.BellState(cursor_file, lambda: rings.append(1),
+                                   name="x", server="http://test", room="main")
         return state, rings, cursor_file
 
     def test_ring_only_when_behind(self, tmp_path):
@@ -309,7 +312,8 @@ class TestBellState:
         monkeypatch.setattr(bell_mod, "LOG_PATH", tmp_path / "bell.log")
         cursor_file = tmp_path / "cursor-x.txt"
         cursor_file.write_text("0", encoding="utf-8")
-        bell_mod.BellState(cursor_file, ring_fn).on_message(1)
+        bell_mod.BellState(cursor_file, ring_fn,
+                           name="x", server="http://test", room="main").on_message(1)
         return (tmp_path / "bell.log").read_text(encoding="utf-8")
 
     def test_failed_ring_is_logged(self, tmp_path, monkeypatch):
@@ -326,7 +330,8 @@ class TestBellState:
         monkeypatch.setattr(bell_mod, "RE_RING_SECONDS", 0)
         cursor_file = tmp_path / "cursor-x.txt"
         cursor_file.write_text("0", encoding="utf-8")
-        state = bell_mod.BellState(cursor_file, lambda: False)
+        state = bell_mod.BellState(cursor_file, lambda: False,
+                                   name="x", server="http://test", room="main")
         for _ in range(10):
             state.on_message(1)
         assert state.rings_this_gap == bell_mod.MAX_RINGS  # 照樣封頂
