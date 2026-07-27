@@ -215,6 +215,17 @@ const MessageItem = {
     },
 
     /**
+     * 這則訊息是 AI 說的還是人類說的?
+     *
+     * 判準是「在不在伺服器的成員名冊上」,不是另外標記的欄位 ——
+     * 因為那份名冊同時決定了「能不能被派任務」,兩者用同一份資料才不會打架。
+     * 人類接不了任務,所以名冊外的一律顯示成 HUMAN。
+     */
+    isAgent: function () {
+      return rt.agentNames.indexOf(this.m.from) !== -1;
+    },
+
+    /**
      * 這則有沒有點到「我」。
      * 綠色永遠只代表「跟我有關」,不會因為把鏡頭交給別人而失效 ——
      * 這條規則是刻意的:警示色一旦有兩種意思就不可靠了。
@@ -315,7 +326,14 @@ const MessageItem = {
         <span class="pill" :class="{ unreg: !registered }"
               :style="{ color: senderColor, borderColor: senderColor }">{{ m.from.toUpperCase() }}</span>
 
-        <span v-if="!registered" class="unreg-tag">UNREGISTERED</span>
+        <!-- 種類徽章:一眼看出這句話是 AI 說的還是人類說的。
+             人類接不了 A2A 任務,所以這個區分在派任務時很實際。 -->
+        <span class="kind-tag" :class="isAgent ? 'kind-ai' : 'kind-human'"
+              :title="isAgent ? '在成員名冊上,可以被派任務' : '不在成員名冊上,不能被派任務'"
+        >{{ isAgent ? 'AI' : 'HUMAN' }}</span>
+
+        <!-- 名字既不在名冊、也不是已知的人類預設名時,額外提醒一句 -->
+        <span v-if="!registered && !isAgent" class="unreg-tag">UNREGISTERED</span>
 
         <span v-if="m.task_id" class="task-badge" :class="badge.cls"
               :title="badgeTitle" @click="$emit('open-task', m.task_id)">{{ badgeText }}</span>

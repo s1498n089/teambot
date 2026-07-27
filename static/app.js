@@ -40,6 +40,18 @@ const rt = reactive({
   mentionPattern: "(?<![A-Za-z0-9_@.-])(@[\\w一-鿿-]+)",
   palette: { user: "#c9d1d9" },        // 人類的預設顏色;agent 的顏色由伺服器指定
   authEnabled: false,                  // 伺服器有沒有開認證(有的話畫面要多一個 token 欄)
+
+  /* 成員名冊(伺服器給的),用來分辨「這個名字是 AI 還是人類」。
+
+     ★ 為什麼不直接看 palette?因為 palette 裡塞了 user 的預設顏色 ——
+       那是「畫面用的顏色表」,不是「誰是 AI 的名單」。混用會把人類算成 AI。
+
+     判準本身很單純:【在名冊上 = AI,不在名冊 = 人類】。
+     這不是我們自己發明的規則,而是伺服器早就在用的那一條 ——
+     派任務給名冊外的名字會被協定層當場擋掉(unknown agent)。
+     所以畫面上的標記與「能不能接任務」永遠一致,
+     不可能出現「看起來是 AI 卻派不了任務」這種矛盾。 */
+  agentNames: [],
 });
 
 /* api.js 需要「跟使用者說話」的能力,但它在畫面建好之前就先造好了。
@@ -394,11 +406,14 @@ createApp({
         rt.authEnabled = !!config.authEnabled;
 
         const palette = { user: "#c9d1d9" };
+        const agentNames = [];
 
         for (const name of Object.keys(config.agents)) {
           palette[name] = config.agents[name].color;
+          agentNames.push(name);
         }
         rt.palette = palette;
+        rt.agentNames = agentNames;
       } catch (error) {
         // 預設值已經在 rt 裡了,不做事就是正確的處理
       }
@@ -507,6 +522,11 @@ createApp({
 
     isRegistered(name) {
       return name in rt.palette;
+    },
+
+    /** 這個名字是不是 AI?依據是伺服器給的成員名冊(見 rt.agentNames 的說明)。 */
+    isAgent(name) {
+      return rt.agentNames.indexOf(name) !== -1;
     },
 
     /**
