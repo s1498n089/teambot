@@ -448,6 +448,19 @@ class A2ALayer:
         #   **改的時候要一起改**:只改一邊,同一個請求會在兩處被解讀成不同的發送者。
         meta_in = {**(message.get("metadata") or {}), **(params.get("metadata") or {})}
         sender = self._sanitize(str(meta_in.get("senderName", ""))) or "a2a-client"
+
+        # ★ 發送方是 AI 還是人類 —— 自報,預設 human。
+        #
+        #   為什麼要有這個欄位:task 會在房間裡長出一則訊息,而那則訊息跟所有訊息一樣
+        #   要帶 kind(畫面上的 AI / HUMAN 徽章讀的就是它,而且寫進去就永遠不變)。
+        #   這裡曾經完全沒傳,於是 ingest 用預設值 human —— **agent 透過 A2A 派的任務
+        #   會掛上 HUMAN 徽章**。之所以一直沒被發現,是因為到目前為止都是人類用 UI 派的。
+        #
+        #   為什麼預設 human 而不是 agent:與聊天門同一個哲學(見 server.py 的 append)——
+        #   身分是自己聲明的,而不聲明的一律當人類。未知的外部 client 更可能是腳本或人,
+        #   把它們預設成 agent 等於讓「AI 說的話」這個標記變便宜。
+        sender_kind = str(meta_in.get("senderKind", "human"))
+
         deadline = float(meta_in.get("deadlineSeconds", DEFAULT_DEADLINE_SECONDS))
         deadline = max(MIN_DEADLINE_SECONDS, min(MAX_DEADLINE_SECONDS, deadline))
 
@@ -464,7 +477,8 @@ class A2ALayer:
 
         # 入流:帶 task_id、把目標 agent 注入 mentions 以觸發喚醒鏈
         feed_msg = await self._ingest(room=context, sender=sender, text=text,
-                                      task_id=task.id, extra_mentions=[agent])
+                                      task_id=task.id, extra_mentions=[agent],
+                                      kind=sender_kind)
         self.registry.bind_feed(task, feed_msg["id"])
         task.deadline_handle = asyncio.get_running_loop().create_task(self._deadline_watch(task))
         return task

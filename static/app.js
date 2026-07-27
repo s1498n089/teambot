@@ -336,6 +336,16 @@ createApp({
 
       for (const agent of this.agents) {
         targets.push({
+          /* ★ present 目前【恆為 true】,而那不是 bug,是名冊動態化的必然:
+             this.agents 來自 GET /agents,而伺服器那邊回的就是「此刻連著線的 agent」——
+             所以能出現在這份清單裡的,必然也在 present 裡。
+
+             名冊還寫死在程式裡的時候這個判斷有意義(名單上的人可以是離線的),
+             動態化之後就沒有離線的成員了 —— 因為離線就不在名單上。
+
+             留著不刪的理由:它是「畫面顯示的在線狀態」與「伺服器認定的在線」
+             之間的接縫。哪天名冊改成含歷史成員(例如做「最近合作過的 agent」),
+             ○ 就會重新出現,而這一行不必改。 */
           name: agent.name,
           present: this.present.includes(agent.name),
         });

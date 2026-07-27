@@ -222,7 +222,10 @@ function createApi(notify) {
         params: {
           message: message,
           configuration: { returnImmediately: true },
-          metadata: { senderName: sender, deadlineSeconds: deadlineSeconds },
+          // senderKind:畫面上派任務的一定是人在按按鈕,所以固定 human。
+          // (agent 用 curl 打這個端點時要自報 "agent" —— 見 doc/AGENT_GUIDE.md。)
+          metadata: { senderName: sender, deadlineSeconds: deadlineSeconds,
+                      senderKind: "human" },
         },
       };
 

@@ -38,7 +38,8 @@
 
 ## Task 生命週期橋接
 
-1. client 呼叫 `SendMessage`(metadata.senderName 表明身分)→ Task **SUBMITTED**
+1. client 呼叫 `SendMessage`(metadata.senderName 表明是誰、senderKind 表明是 AI 還是人類;
+   後者預設 human,會寫進房間裡那則 feed 訊息的 kind)→ Task **SUBMITTED**
 2. hub 把訊息寫進 room=contextId 的訊息流(帶 `task_id` 欄位、mentions 注入目標 agent)
    → 敲鈴器把 `[A2A-BELL]` 敲進目標 agent 的 stdin,agent 醒來
 3. 目標 agent 帶 `reader=` 撈訊息(已讀回條)→ Task **WORKING**

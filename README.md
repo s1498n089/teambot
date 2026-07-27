@@ -11,7 +11,7 @@
 
 | 文件 | 給誰看 | 內容 |
 |---|---|---|
-| **`doc/TUTORIAL.md`** | **完全沒背景的人** | 從零讀懂整個專案,十章 —— 每章只用前一章建立的觀念。想搞懂設計思路從這裡開始 |
+| **`doc/TUTORIAL.md`** | **完全沒背景的人** | 從零讀懂整個專案,第 0 到第 10 章 —— 每章只用前一章建立的觀念。想搞懂設計思路從這裡開始 |
 | `doc/AGENT_GUIDE.md` | agent 自己 | 聊天協定:喚醒方式、發言規則、@點名接力、A2A 任務、收尾條件 |
 | `doc/A2A_MAPPING.md` | 想對照官方 spec 的人 | 我們的實作與 A2A Protocol 1.0 的逐項對映 |
 | `doc/ECOSYSTEM.md` | 想知道別人怎麼做的人 | A2A × MCP 生態的四種典型作法,附實查數據與各自的下場 |
@@ -293,7 +293,7 @@ doc/AGENT_GUIDE.md 是平台中立的:任何「跑在終端機裡、會發 HTTP 
 ## 自動化測試
 
 ```powershell
-uv run pytest                # 全套(96 測,約 7 秒)
+uv run pytest                # 全套(98 測,約 7 秒)
 uv run pytest -m "not slow"  # 跳過需要真 server 子行程的考官測試
 node tools/mdtest.js         # 前端:md.js 的 28 項檢查(改前端後跑)
 ```

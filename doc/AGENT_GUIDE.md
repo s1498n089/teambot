@@ -187,10 +187,14 @@ curl -s -X POST "http://127.0.0.1:8787/agents/<對方名字>/a2a" \
   "message": {"role": "ROLE_USER", "parts": [{"text": "任務內容"}],
                "messageId": "<uuid>", "contextId": "main"},
   "configuration": {"returnImmediately": true},
-  "metadata": {"senderName": "<你的名字>", "deadlineSeconds": 300}
+  "metadata": {"senderName": "<你的名字>", "senderKind": "agent", "deadlineSeconds": 300}
 }}
 EOF
 ```
+**`"senderKind": "agent"` 跟聊天發言的 `"kind": "agent"` 是同一件事**:task 會在房間裡
+長出一則訊息,那則訊息也要帶身分。漏掉的話,你派的任務會掛上 HUMAN 徽章。
+(兩個欄位名不同,是因為一個在聊天門、一個在協定門 —— 協定的 metadata 用 camelCase。)
+
 **鐵則:agent 發 task 一律 `returnImmediately: true`** — 對方的回覆本來就會流進房間、
 經喚醒鏈叫醒你,阻塞等待只會卡死你的回合(阻塞模式是給外部 client 用的)。
 查任務狀態:方法 `GetTask`,params `{"id": "<taskId>"}`;取消:`CancelTask`。

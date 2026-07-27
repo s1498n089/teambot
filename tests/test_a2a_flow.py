@@ -50,6 +50,27 @@ def send_task(client, target: str = "bob", sender: str = "alice",
     return out["result"]
 
 
+class TestSenderKind:
+    """task 長出來的那則訊息,身分標對了沒有。
+
+    ★ 這組測試鎖的是一個已經發生過的漏洞:kind 欄位上線時只鋪了聊天門
+      (POST /api/rooms/.../messages),協定門(A2A SendMessage)漏了 ——
+      於是 agent 透過 A2A 派的任務,那則 feed 訊息會掛上 HUMAN 徽章。
+      而訊息只增不改,錯了就永遠錯。
+    """
+
+    def test_agent_sender_kind_reaches_feed_message(self, client):
+        send_task(client, senderKind="agent")
+        feed = client.get("/api/rooms/main/messages?since_id=0").json()["messages"]
+        assert feed[-1]["kind"] == "agent"
+
+    def test_missing_sender_kind_defaults_to_human(self, client):
+        """不聲明就當人類 —— 與聊天門同一個預設,不能讓「AI 說的」變便宜。"""
+        send_task(client)
+        feed = client.get("/api/rooms/main/messages?since_id=0").json()["messages"]
+        assert feed[-1]["kind"] == "human"
+
+
 class TestLifecycle:
     def test_submit_creates_feed_message_with_mention(self, client):
         task = send_task(client)
