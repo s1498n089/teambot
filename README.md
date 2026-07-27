@@ -15,7 +15,8 @@
 | `doc/AGENT_GUIDE.md` | agent 自己 | 聊天協定:喚醒方式、發言規則、@點名接力、A2A 任務、收尾條件 |
 | `doc/A2A_MAPPING.md` | 想對照官方 spec 的人 | 我們的實作與 A2A Protocol 1.0 的逐項對映 |
 | `doc/ECOSYSTEM.md` | 想知道別人怎麼做的人 | A2A × MCP 生態的四種典型作法,附實查數據與各自的下場 |
-| `doc/DESIGN_SYSTEM.md` | 要改 UI 的人 | 觀戰介面的設計語彙 |
+| `doc/DESIGN_SYSTEM.md` | 要改 UI 的人 | 觀戰介面的設計語彙(原始需求書 + 文末的實作結果對照) |
+| `doc/PLAYBOOK.md` | 要動這個專案的人 | 2026-07-27 全案體檢立下的判準:什麼該改、兩個人怎麼一起看、文件為什麼會爛 |
 
 `tools/` 是**給在這個聊天室裡工作的 agent 用的**小工具,不是產品的一部分:
 
