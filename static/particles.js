@@ -20,7 +20,11 @@
 function startParticles() {
   const canvas = document.getElementById("particles");
 
-  // 使用者表明不想看動畫 —— 整張畫布拿掉,只留 CSS 畫的靜態格線
+  // 使用者表明不想看動畫 —— 整張畫布拿掉,只留 CSS 畫的靜態格線。
+  //
+  // 註:這個設定【只在開機時查一次】。使用者若在頁面開著的時候才去系統設定裡
+  // 改這個選項,要重新整理才會生效。要做到即時反應得訂閱 matchMedia 的變更事件,
+  // 但那個選項通常是「設一次就不動」的偏好,不值得為它多養一個訂閱。
   if (matchMedia("(prefers-reduced-motion: reduce)").matches) {
     canvas.remove();
     return;
@@ -36,8 +40,11 @@ function startParticles() {
   let points = [];
   let animationId = null;
 
-  // 滑鼠位置。一開始放在畫面外很遠的地方,表示「還沒進來」
-  const mouse = { x: -10000, y: -10000 };
+  // 滑鼠位置。放在畫面外很遠的地方,表示「不在場」——
+  // 吸引力的判斷是「距離 150 像素以內」,而 -10000 遠到永遠不會通過那個判斷。
+  // 「不在場」與「在場」因此共用同一套計算,不需要多一個布林旗標。
+  const MOUSE_AWAY = -10000;
+  const mouse = { x: MOUSE_AWAY, y: MOUSE_AWAY };
 
   /**
    * 造一個新的點:隨機位置、隨機的緩慢移動方向。
@@ -66,7 +73,15 @@ function startParticles() {
     canvas.style.height = height + "px";
     context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
 
-    // 面積越大點越多,但最多 80 個
+    // 面積越大點越多,但最多 80 個。
+    //
+    // ⚠️ 這個 80 不只是「不要太多點」而已 —— 它是 drawConnections 的成本上限。
+    //    連線是雙層迴圈(每一對點都要算距離),成本是【點數的平方】:
+    //
+    //        80 個點  →  3160 對 / 每一格   ← 現況,完全無感
+    //       300 個點  → 44850 對 / 每一格   ← 14 倍
+    //
+    //    覺得「點太少不好看」而調大這個數字之前,先知道自己動到的是平方項。
     let target = Math.min(80, Math.floor((width * height) / 18000));
 
     // 手機螢幕小、效能也弱,減半
@@ -112,6 +127,38 @@ function startParticles() {
     return Math.max(-0.6, Math.min(0.6, speed));
   }
 
+  /**
+   * 讓一個座標留在 0 ~ limit 之間:超出去就貼回邊界上,並且讓速度朝內。
+   *
+   * ★ 這裡是【把位置夾回來 + 把方向設成絕對值】,而不是「把速度乘以 -1」。
+   *   兩者在「點剛好碰到邊」時結果一樣,但在「點已經在界外」時差很多:
+   *
+   *     翻轉是【相對】操作 —— 界外的點每一格都符合條件,於是每一格翻一次,
+   *     速度正負交替,位置在兩個值之間震盪,永遠回不到畫面裡。
+   *     設定方向是【絕對】操作 —— 冪等,套幾次結果都一樣,一定回得來。
+   *
+   *   什麼時候會有界外的點?resize() 只重算「要幾個點」,不動既有點的座標,
+   *   所以【每一次把瀏覽器視窗縮小】,原本在右半邊的點就全部變成界外點。
+   *   舊版的下場是它們卡在外面震動:使用者看到背景變稀疏,
+   *   而 CPU 還在替這些看不見的點跑 O(n²) 的連線運算。
+   *
+   * @param {object} point 要處理的點
+   * @param {string} axis  "x" 或 "y"
+   * @param {string} speedKey 對應的速度欄位:"vx" 或 "vy"
+   * @param {number} limit 這個方向的上界(寬或高)
+   */
+  function bounceWithin(point, axis, speedKey, limit) {
+    if (point[axis] < 0) {
+      point[axis] = 0;
+      point[speedKey] = Math.abs(point[speedKey]);      // 一定朝右/朝下
+      return;
+    }
+    if (point[axis] > limit) {
+      point[axis] = limit;
+      point[speedKey] = -Math.abs(point[speedKey]);     // 一定朝左/朝上
+    }
+  }
+
   /** 移動所有的點,碰到邊界就彈回來。 */
   function movePoints() {
     for (const point of points) {
@@ -123,18 +170,25 @@ function startParticles() {
       point.x = point.x + point.vx;
       point.y = point.y + point.vy;
 
-      if (point.x < 0 || point.x > width) {
-        point.vx = point.vx * -1;
-      }
-      if (point.y < 0 || point.y > height) {
-        point.vy = point.vy * -1;
-      }
+      bounceWithin(point, "x", "vx", width);
+      bounceWithin(point, "y", "vy", height);
     }
   }
 
+  /* ★ 這兩個顏色是硬寫的字面值,而且寫成十進位的 rgba —— 所以【grep 不到】。
+       對照表(改配色的人請一起改):
+
+         rgba(0, 255, 136, …)  =  #00ff88  =  styles.css 的 --green,也就是語意色
+                                            (定義與獨占規則見 util.js 的 SEMANTIC_GREEN)
+         rgba(0, 212, 255, …)  =  #00d4ff  =  styles.css 的 --cyan
+
+       為什麼不改成讀 CSS 變數:getComputedStyle 每一格都要呼叫太貴,
+       而且那會把這支「純視覺、誰都不依賴」的檔案綁到 DOM 樣式上。
+       副本可以存在,但要指名正本 —— 這條就是指名。 */
+
   /** 把每個點畫成一個 2x2 的小方塊。 */
   function drawPoints() {
-    context.fillStyle = "rgba(0, 255, 136, 0.5)";
+    context.fillStyle = "rgba(0, 255, 136, 0.5)";   // = --green
 
     for (const point of points) {
       context.fillRect(point.x - 1, point.y - 1, 2, 2);
@@ -144,6 +198,9 @@ function startParticles() {
   /**
    * 把靠得夠近的兩點連起來,越近的線越明顯。
    * 內層迴圈從 i + 1 開始,是為了每一對只畫一次(畫兩次會讓線看起來比較濃)。
+   *
+   * ★ 這是整支檔案唯一的平方成本(每一對點都要算),所以 resize() 裡的
+   *   點數上限 80 是在保護這裡 —— 那兩處要一起看。
    */
   function drawConnections() {
     for (let i = 0; i < points.length; i++) {
@@ -163,7 +220,7 @@ function startParticles() {
         const distance = Math.sqrt(distanceSquared);
         const opacity = (1 - distance / 120) * 0.22;   // 越遠越淡
 
-        context.strokeStyle = `rgba(0, 212, 255, ${opacity})`;
+        context.strokeStyle = `rgba(0, 212, 255, ${opacity})`;   // = --cyan
         context.beginPath();
         context.moveTo(a.x, a.y);
         context.lineTo(b.x, b.y);
@@ -186,6 +243,16 @@ function startParticles() {
   addEventListener("mousemove", function (event) {
     mouse.x = event.clientX;
     mouse.y = event.clientY;
+  });
+
+  // 滑鼠離開視窗 —— 把位置送回「不在場」。
+  //
+  // 沒有這一段的話,最後那個位置會永遠留在邊緣,附近的點被持續吸引,
+  // 看起來像有一團看不見的東西黏在那裡。這跟上面 bounceWithin 修的是
+  // 同一族問題:【離場的狀態沒有歸位】。
+  document.addEventListener("mouseleave", function () {
+    mouse.x = MOUSE_AWAY;
+    mouse.y = MOUSE_AWAY;
   });
 
   // 分頁被切到背景時完全停下來 —— 沒人在看的動畫不該繼續吃 CPU
