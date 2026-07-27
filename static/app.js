@@ -256,6 +256,7 @@ createApp({
       nameError: "",                // 取名框的錯誤訊息(空字串 = 沒問題)
       nameWarning: "",              // 取名框的提醒(不擋人,再按一次就放行)
       nameChecking: false,          // 正在跟伺服器查撞名(避免連按)
+        renameTimer: null,            // 改名後延遲重連的計時器(見 watch.myName)
       token: savedToken,    // 伺服器有開認證時,發言需要的個人憑證
       status: "connecting",
       replyTo: null,
@@ -415,6 +416,37 @@ createApp({
     this.jumpToAnchorIfAny();
   },
 
+  watch: {
+    /**
+     * 改了名字就重建即時連線 —— 否則伺服器的在場名單會一直記著舊名字。
+     *
+     * 為什麼要等一下才做:這個名字來自輸入框,使用者每按一個鍵都會觸發一次。
+     * 不等的話「kevin」五個字會斷線重連五次,而每次重連伺服器都要重送一批訊息 ——
+     * 打字打到一半畫面就開始卡。
+     *
+     * 800 毫秒是「打字停下來了」的常見門檻:比一般按鍵間隔長,
+     * 又短到使用者不會覺得延遲。
+     */
+    myName(newName, oldName) {
+      if (newName === oldName) {
+        return;
+      }
+      clearTimeout(this.renameTimer);
+      const self = this;
+      this.renameTimer = setTimeout(function () {
+        /* ★ 兩件事一起做,因為改名有【三個身分載體】,少一個就會出現怪現象:
+             ① 發言身分 —— 發言時帶當下的名字,本來就會跟上
+             ② 在線身分 —— 直播連線報上的名字,靠下面這行重建
+             ③ 瀏覽器記憶 —— 下次打開時用哪個名字,靠這行存起來
+
+           原本 ③ 只在「發言成功」與「取名框確認」時才寫入,所以
+           單純改名字欄的人會遇到:改完當下正常,一重整又變回舊名字。 */
+        localStorage.setItem("a2a-name", newName);
+        self.openStream();
+      }, 800);
+    },
+  },
+
   methods: {
     avatarOf: avatarOf,
     fmtFull: fmtFull,
@@ -455,9 +487,21 @@ createApp({
       }
     },
 
-    /** 開啟即時連線。斷線時 EventSource 會自己重連,我們只要改燈號。 */
+    /**
+     * 開啟即時連線。斷線時 EventSource 會自己重連,我們只要改燈號。
+     *
+     * ★ 一開頭先關掉舊的那條:改名時會再呼叫這個函式一次,
+     *   不關的話舊連線還掛在伺服器上,在場名單會同時看到新舊兩個名字。
+     */
     openStream() {
       const self = this;
+
+      if (this.stream) {
+        this.stream.close();
+      }
+
+      /* watcher 帶的是【現在】的名字。這也是為什麼改名後必須重建連線 ——
+         這個網址在連上的那一刻就固定了,之後改名它不會自己跟著變。 */
       const watcher = encodeURIComponent(this.myName);
 
       this.stream = useStream({
