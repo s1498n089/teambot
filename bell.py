@@ -287,29 +287,98 @@ class BellState:
 
 
 def sse_watch(server: str, room: str, state: BellState, child_alive) -> None:
-    """眼睛:掛 hub 的 SSE 直播(既有 UI 端點,零新增),斷線指數退避重連。
-    重連自帶 since_id=cursor — 斷線期間漏的事件靠這裡補,對帳鐵則 wrapper 版。"""
+    """眼睛:掛在 hub 的直播上,一有新訊息就通知決策層。
+
+    ═══════════ 這個函式是怎麼跑的 ═══════════
+
+    先講最重要的一件事,因為它最違反直覺:
+
+        **這裡有兩層迴圈,而程式幾乎整天都待在【內層】。**
+
+        外層 while  → 負責「重連」,只在出事時才轉一圈
+        內層 for    → 負責「讀訊息」,★ 它會停在那裡等,一等可能好幾小時
+
+    所以外層那個 while 雖然寫在外面、看起來像主迴圈,其實它跑得最少。
+
+    ── 一天的作息長這樣 ──
+
+        08:00  啟動 → 進 while → 連上 → 進 for
+        08:00  ┐
+               │ 一直待在 for 裡面(收訊息、收心跳、收訊息……)
+        18:00  ┘
+        18:00  網路斷了 → 拋錯 → 進 except → 等 1 秒
+        18:00  回到 while → 重連 → 又進 for → 再待到下次出事
+
+    ── 逐步流程(下面的程式碼有對應的編號)──
+
+        ① 外層迴圈:只要子行程還活著,就一直重複「連線 → 讀 → 斷了再連」
+        ② 組網址,帶上兩個關鍵參數:
+             since_id = 我讀到哪  ← 斷線期間漏掉的,伺服器會從這裡補給我
+             watcher  = 我是誰    ← 讓 hub 知道我在線上(網頁的在場名單靠這個)
+        ③ 連上去,並把等待時間歸零(因為連得上,代表對方活著)
+        ④ ★ 讀訊息的迴圈 —— 它會【卡在這裡等】,不是讀完就結束
+        ⑤ 每讀到一行先確認 claude 還在,不在就整個收工(用 return 不是 break,理由見下)
+        ⑥ 只有 "data: " 開頭的才是真訊息,其餘(心跳)略過
+        ⑦ 通知決策層「房間到第幾則了」,該不該敲鈴由它判斷
+        ⑧ 連線出事了 —— 被關掉、網路斷、或太久沒動靜,都會掉到這裡
+        ⑨ 等一下再重連,而且每次等更久(理由見下)
+
+    ── 怎樣才會離開內層那個 for?只有兩條路 ──
+
+        拋錯     → 進 except → 等一下 → 回到 while,重連
+        return   → 直接離開整個函式,這條執行緒收工
+
+        **for 自己永遠不會跑完。** 伺服器不關連線,它就一直掛著。
+
+        ★ 第二條用 return 而不是 break 是刻意的:claude 都關掉了,
+          重連沒有任何意義,直接走比掉回 while 再判斷一次乾淨。
+
+    ── 為什麼「太久沒動靜」算出事?伺服器不是沒訊息就不送嗎? ──
+
+        不是。hub 每 15 秒會送一個空的心跳訊號,就算沒人講話也照送
+        (那是為了避免中間的路由器把安靜的連線當成死的切掉)。
+
+        所以這條線幾乎不會安靜超過 15 秒。
+        而我們的逾時設 60 秒 —— 那不是「總共只能連 60 秒」,
+        是「**兩次收到資料之間**最多等 60 秒」。等於容忍連續漏掉三次心跳,
+        網路偶爾卡一下不會誤判斷線。
+
+    ── 為什麼等待時間要越等越久(指數退避)? ──
+
+        如果 hub 掛了,你每秒重連一次,等於在對方最脆弱的時候一直敲門。
+        所以等待時間是 1 → 2 → 4 → 8 → 16 → 30 → 30…(封頂 30 秒)。
+        封頂是另一個考量:不能無限加倍,否則對方復活了你還要等好幾分鐘才發現。
+
+    ── 最後,這裡藏著整個專案的鐵則 ──
+
+        重連時帶的是 since_id=**cursor**(我真正讀到哪),
+        不是「我上次連線時看到哪」。所以就算斷線期間漏了一百則,
+        一連上就全部補回來 —— 這就是「通知可以漏,資料不會丟」的 wrapper 版。
+    """
     backoff = 1
-    while child_alive():
+    while child_alive():                                            # ①
         url = (f"{server}/api/rooms/{room}/stream?since_id={state.read_cursor()}"
-               f"&watcher={state.name}")  # 報上身分 → hub 據此判定 agent 在場(presence)
+               f"&watcher={state.name}")                            # ②
         try:
             req = urllib.request.Request(url, headers={"Accept": "text/event-stream"})
             with urllib.request.urlopen(req, timeout=SSE_READ_TIMEOUT) as resp:
-                log(f"SSE 已連線 {server} #{room}")
+                log(f"SSE 已連線 {server} #{room}")                  # ③
                 backoff = 1
-                for raw in resp:
+                for raw in resp:                                    # ④ ★ 會卡在這裡等
                     if not child_alive():
-                        return
+                        return                                      # ⑤
                     line = raw.decode("utf-8", "replace").strip()
-                    if line.startswith("data: "):
+                    if line.startswith("data: "):                   # ⑥
                         try:
-                            state.on_message(int(json.loads(line[6:])["id"]))
+                            state.on_message(int(json.loads(line[6:])["id"]))   # ⑦
                         except (json.JSONDecodeError, KeyError, ValueError):
                             pass  # keep-alive 或非訊息 payload,略過
-        except OSError as exc:
+        except OSError as exc:                                      # ⑧
+            # 被關掉(ConnectionResetError)、網路斷、太久沒動靜(TimeoutError)——
+            # 這些全都是 OSError 的子類,所以一句就接得住。
+            # 對我們來說它們是同一件事:這條線不能用了,重連一次。
             log(f"SSE 斷線({exc}),{backoff}s 後重連")
-            time.sleep(backoff)
+            time.sleep(backoff)                                     # ⑨
             backoff = min(backoff * 2, RECONNECT_MAX_BACKOFF)
 
 
@@ -716,6 +785,16 @@ def main() -> int:
     #   如果 stdin 被接到管線或排程系統上,根本沒有按鍵可以轉,底層借用終端機設定
     #   的動作也會失敗(POSIX 端會丟出 Inappropriate ioctl for device 這種天書)。
     #   與其讓它在深處爆炸,不如在這裡先講清楚。
+    #
+    #   哪些用法會被這道檢查擋下來(常有人問,所以列清楚):
+    #       ✗ 接管線      echo something | bell.py
+    #       ✗ 排程 / CI   沒有終端機可用
+    #       ✗ 打包成「無視窗」的執行檔(PyInstaller 的 --windowed)—— 那會拿掉主控台
+    #       ✓ 在終端機裡執行、雙擊 .bat、打包成「有主控台」的執行檔(--console)
+    #
+    #   換句話說:**想包成 .bat 或 .exe 都沒問題**,只要別把主控台拿掉。
+    #   .bat 雙擊時 Windows 會開一個 console 給它,那就是真終端機。
+    #   (打包成 exe 另有一個坑:pywinpty 帶原生 DLL,打包工具常漏抓,要手動指定收進去。)
     if not sys.stdin.isatty():
         print("bell.py 必須在終端機裡執行(它要轉交你的按鍵)。\n"
               "偵測到 stdin 不是終端機 —— 常見原因是接了管線、放進排程、或在 CI 裡跑。",

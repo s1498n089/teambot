@@ -3,7 +3,15 @@
 __pycache__/
 
 # ── Runtime 狀態(不入版控:clone 的人不該繼承我們的即時狀態)──
+#
+# 兩個目錄的分工:
+#   hub_data/  伺服器的資料(訊息、任務、名冊、鑰匙)
+#   state/     客戶端的狀態(每個 agent 的進度書籤、敲鈴器紀錄)
+hub_data/
 state/
+
+# 下面這幾行是給【舊版】用的:2026-07-26 之前這些檔案直接放在專案根目錄。
+# 升級後伺服器會自動把它們搬進 hub_data/,但在那之前根目錄仍可能有殘留。
 chat.jsonl
 agents.json
 tokens.json

@@ -38,6 +38,26 @@ import a2a as a2a_mod
 # ---------- 常數 ----------
 
 BASE = Path(__file__).resolve().parent
+
+# 伺服器的所有資料檔都放這裡:訊息、任務、成員名冊、認證鑰匙。
+#
+# 為什麼要有這個目錄:這些檔案原本散在專案根目錄,跟程式碼混在一起 ——
+# 看起來亂,而且清理或備份時容易誤傷。
+#
+# 為什麼叫 hub_data 而不是 data:「data」太通用,遲早撞名;
+# 而 hub 是這個專案從 README 到教學一直在用的詞,一看就知道是伺服器的東西。
+#
+# ★ 它跟 state/ 的分工要記住:
+#       hub_data/  伺服器的資料(這裡)
+#       state/     客戶端的狀態(每個 agent 的進度書籤、敲鈴器紀錄)
+#   遠端機器只跑客戶端,所以它只會有 state/,不該有 hub_data/ ——
+#   跟 server.env / client.env 是同一條分界線。
+# ★ 這裡只放「目錄名字」,不是算好的完整路徑 —— 理由很實際:
+#   測試靠 monkeypatch 換掉 BASE 來隔離,但那換不掉一個【在 import 時就算完】的常數。
+#   如果這裡寫成 DATA_DIR = BASE / "hub_data",測試會跑去動真實專案目錄的資料。
+#   所以完整路徑一律等到 Hub 建立時才算(見 Hub.__init__)。
+DATA_DIR_NAME = "hub_data"
+
 DEFAULT_PORT = 8787
 DEFAULT_HOST = "0.0.0.0"  # 預設開放區網(手機觀戰);要只聽本機可設 HOST=127.0.0.1
 SENDER_RE = re.compile(r"^[\w一-鿿-]{1,32}$")   # 名字白名單:擋空白與 @,防 parse 怪象
@@ -411,6 +431,40 @@ class RegisterAgent(BaseModel):
 #  Hub —— 資料與規則
 # ═══════════════════════════════════════════════════════════════════════════
 
+def migrate_legacy_data_files(base: Path, data_dir: Path) -> list[str]:
+    """把舊版散在專案根目錄的資料檔,搬進 hub_data/。
+
+    背景:2026-07-26 之前,chat.jsonl 這些檔案直接放在專案根目錄。
+    改了位置之後,如果什麼都不做,原本的使用者升級後打開聊天室會看到空的 ——
+    **他們會以為訊息全部不見了**。所以啟動時自動接手,不必任何人手動搬。
+
+    ★ 規則:新位置已經有同名檔案時【絕不覆蓋】。
+      新的那份是現行資料,舊的是殘骸;蓋過去等於拿舊資料洗掉新資料。
+
+    這是過渡程式碼,將來確定沒有人還停在舊版時,整個函式可以刪掉。
+    """
+    names = ["chat.jsonl", "tasks.json", "agents.json", "tokens.json"]
+    # 用非預設埠號跑的實例會產生 tasks-<埠號>.json,一併接手
+    for path in base.glob("tasks-*.json"):
+        names.append(path.name)
+
+    moved = []
+    for name in names:
+        old_path = base / name
+        new_path = data_dir / name
+        if not old_path.exists():
+            continue
+        if new_path.exists():
+            continue                  # 新的已經在了,別動它
+        old_path.rename(new_path)
+        moved.append(name)
+
+    if moved:
+        print(f"[hub] 已把舊位置的資料檔搬進 {data_dir.name}/:{', '.join(moved)}",
+              file=sys.stderr)
+    return moved
+
+
 class Hub:
     """聊天室的中樞:所有元件與共用規則都放在這裡。
 
@@ -435,18 +489,24 @@ class Hub:
         self.base_url = self.public_url or f"http://127.0.0.1:{self.port}"
         self.warn_if_exposed_without_public_url()
 
+        # 資料目錄在這裡才算完整路徑(不是模組層級的常數)——
+        # 這樣測試 monkeypatch 掉 BASE 之後,資料自然落在它的隔離目錄裡。
+        self.data_dir = BASE / DATA_DIR_NAME
+        self.data_dir.mkdir(exist_ok=True)
+        migrate_legacy_data_files(BASE, self.data_dir)
+
         # ── 訊息與廣播 ──
-        self.store = MessageStore(BASE / "chat.jsonl")
+        self.store = MessageStore(self.data_dir / "chat.jsonl")
         self.bus = EventBus()
         # 這把鎖讓「寫進聊天室」這件事一次只有一個人在做。
         # 沒有它的話,兩個人同時發言會讓樂觀鎖失效 —— 兩邊都以為自己是最新的。
         self.post_lock = asyncio.Lock()
 
         # ── 名冊、認證、限流 ──
-        self.agents = a2a_mod.AgentRegistry(BASE / "agents.json")
+        self.agents = a2a_mod.AgentRegistry(self.data_dir / "agents.json")
         self.invite_token = os.environ.get("INVITE_TOKEN", "")   # 沒設 = 註冊功能關閉
         self.auth_enabled = os.environ.get("AUTH", "").lower() in ("on", "1", "true")
-        self.token_store = TokenStore(BASE / "tokens.json")
+        self.token_store = TokenStore(self.data_dir / "tokens.json")
         self.rate_limiter = RateLimiter()
         if self.auth_enabled:
             self.issue_startup_tokens()
@@ -505,8 +565,8 @@ class Hub:
         if custom:
             return Path(custom)
         if self.port == DEFAULT_PORT:
-            return BASE / "tasks.json"
-        return BASE / f"tasks-{self.port}.json"
+            return self.data_dir / "tasks.json"
+        return self.data_dir / f"tasks-{self.port}.json"
 
     async def restore_tasks(self) -> None:
         """伺服器重開時,把還沒做完的任務接回來。

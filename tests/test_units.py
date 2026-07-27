@@ -338,3 +338,48 @@ class TestBellState:
             state.evaluate() if rings else state.on_message(1)
         assert len(rings) == bell_mod.MAX_RINGS  # 封頂
         assert state.warned is True
+
+
+class TestLegacyDataMigration:
+    """把舊版散在根目錄的資料檔搬進 hub_data/。
+
+    這是升級用的過渡邏輯,但它碰的是使用者的全部訊息 —— 搬錯一次就沒了,
+    所以三種情況都要鎖住,尤其是「絕不拿舊的蓋掉新的」那條。
+    """
+
+    def test_舊版升級時把檔案搬過去(self, tmp_path):
+        (tmp_path / "chat.jsonl").write_text("舊訊息", encoding="utf-8")
+        (tmp_path / "tasks.json").write_text("[]", encoding="utf-8")
+        data_dir = tmp_path / "hub_data"
+        data_dir.mkdir()
+
+        moved = server_mod.migrate_legacy_data_files(tmp_path, data_dir)
+
+        assert sorted(moved) == ["chat.jsonl", "tasks.json"]
+        assert (data_dir / "chat.jsonl").read_text(encoding="utf-8") == "舊訊息"
+        assert not (tmp_path / "chat.jsonl").exists(), "搬過去之後舊位置不該還留著"
+
+    def test_非預設埠號的任務檔也會一起搬(self, tmp_path):
+        """用別的埠號跑會產生 tasks-<埠號>.json,不能漏掉。"""
+        (tmp_path / "tasks-9999.json").write_text("[]", encoding="utf-8")
+        data_dir = tmp_path / "hub_data"
+        data_dir.mkdir()
+
+        assert server_mod.migrate_legacy_data_files(tmp_path, data_dir) == ["tasks-9999.json"]
+
+    def test_絕不拿舊資料蓋掉現行資料(self, tmp_path):
+        """★ 最重要的一條:新位置已經有檔案時,舊的殘骸不准覆蓋它。"""
+        (tmp_path / "chat.jsonl").write_text("舊殘骸", encoding="utf-8")
+        data_dir = tmp_path / "hub_data"
+        data_dir.mkdir()
+        (data_dir / "chat.jsonl").write_text("現行資料", encoding="utf-8")
+
+        moved = server_mod.migrate_legacy_data_files(tmp_path, data_dir)
+
+        assert moved == [], "新位置有檔案時不該搬"
+        assert (data_dir / "chat.jsonl").read_text(encoding="utf-8") == "現行資料"
+
+    def test_全新安裝時什麼都不做也不報錯(self, tmp_path):
+        data_dir = tmp_path / "hub_data"
+        data_dir.mkdir()
+        assert server_mod.migrate_legacy_data_files(tmp_path, data_dir) == []
