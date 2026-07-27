@@ -431,40 +431,6 @@ class RegisterAgent(BaseModel):
 #  Hub —— 資料與規則
 # ═══════════════════════════════════════════════════════════════════════════
 
-def migrate_legacy_data_files(base: Path, data_dir: Path) -> list[str]:
-    """把舊版散在專案根目錄的資料檔,搬進 hub_data/。
-
-    背景:2026-07-26 之前,chat.jsonl 這些檔案直接放在專案根目錄。
-    改了位置之後,如果什麼都不做,原本的使用者升級後打開聊天室會看到空的 ——
-    **他們會以為訊息全部不見了**。所以啟動時自動接手,不必任何人手動搬。
-
-    ★ 規則:新位置已經有同名檔案時【絕不覆蓋】。
-      新的那份是現行資料,舊的是殘骸;蓋過去等於拿舊資料洗掉新資料。
-
-    這是過渡程式碼,將來確定沒有人還停在舊版時,整個函式可以刪掉。
-    """
-    names = ["chat.jsonl", "tasks.json", "agents.json", "tokens.json"]
-    # 用非預設埠號跑的實例會產生 tasks-<埠號>.json,一併接手
-    for path in base.glob("tasks-*.json"):
-        names.append(path.name)
-
-    moved = []
-    for name in names:
-        old_path = base / name
-        new_path = data_dir / name
-        if not old_path.exists():
-            continue
-        if new_path.exists():
-            continue                  # 新的已經在了,別動它
-        old_path.rename(new_path)
-        moved.append(name)
-
-    if moved:
-        print(f"[hub] 已把舊位置的資料檔搬進 {data_dir.name}/:{', '.join(moved)}",
-              file=sys.stderr)
-    return moved
-
-
 class Hub:
     """聊天室的中樞:所有元件與共用規則都放在這裡。
 
@@ -493,7 +459,6 @@ class Hub:
         # 這樣測試 monkeypatch 掉 BASE 之後,資料自然落在它的隔離目錄裡。
         self.data_dir = BASE / DATA_DIR_NAME
         self.data_dir.mkdir(exist_ok=True)
-        migrate_legacy_data_files(BASE, self.data_dir)
 
         # ── 訊息與廣播 ──
         self.store = MessageStore(self.data_dir / "chat.jsonl")

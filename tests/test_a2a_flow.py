@@ -10,6 +10,7 @@ from conftest import post_msg
 
 
 import pytest
+import server as server_mod  # noqa: E402
 
 
 @pytest.fixture
@@ -157,7 +158,10 @@ class TestPersistence:
                      "state_ts": a2a_mod.now_iso(), "state_message": None,
                      "history": [], "metadata": {}, "feed_mid": None,
                      "completed_mid": None, "created_ts": a2a_mod.now_iso()}]
-        (isolated_base / "tasks.json").write_text(json.dumps(snapshot), encoding="utf-8")
+        # 路徑要跟伺服器一致(hub_data/),不能寫在專案根目錄
+        data_dir = isolated_base / server_mod.DATA_DIR_NAME
+        data_dir.mkdir(exist_ok=True)
+        (data_dir / "tasks.json").write_text(json.dumps(snapshot), encoding="utf-8")
         with TestClient(make_app()) as c:
             got = rpc(c, "bob", "GetTask", {"id": "zombie"})["result"]
             assert got["status"]["state"] == "TASK_STATE_FAILED"

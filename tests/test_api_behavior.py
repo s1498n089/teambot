@@ -57,7 +57,12 @@ class TestAuth:
     def _token_of(self, base, name):
         """從 tokens.json 拿不到明文(只存 hash)——改由 TokenStore.issue 重生已知明文。"""
         import server as server_mod
-        return server_mod.TokenStore(base / "tokens.json").issue(name)
+        # ★ 路徑要跟伺服器一致:資料檔全部在 hub_data/ 底下。
+        #   這裡曾經寫成 base / "tokens.json"(根目錄),靠啟動時的搬移函式
+        #   把它搬進 hub_data/ 才碰巧能動 —— 搬移函式退役後就當場現形。
+        data_dir = base / server_mod.DATA_DIR_NAME
+        data_dir.mkdir(exist_ok=True)
+        return server_mod.TokenStore(data_dir / "tokens.json").issue(name)
 
     def test_auth_off_is_open(self, client):
         assert post_msg(client, "t", "anyone", "free speech").status_code == 201
