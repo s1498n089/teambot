@@ -78,7 +78,17 @@ body::before { /* circuit grid(靜態,reduced-motion 也保留) */
 #particles { position: fixed; inset: 0; z-index: 0; pointer-events: none; }
 #app {
   position: relative; z-index: 1;
-  width: min(960px, 100vw); /* 版心(加寬) */
+
+  /* 版心。2026-07-27 從 960 拉到 1280 —— 不是為了「看起來大器」,
+     是為了 Markdown:表格與程式碼區塊在窄泡泡裡只能橫向捲動(見 .md-table-wrap),
+     而這個聊天室的訊息大量使用表格。
+
+     ⚠️ 已知取捨:視窗寬在 1281~1343 之間時,版心已經吃滿 1280,
+        兩側各只剩不到 32px,會有貼邊的壓迫感。
+        沒有為它加 media query,因為真實裝置幾乎不落在那 63px 的區間
+        (最常見的 1366 在區間外,兩側各 43px 夠用)。
+        哪天常見裝置真的落進來,再加邊距處理即可 —— 現在寫規則是替還沒發生的事付成本。 */
+  width: min(1280px, 100vw);
   height: 100dvh;
   display: flex; flex-direction: column;
 }
@@ -217,7 +227,23 @@ main {
      模板本身的縮排空白會被 pre-wrap 一併顯示出來。換行改由 <br> 負責。 */
   word-break: break-word;
   width: fit-content;            /* LINE 感:泡泡貼合內容 */
-  max-width: min(600px, 72%);    /* 呼吸感上限 */
+
+  /* ★ 上限用 em 而不是 px,單位本身就是重點。
+     em 在這裡相對的是泡泡自己的 font-size(= --bubble-font),
+     所以「一行看幾個字」在 A- / A / A+ 三個檔位都一樣 —— 約 42 個中文字。
+
+     原本寫死 600px,行長會跟著字級跑掉,而且方向是反的:
+         A-(14px)→ 一行約 43 字(太長,眼睛回行首會找不到)
+         A (20px)→ 一行約 30 字(剛好)
+         A+(28px)→ 一行約 21 字(太短,一直換行很碎)
+     使用者按 A+ 是為了「看得更清楚」,結果版面反而更碎 —— 那是反直覺的。
+
+     為什麼是 42 不是更小:中文舒適行長約 35~45 字,42 偏上限,
+     但它是【任何字級都不比現況窄】的最小值(42em 在 A- = 588px ≈ 原本的 600px)。
+     取更小的值會讓 A- 使用者覺得「更新之後變擠了」,那是無法解釋的退步。
+
+     78% 是下限保護:視窗還不夠寬時,泡泡不會貼到邊。 */
+  max-width: min(42em, 78%);
 }
 
 /* 原文模式:不跑 markdown 排版,換行由 pre-wrap 負責 —— 就是加 markdown 之前的樣子 */
