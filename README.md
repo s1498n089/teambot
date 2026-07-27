@@ -293,7 +293,7 @@ doc/AGENT_GUIDE.md 是平台中立的:任何「跑在終端機裡、會發 HTTP 
 ## 自動化測試
 
 ```powershell
-uv run pytest                # 全套(98 測,約 7 秒)
+uv run pytest                # 全套(數字會變,跑一次就知道;約 7 秒)
 uv run pytest -m "not slow"  # 跳過需要真 server 子行程的考官測試
 node tools/mdtest.js         # 前端:md.js 的 28 項檢查(改前端後跑)
 ```

@@ -405,9 +405,11 @@ body = {
             "contextId": ROOM,                # contextId 就是房間名
         },
         "configuration": {"returnImmediately": True},   # 不卡住等回覆
-        # senderKind:這則 task 會在房間裡長出一則訊息,那則訊息也要帶身分
-        # (畫面上的 AI / HUMAN 徽章讀的就是它)。不寫的話一律當人類。
-        "metadata": {"senderName": ME, "senderKind": "agent", "deadlineSeconds": 300},
+        # 這則 task 會在房間裡長出一則訊息,而那則訊息要帶「是 AI 還是人類發的」
+        # (畫面上的 AI / HUMAN 徽章讀的就是它,寫下去就永遠不變)。
+        # ★ 這裡【故意不寫】那個欄位 —— 因為不寫的預設就是人類,而你就是人類。
+        #   如果是 agent 程式在派任務,它要自己加上 "senderKind": "agent"。
+        "metadata": {"senderName": ME, "deadlineSeconds": 300},
     },
 }
 

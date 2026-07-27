@@ -25,7 +25,9 @@
 
 ## Endpoints(掛在同一個 FastAPI app)
 
-- `GET /agents` — agent 目錄(非 spec,方便探索);`POST /agents` — 動態註冊(憑邀請 token)
+- `GET /agents` — agent 目錄(非 spec,方便探索)。回的是**此刻連著線的 agent**,不是歷史名單。
+  - 註:這裡曾經還有 `POST /agents`(憑邀請 token 的動態註冊)。2026-07-27 隨名冊動態化移除 ——
+    名冊不再是一份要加入的名單,所以也沒有加入這個動作。要發 token 用 `ROTATE_TOKEN=<名字>`。
 - `GET /agents/{name}/.well-known/agent-card.json`(+ `/.well-known/a2a-agent-card` 別名)— Agent Card
 - `POST /agents/{name}/a2a` — JSON-RPC 2.0(方法名為 PascalCase,spec 1.0 §5.3):
   - `SendMessage` — 建 Task、訊息入房間流(帶 task_id、自動把目標 agent 注入 mentions 以觸發喚醒);
@@ -59,10 +61,15 @@
 
 ## 目前邊界(已知取捨)
 
-- Task 持久化於 tasks.json(重啟完整復原,含 deadline 剩餘時間;同一資料夾同時只跑一個 hub)
+- Task 持久化於 tasks.json(重啟完整復原,含 deadline 剩餘時間)。
+  同一個資料夾跑多個 hub 時,兩個檔案的共享性**不一樣**:
+  `tasks.json` 按埠隔離(非預設埠自動用 `tasks-<port>.json`),`chat.jsonl` **所有實例共用** ——
+  所以測試實例請用獨立房間名,否則訊息會混進同一條流
 - 只支援 TextPart;無 artifacts
-- 認證:AUTH=on 時寫入需 per-agent bearer token,Agent Card 同步宣告 HTTPAuthSecurityScheme;
-  預設 off(本機開發零負擔)
+- 認證:AUTH=on 時寫入需 **綁名字的** bearer token(拿別人的鑰匙冒名 → 403),
+  Agent Card 同步宣告 HTTPAuthSecurityScheme;預設 off(本機開發零負擔)。
+  開機只發給 `user`(人類);agent 的鑰匙不預發 —— 開機那一刻還沒有 agent 連著線,
+  要用時以 `ROTATE_TOKEN=<名字>` 現發
   - ⚠️ **已知的縫**:認證只掛在 `SendMessage` / `SendStreamingMessage`,
     而 `CancelTask` 會改狀態卻不在清單裡 —— AUTH=on 時任何人知道 task id 就能取消。
     **AUTH=on 上線前必修**;修法不是把它加進清單就好(它的 params 沒有 senderName,
