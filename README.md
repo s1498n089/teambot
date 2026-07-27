@@ -12,7 +12,7 @@
 | 文件 | 給誰看 | 內容 |
 |---|---|---|
 | **`doc/TUTORIAL.md`** | **完全沒背景的人** | 從零讀懂整個專案,第 0 到第 10 章 —— 每章只用前一章建立的觀念。想搞懂設計思路從這裡開始 |
-| `doc/AGENT_GUIDE.md` | agent 自己 | 聊天協定:喚醒方式、發言規則、@點名接力、A2A 任務、收尾條件 |
+| **`AGENTS.md`**(根目錄) | agent 自己 | 聊天協定:喚醒方式、發言規則、@點名接力、A2A 任務、收尾條件。**Codex 與 Claude Code 都會自動載入它**(後者透過 `CLAUDE.md`),所以不必再叫 agent 去讀 |
 | `doc/A2A_MAPPING.md` | 想對照官方 spec 的人 | 我們的實作與 A2A Protocol 1.0 的逐項對映 |
 | `doc/ECOSYSTEM.md` | 想知道別人怎麼做的人 | A2A × MCP 生態的四種典型作法,附實查數據與各自的下場 |
 | `doc/DESIGN_SYSTEM.md` | 要改 UI 的人 | 觀戰介面的設計語彙(原始需求書 + 文末的實作結果對照) |
@@ -84,7 +84,11 @@ flowchart LR
 - **bell.py(敲鈴器,預設喚醒)** — 以 ConPTY/pty 包住 agent CLI(TUI 體驗不變),
   盯 hub 的 SSE 直播;「房間最新 id > 該 agent 的 cursor」就把 `[A2A-BELL]` 敲進其 stdin。
   連發只敲一次、追上歸位、90 秒重敲、三次封頂;log 在 `state/bell-<名字>.log`。
-- **doc/AGENT_GUIDE.md** — agent 的聊天協定:喚醒方式、發言規則、@點名接力、A2A 任務、收尾條件。
+- **AGENTS.md(根目錄)** — agent 的聊天協定:喚醒方式、發言規則、@點名接力、A2A 任務、收尾條件。
+  放在根目錄而不是 `doc/`,是因為 **Codex 會自動載入根目錄的 `AGENTS.md`**;
+  `CLAUDE.md` 只是一層薄殼,把同一份接給 Claude Code —— 規則只有一份,不維護兩套。
+  ★ 它的第一段是一道閘:先分辨讀者是不是聊天室成員。自動載入意味著
+  「只是來改 code」的 agent 也會讀到它,而它們不該自己跑去加入聊天室。
 - **static/** — Vue 3(CDN,零建置)觀戰 UI,拆成八個檔案,載入順序由「不依賴別人的」排前面:
   `index.html`(模板殼)/ `styles.css`(tokens → utility → 語意三層)/ `md.js`(Markdown 解析,純函式)/
   `particles.js`(背景動畫)/ `util.js`(顏色、頭像、時間)/ `api.js`(與 hub 溝通的唯一窗口)/
@@ -184,7 +188,7 @@ netsh advfirewall firewall add rule name="A2A Chatroom" dir=in action=allow prot
 ```
 
 查本機區網 IP:`ipconfig`(找 Wi-Fi/乙太網路介面的 IPv4)。遠端 agent 的接入方式:
-啟動語中把 hub 位址告訴它(doc/AGENT_GUIDE.md 開頭的位址替換慣例)。
+啟動語中把 hub 位址告訴它(`AGENTS.md` 開頭的位址替換慣例)。
 
 本專案是 uv 專案(`pyproject.toml` + `uv.lock`):`uv run` 會自動確保 venv 與依賴就緒,
 第一次執行會自動下載受管理的 CPython 3.14,機器上不需要系統 Python。手動同步環境用 `uv sync`。
@@ -197,9 +201,9 @@ netsh advfirewall firewall add rule name="A2A Chatroom" dir=in action=allow prot
 `uv run bell.py ...` 指令),分別貼上下列提示語
 (引號內的「你」指該 agent、「我」指使用者):
 
-> 你是 alice。請先讀 doc/AGENT_GUIDE.md,照裡面的流程加入聊天室並持續參與,直到我叫你停。
+> 你是 alice,加入聊天室並持續參與,直到我叫你停。
 
-> 你是 bob。請先讀 doc/AGENT_GUIDE.md,照裡面的流程加入聊天室並持續參與,直到我叫你停。
+> 你是 bob,加入聊天室並持續參與,直到我叫你停。
 
 然後使用者在觀戰 UI 輸入開場訊息(**只 @ 一個 agent**,對話才會乾淨地接力):
 
@@ -278,7 +282,7 @@ EOF
 
 ## 接入其他 agent 平台(如 Codex)
 
-doc/AGENT_GUIDE.md 是平台中立的:任何「跑在終端機裡、會發 HTTP 請求」的 agent 都能參加。
+`AGENTS.md` 是平台中立的:任何「跑在終端機裡、會發 HTTP 請求」的 agent 都能參加。
 喚醒由**敲鈴器**代勞:使用者用
 `uv run bell.py --name <名字> --server http://<hub>:8787 -- <該 agent 的啟動指令>`
 把任何 CLI agent 包進來 — agent 不需要任何背景監看能力,收到 `[A2A-BELL]` 照

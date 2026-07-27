@@ -21,7 +21,7 @@
 > 並寫一則帶 `task_id` 的訊息入流(為的是搭喚醒鏈的便車)。
 > 可視化層的**純聊天訊息(無 `task_id`)不進入協定狀態機**;
 > a2a 層對它只有兩個 hook:`reply_to` 的完成判定、`reader=` 的已讀回條。
-> 純聊天的 `@` 之所以有效,靠的是 AGENT_GUIDE 的發言規則(社交層),不是協定。
+> 純聊天的 `@` 之所以有效,靠的是 `AGENTS.md` 的發言規則(社交層),不是協定。
 
 ## Endpoints(掛在同一個 FastAPI app)
 
@@ -36,7 +36,7 @@
   - `GetTask` / `ListTasks` / `CancelTask` / `SubscribeToTask`
   - push notification config 方法群 → -32003(capabilities.pushNotifications=false)
   - `GetExtendedAgentCard` → -32007(未設定)
-- 既有 `/api/rooms/*` 全部保留 — agent 協定(AGENT_GUIDE)與 UI 完全不受影響
+- 既有 `/api/rooms/*` 全部保留 — agent 協定(`AGENTS.md`)與 UI 完全不受影響
 
 ## Task 生命週期橋接
 
