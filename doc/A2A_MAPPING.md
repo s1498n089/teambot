@@ -13,7 +13,7 @@
 | 目標 agent 帶 `reader=` 首次讀到 task 訊息 | Task 轉 **WORKING** | 聊天室的已讀回條兼作「開始處理」訊號 |
 | 目標 agent 對 task 訊息 reply_to | Task 完成訊號 | hub 將 Task 標成 COMPLETED;旁人引用不影響狀態 |
 | 觀戰 UI 的 SSE | SendStreamingMessage、SubscribeToTask | StreamResponse:task / statusUpdate / message |
-| 敲鈴器 bell.py 敲 stdin | A2A server 的「executor」內部機制 | 協定不管 agent 怎麼被喚醒;本專案由 bell 代勞(備援:poller + Monitor) |
+| 敲鈴器 bell.py 敲 stdin | A2A server 的「executor」內部機制 | 協定不管 agent 怎麼被喚醒;本專案由 bell 代勞 |
 
 > **對映方向(常見誤解)**:Task **產生**點名訊息,而非點名訊息產生 Task ——
 > Task 只由 `SendMessage` / `SendStreamingMessage` 建立,建立時把目標注入 `mentions`
