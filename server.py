@@ -232,8 +232,43 @@ class MessageStore:
     def query(self, room: str, since_id: int = 0, limit: int = 500,
               mentioned: str | None = None, before_id: int | None = None,
               tail: int | None = None) -> tuple[list[dict], int]:
-        """三種查詢模式:agent 用 since_id(+mentioned 輕量預檢)向前撈;
-        UI 用 tail=N 撈最近、before_id+tail 向上懶載。回傳 (訊息, 房間最新 id)。"""
+        """三種查詢模式。回傳 (訊息, 房間最新 id)。
+
+        三種模式互斥,而且【判斷順序就是下面的順序】—— before_id 最優先。
+        每一種的實際網址長這樣(都是真的有人在打的,不是舉例):
+
+        ┌─ 模式一:往上捲載入更舊的 ──────────────────────────────────────
+        │  誰在用   觀戰 UI,使用者把訊息列往上拉到頂的時候
+        │  網址     GET /api/rooms/main/messages?before_id=700&tail=50
+        │  意思     「比 #700 更舊的,給我最近的 50 則」
+        │  來源     static/app.js 的 loadOlder()
+        │
+        │  ★ 為什麼是「最近的 N 則」而不是「最舊的 N 則」:
+        │    使用者要的是接在畫面頂端上面那一段,也就是【緊鄰 #700 之前】的內容。
+        │    給他最舊的那幾則會跳到三個月前,中間整段是空的。
+        │
+        ├─ 模式二:開頁 ─────────────────────────────────────────────────
+        │  誰在用   觀戰 UI,剛打開網頁
+        │  網址     GET /api/rooms/main/messages?tail=50
+        │  意思     「最新的 50 則」
+        │  來源     static/app.js 的 loadFirstPage()(則數是那邊的 PAGE 常數)
+        │
+        ├─ 模式三:agent 對帳 ───────────────────────────────────────────
+        │  誰在用   agent 被鈴聲叫醒之後
+        │  網址     GET /api/rooms/main/messages?since_id=731&reader=alice
+        │  意思     「#731 之後的全部給我」(reader= 順便回報已讀,見路由層)
+        │  來源     tools/say.py、AGENTS.md 教的 curl
+        │
+        │  變體     ?since_id=731&mentioned=alice
+        │           只要「有點名 alice」的那些 —— agent 醒來先用這個探一下,
+        │           空的就直接回去睡,不必把整段脈絡撈回來。
+        └─────────────────────────────────────────────────────────────────
+
+        ★ 為什麼 UI 用 tail、agent 用 since_id:兩者要的東西不一樣。
+          UI 要的是「畫面上該顯示什麼」——它不在乎錯過了什麼,捲上去就補得到。
+          agent 要的是「我不在的時候發生了什麼」——它【一則都不能漏】,
+          所以必須用自己的游標當起點,而不是用「最近幾則」。
+        """
         msgs = self.rooms.get(room, [])
         last = self.last_id(room)
 
@@ -847,8 +882,15 @@ def register_stream_route(app: FastAPI, hub: Hub) -> None:
             since_id = int(last_event_id)
 
         who = hub.identify_optional_reader(watcher, request)
-        # kind=agent 代表「這條線後面是 AI,可以派任務給它」。敲鈴器會這樣宣告,
-        # 瀏覽器不會 —— 所以人類永遠不會出現在派任務的選單裡。
+        # 這條 SSE 連線【誰都會建】—— 瀏覽器靠它收即時訊息,敲鈴器靠它知道何時該敲鈴。
+        # 差別只在網址帶不帶 kind=agent:
+        #
+        #     敲鈴器   /stream?since_id=N&watcher=alice&kind=agent
+        #     瀏覽器   /stream?since_id=N&watcher=allen              ← 沒有 kind
+        #
+        # 帶了的意思是「這條線後面是 AI,可以派任務給它」,所以它會進派任務的選單;
+        # 沒帶的照樣算「在場」(頭像會出現在標題列),只是不能被派任務 ——
+        # 人類接不了 A2A 任務,所以人類永遠不會出現在那個選單裡。
         subscription = hub.bus.subscribe(room, watcher=who, is_agent=(kind == "agent"))
 
         def to_sse(msg: dict) -> str:

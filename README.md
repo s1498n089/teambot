@@ -47,10 +47,10 @@
 ```mermaid
 flowchart LR
     subgraph terminals["Agent 終端(每個 agent 一個視窗,由敲鈴器啟動)"]
-        subgraph wrapA["bell.bat alice(= uv run bell.py --name alice -- claude --resume)"]
+        subgraph wrapA["bell.bat alice claude -r(= uv run bell.py --name alice -- claude -r)"]
             alice["alice(任何 CLI agent)"]
         end
-        subgraph wrapB["bell.bat bob(同上)"]
+        subgraph wrapB["bell.bat bob claude -r(同上)"]
             bob["bob(任何 CLI agent)"]
         end
     end
@@ -122,11 +122,19 @@ stateDiagram-v2
 Windows 上有現成的捷徑,雙擊或在終端機執行都可以:
 
 ```powershell
-hub.bat                 # 視窗 1:hub(http://127.0.0.1:8787)
-bell.bat alice          # 視窗 2:alice
-bell.bat bob            # 視窗 3:bob
-bell.bat alice yolo     # 同上,但跳過所有權限確認(見下方說明)
+hub.bat                                        # 視窗 1:hub(http://127.0.0.1:8787)
+bell.bat alice claude -r                       # 視窗 2:alice
+bell.bat bob   claude -r                       # 視窗 3:bob
+bell.bat carol codex                           # 別的 agent 產品也一樣
+bell.bat alice claude --dangerously-skip-permissions
 ```
+
+**規則只有一條:把你本來要打的指令,前面加上 `bell.bat <名字>`。**
+名字後面的東西**原封不動**傳給那個 CLI,我們不翻譯、不過濾。
+
+`bell.bat alice`(不接指令)也可以,它會用預設的 `claude --resume`,
+並印一行 `[bell] no command given, using: claude --resume` 告訴你它用了什麼 ——
+**預設本身沒問題,看不見的預設才有問題。**
 
 捷徑背後就是這兩行,想直接打或在其他平台用的話:
 
@@ -135,12 +143,16 @@ uv run server.py                                 # hub
 uv run bell.py --name alice -- claude --resume   # 例:包住 Claude Code
 ```
 
-> `bell.bat` 的第二個參數是選配的權限開關:
-> `allow` 對應 `--allow-dangerously-skip-permissions`(讓「跳過確認」變成可用,但不預設開);
-> `yolo` 對應 `--dangerously-skip-permissions`(從頭到尾都不問)。
-> 打錯字一律忽略,所以手滑不會靜默關掉權限檢查。
-> Anthropic 建議這類旗標只用於無法連網的沙箱 —— 這裡的 agent 會抓外部網頁再轉發進聊天室,
-> 請當成「我知道這個任務會碰什麼」再開。
+> **權限旗標是你自己的選擇,我們不代管。**
+> Anthropic 建議 `--dangerously-skip-permissions` 這類旗標只用於無法連網的沙箱 ——
+> 而這裡的 agent 會抓外部網頁再轉發進聊天室,請當成「我知道這個任務會碰什麼」再開。
+> 各旗標的確切行為請看 Claude 自己的文件,**這裡刻意不複述** ——
+> 複述一份會在沒有人發現的情況下過期。
+>
+> 註:`bell.bat` 曾經有 `allow` / `yolo` 兩個我們自己發明的關鍵字。
+> 它們退場的理由不只是「要多學一套詞」:那個設計會**吞掉打錯的字** ——
+> `bell.bat alice yolooo` 認不得就忽略,於是它安靜地用一般模式跑起來,
+> 而你以為自己關掉了權限檢查。現在打錯旗標的是 Claude 自己會報錯。
 
 ### 區網連入(手機觀戰、遠端 agent)
 
@@ -167,7 +179,7 @@ A2A_ROOM=main
 ```
 
 > **同事要加入時,他那台只要改 `client.env` 的一行 `A2A_SERVER`**,
-> 指向你這台的區網 IP,就能用 `bell.bat <他的名字>` 接進來。
+> 指向你這台的區網 IP,就能用 `bell.bat <他的名字> <他要跑的指令>` 接進來。
 > 他不需要跑 `server.py` —— 伺服器只有你這台跑。
 
 **方法二:臨時覆寫(想試一下、不想改檔案時)**
@@ -294,6 +306,8 @@ EOF
 **最小部署集**(把 hub 搬到別台機器時要帶的檔案):`server.py`、`a2a.py`、`envfile.py`、`static/`。
 少帶 `envfile.py` 會在啟動時 import 失敗 —— 這條是 `tests/test_examiner_sdk.py` 抓出來的,
 它每次都把伺服器複製到臨時目錄單獨跑,少一個檔案就起不來。
+(套件方面除了 FastAPI 與 uvicorn,還要 `python-dotenv` —— `envfile.py` 的解析交給它。
+ 用 `uv run` 啟動的話這些都自動就緒,不需要自己裝。)
 
 ## 自動化測試
 

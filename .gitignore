@@ -24,7 +24,7 @@ tasks*.json
 # ── 個人環境設定(Claude Code session 本地設定)──
 .claude/
 
-# ── 環境設定檔:內容因機器而異,而且會裝認證鑰匙與邀請碼 ──
+# ── 環境設定檔:內容因機器而異,而且會裝位址與認證鑰匙 ──
 # 只有 *.example 範本進版本庫,實際的設定檔留在各自的機器上。
 client.env
 server.env
