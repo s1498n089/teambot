@@ -1016,6 +1016,10 @@ def register_a2a_route(app: FastAPI, hub: Hub) -> None:
         #    那是認證那一輪的設計題,不是一行改動。
         #
         #    GetTask / ListTasks / SubscribeToTask 不進清單是對的:它們不改狀態。
+        #
+        #    ★ 這個洞記在三個地方,修好那天【三處要一起改】:
+        #      這裡、doc/A2A_MAPPING.md 的「已知取捨」、
+        #      以及 doc/A2A_TUTORIAL.md 第 7 章(那裡拿它當「協定不管授權」的實例)。
         if method in ("SendMessage", "SendStreamingMessage"):
             sender = extract_sender_name(params)
             try:

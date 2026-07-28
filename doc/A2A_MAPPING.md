@@ -74,6 +74,8 @@
     而 `CancelTask` 會改狀態卻不在清單裡 —— AUTH=on 時任何人知道 task id 就能取消。
     **AUTH=on 上線前必修**;修法不是把它加進清單就好(它的 params 沒有 senderName,
     直接加會讓所有 cancel 被擋),要先定義「cancel 請求怎麼聲明身分」。
-    釘子同時釘在 `server.py` 的認證分支旁邊。
+    釘子同時釘在 `server.py` 的認證分支旁邊,以及 `doc/A2A_TUTORIAL.md` 第 7 章
+    (那裡拿它當「協定不管授權」的實例)。**修好那天,三處要一起改** ——
+    循著釘子找過來的人,不該只找得到其中兩處。
 - push notifications 未實作(喚醒由敲鈴器在本機側承擔,不需要 hub 回呼)
 - REJECTED / INPUT_REQUIRED 兩狀態尚未啟用(需要 agent 回覆帶結構化標記,列於 backlog)
