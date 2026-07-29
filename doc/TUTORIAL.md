@@ -614,7 +614,7 @@ uv run bell.py --name alice -- claude --resume
 但門房同時盯著 hub 的直播頻道。一有新訊息,它就替你在 AI 的輸入框**打進一行固定暗號**:
 
 ```
-[A2A-BELL] cursor updated(你是 alice)
+[A2A-BELL] 房間到 #42(你是 alice)
 ```
 
 並按下送出。AI 看到這行暗號,就知道「有新訊息了」,照老規矩回 hub 對帳撈訊息。
@@ -798,13 +798,13 @@ MCP 剛好相反:它在**最上層也活得很好**,因為它的方向是往下�
 **就在同一瞬間**,鈴聲也要送進去:
 
 ```
-[A2A-BELL] cursor updated(你是 alice)
+[A2A-BELL] 房間到 #42(你是 alice)
 ```
 
 兩邊寫的是同一條通道。如果沒有人管秩序,結果可能長這樣:
 
 ```
-幫我看[A2A-BELL] 一下cursor updated
+幫我看[A2A-BELL] 一下房間到 #42
 ```
 
 **兩邊都毀了** —— 你的話被截斷,鈴聲也認不出來。而且這種錯不是每次都發生,

@@ -12,7 +12,7 @@
 就往子行程的 stdin 敲一行固定鈴聲。agent 看到鈴聲照對帳鐵則辦事。
 
 設計要點:
-- 鈴聲固定單行:BELL_TEXT + BELL_SUBMIT。**送出鍵一定要用 \r,不能用 \n** ——
+- 鈴聲固定單行:BELL_PREFIX 開頭 + BELL_SUBMIT。**送出鍵一定要用 \r,不能用 \n** ——
   實測過:對真正的 CLI 送 \n,鈴聲只會躺在輸入框裡不送出,agent 永遠不會醒
 - 自己發言不會被敲:發言後 cursor 已推進,last_id 不再領先(老規矩,零額外機制)
 - 重敲保險:敲後 RE_RING_SECONDS 內 cursor 未推進且仍落後 → 再敲,上限 MAX_RINGS 次
@@ -118,7 +118,7 @@ from envfile import load_env_file
 
 BASE = Path(__file__).resolve().parent
 
-BELL_TEXT = "[A2A-BELL] cursor updated"
+BELL_PREFIX = "[A2A-BELL]"      # 文件教的是「凡見這個前綴一律對帳」,不能動
 # 送出鍵。★ 一定是 \r 不是 \n:實測對真正的 CLI 送 \n,那行字會躺在輸入框裡
 # 不送出,agent 就永遠不會醒 —— 而且畫面上看起來「鈴有敲到」,最難查的那種。
 BELL_SUBMIT = "\r"
@@ -128,22 +128,39 @@ SSE_READ_TIMEOUT = 60       # server 每 15 秒有 keep-alive,60 秒沒動靜視
 RECONNECT_MAX_BACKOFF = 30
 
 
-def bell_line(name: str) -> str:
-    """敲進 agent 輸入框的那一行:前綴 + 名字。
+def bell_line(name: str, room_last_id: int) -> str:
+    """一般鈴聲:房間往前了。
 
-    ★ 為什麼要帶名字:**那是 agent 唯一查得到自己是誰的地方。**
+    ★ 為什麼帶名字:**那是 agent 唯一查得到自己是誰的地方。**
+      敲鈴器用偽終端把 agent 包起來,被包住的行程看不見自己是被誰、用什麼名字啟動的
+      (`--name` 只在敲鈴器自己的 argv 裡)。名字錯了,agent 會去讀別人的進度、
+      用別人的身分發言。而鈴聲每次重講一次,對話被壓縮之後也救得回來。
 
-      敲鈴器用偽終端把 agent 包起來,被包住的行程看不見自己是被誰、用什麼名字啟動的;
-      `--name` 只在敲鈴器自己的 argv 裡。所以在這行字之前,agent 知道自己叫什麼的
-      唯一途徑是「使用者手動打一句『你是 alice』」—— 那靠的是人的習慣,不是機制。
-      而名字錯了,agent 會去讀別人的進度、用別人的身分發言。
+    ★ 為什麼是「房間到 #N」而不是「cursor updated」:**後者是假話。**
+      敲鈴器【只讀 cursor,永遠不寫】(見檔頭的鐵則)——
+      沒有人更新過 agent 的 cursor,更新它是 agent 自己的事。
+      句子講的必須是這支程式真的做過的事。
 
-      ★ 還有一個免費的好處:鈴聲每次都會重講一次。
-        對話被壓縮、session 重開之後名字會從脈絡裡消失,**下一聲鈴就把它補回來**。
-
-      前綴 BELL_TEXT 一個字都沒動 —— 文件裡「凡見 `[A2A-BELL]` 一律對帳」照樣成立。
+    ★ 這個數字過時是無害的:它是【下限】。敲出去的瞬間房間可能又前進了,
+      但 agent 拿自己的 cursor 去對帳,會拿到 ≥ 這個數字的全部。
+      它講的是「房間在哪」,不是「你讀到哪」—— 不可能被誤讀成已經追平。
     """
-    return f"{BELL_TEXT}(你是 {name})"
+    return f"{BELL_PREFIX} 房間到 #{room_last_id}(你是 {name})"
+
+
+def force_bell_line(name: str) -> str:
+    """人類按下的強制敲鈴 —— 刻意跟一般鈴聲說不一樣的話。
+
+    ★ 為什麼不能共用同一句:**強制敲鈴最常見的情況是「對帳為空」。**
+
+      而 AGENTS.md 教「撈回來是空的就是正常 race,不用疑惑也不用回報」——
+      於是 agent 會醒來、撈到空、【安靜回去睡】。
+      但按下按鈕的人想講的是「你好像沒反應」,結果它變得更沒反應。
+
+      **文字不同,agent 才知道這一下是人按的**,
+      而 AGENTS.md 對這一種另有規定:就算對帳是空的也要回一句。
+    """
+    return f"{BELL_PREFIX} 使用者強制敲鈴(你是 {name})"
 
 
 LOG_PATH: Path | None = None  # main() 依 --name 指定;None 時退回 stderr(僅啟動失敗前)
@@ -262,7 +279,11 @@ class BellState:
             return 0
 
     def on_message(self, msg_id: int) -> None:
-        """SSE 每收到一則訊息呼叫一次。"""
+        """SSE 每收到一則訊息呼叫一次。
+
+        ★ 這裡【不看訊息內容】,只看 id。誰被點名、講了什麼,決策層一概不知道 ——
+          它只比兩個數字:房間到哪、這個 agent 讀到哪。
+        """
         with self.lock:
             self.known_last_id = max(self.known_last_id, msg_id)
         self.evaluate()
@@ -317,7 +338,7 @@ class BellState:
                 return
 
             # ── 三道都過了,真的敲下去 ──
-            delivered = self.ring_fn()
+            delivered = self.ring_fn(bell_line(self.name, self.known_last_id))
             # ★ 送不進去也照樣計數。這樣子行程已經死掉時,才不會變成無限重敲狂刷紀錄檔。
             self.rings_this_gap += 1
             self.last_ring_at = now
@@ -344,7 +365,7 @@ class BellState:
             self.rings_this_gap = 0      # 歸零:這一下不算在不騷擾額度裡
             self.warned = False
             self.last_ring_at = time.monotonic()
-            delivered = self.ring_fn()
+            delivered = self.ring_fn(force_bell_line(self.name))
         log(f"叮咚(強制,人類要求){'' if delivered is not False else ' —— WARN 沒送進子行程'}")
 
 
@@ -927,9 +948,13 @@ def main() -> int:
         兩個平台傳進來的東西其實不一樣(Windows 傳吃字串的、POSIX 傳要轉 bytes 的),
         而 BellState 完全不知道這件事 —— 那個「不知道」就是分層要換來的東西。
         """
-        def ring_the_bell() -> bool:
-            """真正的「敲鈴」動作:往子行程送一行暗號(帶名字)+ 送出鍵。"""
-            return write_fn(bell_line(args.name) + BELL_SUBMIT)
+        def ring_the_bell(text: str) -> bool:
+            """真正的「敲鈴」動作:把決策層給的那行字 + 送出鍵寫進子行程。
+
+            ★ 「要說什麼」由 BellState 決定,這裡只管「怎麼寫進去」——
+              一般鈴與強制鈴說不一樣的話,而這一層完全不需要知道有兩種。
+            """
+            return write_fn(text + BELL_SUBMIT)
 
         return BellState(cursor_path, ring_the_bell,
                          name=args.name,

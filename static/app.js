@@ -99,9 +99,11 @@ const FOCUS_ME = "@me";
    user 又是人類的預設名 —— 選它等於「不特別取名」,當然要允許。
 
    ★ poller 沒有對應的行程,名字仍然保留(兩邊都是):
-     基礎設施的代稱被人拿去當自己的名字用,只會製造混淆。 */
+     基礎設施的代稱被人拿去當自己的名字用,只會製造混淆。
+   ★ all 也擋掉:`@all` 是「點名所有人」的廣播名字 ——
+     有人取這個名字,他就獨佔了那個字。 */
 const NAME_PATTERN = /^[\w\u4e00-\u9fff-]+$/;
-const RESERVED_NAMES = ["admin", "system", "hub", "server", "poller"];
+const RESERVED_NAMES = ["admin", "system", "hub", "server", "poller", "all"];
 
 
 /* ───────────────────────────────────────────────────────────────────────

@@ -70,7 +70,7 @@ ERR_EXTENDED_CARD_NOT_CONFIGURED = -32007
 #
 # 留著而不刪的理由:前端那份的註解指名「對齊伺服器的 a2a.py:RESERVED_NAMES」——
 # 刪掉它,那句話就變成指向不存在東西的失效引用。
-RESERVED_NAMES = {"user", "admin", "system", "hub", "server", "poller"}
+RESERVED_NAMES = {"user", "admin", "system", "hub", "server", "poller", "all"}
 
 
 def now_iso() -> str:

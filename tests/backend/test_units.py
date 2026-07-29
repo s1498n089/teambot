@@ -227,19 +227,31 @@ class TestSpecConstants:
     def test_bell_contract(self):
         assert bell_mod.RE_RING_SECONDS == 90
         assert bell_mod.MAX_RINGS == 3
-        assert bell_mod.BELL_TEXT == "[A2A-BELL] cursor updated"
+        assert bell_mod.BELL_PREFIX == "[A2A-BELL]"
         assert bell_mod.BELL_SUBMIT == chr(13)  # ConPTY 送出鍵,換行符會讓鈴聲躺在輸入框
 
-    def test_bell_line_carries_name(self):
-        """鈴聲要帶名字 —— 那是 agent 唯一查得到自己是誰的地方(見 bell_line 的 docstring)。
+    def test_bell_line_carries_name_and_room(self):
+        """一般鈴聲要帶名字與房間位置,而且前綴不能動。
 
-        兩件事一起鎖:名字在裡面,而且 `[A2A-BELL]` 前綴沒被動到 ——
-        文件教的是「凡見 [A2A-BELL] 一律對帳」,前綴變了那句話就失效。
+        名字:agent 沒有別的地方查得到自己是誰(pty 包住的行程看不見 argv)。
+        房間位置:給盯著畫面的人看的進度;對 agent 是【下限】,過時無害。
+        前綴:文件教「凡見 [A2A-BELL] 一律對帳」,前綴變了那句話就失效。
         """
-        line = bell_mod.bell_line("alice")
-        assert "alice" in line
-        assert line.startswith("[A2A-BELL]")
-        assert bell_mod.BELL_TEXT in line
+        line = bell_mod.bell_line("alice", 955)
+        assert "alice" in line and "955" in line
+        assert line.startswith(bell_mod.BELL_PREFIX)
+
+    def test_force_bell_line_says_something_different(self):
+        """強制鈴【必須】跟一般鈴說不一樣的話。
+
+        ★ 這條不是美觀問題:強制敲鈴最常見的情況是「對帳為空」,
+          而 AGENTS.md 教「撈到空的不用回報」—— 兩種鈴長得一樣的話,
+          agent 會醒來、看一眼、安靜回去睡,而按按鈕的人正是為了打破那個安靜。
+        """
+        forced = bell_mod.force_bell_line("alice")
+        assert forced.startswith(bell_mod.BELL_PREFIX) and "alice" in forced
+        assert forced != bell_mod.bell_line("alice", 955)
+        assert "強制" in forced
 
     def test_term_restore_contract(self):
         """離場清潔序列缺一不可:少了 9001l,退出後 PowerShell 的每個按鍵
@@ -295,7 +307,7 @@ class TestBellState:
         rings = []
         # name/server/room 是建構需求 ——
         # 這幾個測試不碰它們,但少給就建不起來,那正是把它們收進來的目的。
-        state = bell_mod.BellState(cursor_file, lambda: rings.append(1),
+        state = bell_mod.BellState(cursor_file, lambda text: rings.append(text),
                                    name="x", server="http://test", room="main")
         return state, rings, cursor_file
 
@@ -357,11 +369,11 @@ class TestBellState:
 
     def test_failed_ring_is_logged(self, tmp_path, monkeypatch):
         """鈴送不進去要留下案底 —— 否則「agent 沒反應」時分不清是沒敲還是沒聽。"""
-        assert "WARN" in self._log_after_ring(tmp_path, monkeypatch, lambda: False)
+        assert "WARN" in self._log_after_ring(tmp_path, monkeypatch, lambda text: False)
 
     def test_silent_ring_fn_is_not_a_failure(self, tmp_path, monkeypatch):
         """只有明確的 False 算失敗:不回報的 ring_fn(回 None)不該被誣告。"""
-        assert "WARN" not in self._log_after_ring(tmp_path, monkeypatch, lambda: None)
+        assert "WARN" not in self._log_after_ring(tmp_path, monkeypatch, lambda text: None)
 
     def test_failed_ring_still_counts_toward_cap(self, tmp_path, monkeypatch):
         """送不進去也計數 —— pty 已死時若不計數就會無限重敲刷 log。"""
@@ -369,7 +381,7 @@ class TestBellState:
         monkeypatch.setattr(bell_mod, "RE_RING_SECONDS", 0)
         cursor_file = tmp_path / "cursor-x.txt"
         cursor_file.write_text("0", encoding="utf-8")
-        state = bell_mod.BellState(cursor_file, lambda: False,
+        state = bell_mod.BellState(cursor_file, lambda text: False,
                                    name="x", server="http://test", room="main")
         for _ in range(10):
             state.on_message(1)

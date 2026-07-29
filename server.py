@@ -133,6 +133,20 @@ class MentionParser:
     - 冷啟動規則(未知 ASCII 名保留)只在房間 <2 名成員時啟用,
       成熟房間只認已知名字 — 避免 @media 這類術語誤判
     - JS_SOURCE 經 /api/config 下發,前後端同一套規則(單一事實來源)
+    - `@all` 是廣播名字:所有人都算被點到(見 BROADCAST)
+    """
+
+    BROADCAST = "all"
+    """`@all` = 點名所有人。
+
+    ★ 實作是「把它當成一個永遠存在的成員」,而不是另寫一條規則 ——
+      於是既有的規則全部免費沿用:
+
+          必須帶 @        `all` 三個字單獨出現只是普通句子(TOKEN_RE 要求 @)
+          中文可以緊貼    `@all呢` 認得出來
+          不會誤判        `@allen` 不算 all(黏著規則:下一個字元是 ASCII 就不算)
+
+      另寫一套判斷 `@all` 的邏輯也能動,但那一套遲早跟本尊分岔。
     """
 
     JS_SOURCE = r"(?<![A-Za-z0-9_@.-])(@[\w一-鿿-]+)"
@@ -153,6 +167,7 @@ class MentionParser:
     def parse(cls, known: set[str], text: str) -> list[str]:
         result = []
         allow_coldstart = len(known) < cls.COLDSTART_THRESHOLD
+        known = known | {cls.BROADCAST}   # @all 當成永遠在場的成員(見 BROADCAST)
         for token in cls.TOKEN_RE.findall(text):
             matched = [n for n in known if cls._is_sticky_prefix(n, token)]
             if matched:
