@@ -1,5 +1,5 @@
 /* ═══════════════════════════════════════════════════════════════════════════
-   tools/mdtest.js — 在終端機跑 static/mdtest.html 那一頁的檢查
+   tests/frontend/mdtest.js — 在終端機跑 static/mdtest.html 那一頁的檢查
 
    ── 為什麼需要這支 ─────────────────────────────────────────────────────
    mdtest.html 是「用瀏覽器打開就會跑」的測試頁,這個設計本身很好 ——
@@ -12,7 +12,7 @@
    前端這邊到目前為止只有「我等一下會去看」。
 
    所以這支工具做的事很單純:**把那一頁的檢查搬到終端機跑**,
-   讓改 md.js 之後可以立刻 `node tools/mdtest.js` 拿到綠或紅。
+   讓改 md.js 之後可以立刻 `node tests/frontend/mdtest.js` 拿到綠或紅。
 
    ── 它怎麼做到的 ───────────────────────────────────────────────────────
    測試頁是一個 HTML,裡面有兩段 <script>:一段載入 md.js,一段是檢查本身。
@@ -24,7 +24,7 @@
      真正的來源永遠是 mdtest.html,這支只是換一個地方執行它。
 
    ── 用法 ───────────────────────────────────────────────────────────────
-       node tools/mdtest.js
+       node tests/frontend/mdtest.js
 
    全過回傳 0,有失敗回傳 1(可以接進 CI 或 pre-commit)。
    瀏覽器那一頁照舊可用,兩邊跑的是同一份檢查。
@@ -34,7 +34,7 @@ const fs = require("fs");
 const path = require("path");
 const vm = require("vm");
 
-const STATIC_DIR = path.join(__dirname, "..", "static");
+const STATIC_DIR = path.join(__dirname, "..", "..", "static");
 
 /**
  * 從 HTML 裡把所有 <script> 的「行內內容」抓出來(有 src 的略過)。

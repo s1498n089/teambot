@@ -17,9 +17,6 @@ from server import MentionParser, MessageStore, RateLimiter, TokenStore
 class TestMentionParser:
     # ★ 這是【測試資料】不是名冊 —— 名字刻意用不存在的成員(carol),
     #   免得讀的人以為它在描述誰是這個聊天室的成員。
-    #   (這裡曾經是 {"alice", "bob", "dev"};dev 2026-07-27 退役之後,
-    #    留著真名只會讓「資料」與「名冊」兩件事混在一起 ——
-    #    而不靠名字猜身分,正是我們同一天加 kind 欄位的理由。)
     KNOWN = {"alice", "bob", "carol"}
 
     def test_basic_mention(self):
@@ -103,19 +100,21 @@ class TestMessageStore:
         store = MessageStore(tmp_path / "chat.jsonl")
         for i in range(5):
             store.append("r", "a", f"m{i}", [])
-        since, _ = store.query("r", since_id=3)
-        assert [m["id"] for m in since] == [4, 5]
-        tail, _ = store.query("r", tail=2)
-        assert [m["id"] for m in tail] == [4, 5]
-        older, _ = store.query("r", before_id=3, tail=10)
-        assert [m["id"] for m in older] == [1, 2]
+        since, last = store.query("r", since_id=3)
+        assert [m["id"] for m in since] == [4, 5] and last == 5
+        tail, last = store.query("r", tail=2)
+        assert [m["id"] for m in tail] == [4, 5] and last == 5
+        older, last = store.query("r", before_id=3, tail=10)
+        # ★ 第二個值【永遠是房間的尾】,跟這批撈到什麼無關 —— 往上捲也一樣
+        assert [m["id"] for m in older] == [1, 2] and last == 5
 
     def test_mentioned_filter(self, tmp_path):
         store = MessageStore(tmp_path / "chat.jsonl")
         store.append("r", "a", "hi @bob", ["bob"])
         store.append("r", "a", "plain", [])
-        sel, _ = store.query("r", mentioned="bob")
+        sel, last = store.query("r", mentioned="bob")
         assert len(sel) == 1 and sel[0]["mentions"] == ["bob"]
+        assert last == 2                              # 房間的尾,不是這批的
 
     def test_reload_restores_indexes(self, tmp_path):
         p = tmp_path / "chat.jsonl"
@@ -231,6 +230,17 @@ class TestSpecConstants:
         assert bell_mod.BELL_TEXT == "[A2A-BELL] cursor updated"
         assert bell_mod.BELL_SUBMIT == chr(13)  # ConPTY 送出鍵,換行符會讓鈴聲躺在輸入框
 
+    def test_bell_line_carries_name(self):
+        """鈴聲要帶名字 —— 那是 agent 唯一查得到自己是誰的地方(見 bell_line 的 docstring)。
+
+        兩件事一起鎖:名字在裡面,而且 `[A2A-BELL]` 前綴沒被動到 ——
+        文件教的是「凡見 [A2A-BELL] 一律對帳」,前綴變了那句話就失效。
+        """
+        line = bell_mod.bell_line("alice")
+        assert "alice" in line
+        assert line.startswith("[A2A-BELL]")
+        assert bell_mod.BELL_TEXT in line
+
     def test_term_restore_contract(self):
         """離場清潔序列缺一不可:少了 9001l,退出後 PowerShell 的每個按鍵
         都會被印成 ESC[...;0;1_ 亂碼(實地災情,不是假想)。"""
@@ -283,7 +293,7 @@ class TestBellState:
         cursor_file = tmp_path / "cursor-x.txt"
         cursor_file.write_text(str(cursor), encoding="utf-8")
         rings = []
-        # name/server/room 是建構需求(2026-07-27 起收進 __init__)——
+        # name/server/room 是建構需求 ——
         # 這幾個測試不碰它們,但少給就建不起來,那正是把它們收進來的目的。
         state = bell_mod.BellState(cursor_file, lambda: rings.append(1),
                                    name="x", server="http://test", room="main")
@@ -302,6 +312,30 @@ class TestBellState:
         state.on_message(2)
         state.on_message(3)
         assert len(rings) == 1  # 連發只敲一次(90 秒窗內不重敲)
+
+    def test_force_ring_bypasses_the_no_nag_cap(self, tmp_path):
+        """強制敲鈴要繞過【閘門二】(敲滿三次就安靜)—— 那是它存在的唯一理由。
+
+        死結長這樣:計數只有在 cursor 追上時才歸零,而追上需要被敲醒;
+        敲滿之後就再也不敲了。從使用者的角度看,就是這個 agent 對整個聊天室沒反應。
+        """
+        state, rings, _ = self._make(tmp_path, cursor=0)
+        state.rings_this_gap = bell_mod.MAX_RINGS      # 已經敲滿,正常路徑會安靜
+        state.on_message(99)
+        assert rings == []                             # 閘門二確實擋住了
+
+        state.force_ring()
+        assert len(rings) == 1                         # 強制那一下穿過去了
+        assert state.rings_this_gap == 0               # 而且把額度還回來
+        assert state.warned is False
+
+    def test_force_ring_works_even_when_caught_up(self, tmp_path):
+        """就算沒落後也照敲 —— 判斷權在按按鈕的人身上,不在計數器。"""
+        state, rings, _ = self._make(tmp_path, cursor=5)
+        state.on_message(5)
+        assert rings == []                             # 沒落後,正常路徑不敲
+        state.force_ring()
+        assert len(rings) == 1
 
     def test_catch_up_resets(self, tmp_path):
         state, rings, cursor_file = self._make(tmp_path, cursor=0)

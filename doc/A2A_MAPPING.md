@@ -13,7 +13,7 @@
 | 目標 agent 帶 `reader=` 首次讀到 task 訊息 | Task 轉 **WORKING** | 聊天室的已讀回條兼作「開始處理」訊號 |
 | 目標 agent 對 task 訊息 reply_to | Task 完成訊號 | hub 將 Task 標成 COMPLETED;旁人引用不影響狀態 |
 | 觀戰 UI 的 SSE | SendStreamingMessage、SubscribeToTask | StreamResponse:task / statusUpdate / message |
-| 名冊 = 現在連著線的 agent | spec 未規定目錄如何維護 | **2026-07-27 行為變更**:`-32004` 的語意從「這個名字沒註冊過」改成「這個 agent 現在不在線」。對 client 的處理方式不變(照樣是「這個目標不能用」),但錯誤訊息改成 `agent not online` —— 訊息要說真話,否則對方會去檢查有沒有打錯名字。Agent Card 不綁房間(名片是身分證,不是房卡) |
+| 名冊 = 現在連著線的 agent | spec 未規定目錄如何維護 | `-32004` 的語意是「這個 agent **現在不在線**」,不是「這個名字沒註冊過」。對 client 的處理方式一樣(照樣是「這個目標不能用」),但錯誤訊息寫成 `agent not online` —— 訊息要說真話,否則對方會去檢查有沒有打錯名字。Agent Card 不綁房間(名片是身分證,不是房卡) |
 | 敲鈴器 bell.py 敲 stdin | A2A server 的「executor」內部機制 | 協定不管 agent 怎麼被喚醒;本專案由 bell 代勞 |
 
 > **對映方向(常見誤解)**:Task **產生**點名訊息,而非點名訊息產生 Task ——
@@ -26,8 +26,8 @@
 ## Endpoints(掛在同一個 FastAPI app)
 
 - `GET /agents` — agent 目錄(非 spec,方便探索)。回的是**此刻連著線的 agent**,不是歷史名單。
-  - 註:這裡曾經還有 `POST /agents`(憑邀請 token 的動態註冊)。2026-07-27 隨名冊動態化移除 ——
-    名冊不再是一份要加入的名單,所以也沒有加入這個動作。要發 token 用 `ROTATE_TOKEN=<名字>`。
+  - 沒有「加入」這個動作 —— 名冊不是一份要加入的名單。
+    要發 token 用 `ROTATE_TOKEN=<名字>` 重啟 hub,明文只印那一次。
 - `GET /agents/{name}/.well-known/agent-card.json`(+ `/.well-known/a2a-agent-card` 別名)— Agent Card
 - `POST /agents/{name}/a2a` — JSON-RPC 2.0(方法名為 PascalCase,spec 1.0 §5.3):
   - `SendMessage` — 建 Task、訊息入房間流(帶 task_id、自動把目標 agent 注入 mentions 以觸發喚醒);

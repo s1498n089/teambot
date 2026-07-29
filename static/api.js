@@ -35,12 +35,8 @@ function createApi(notify) {
   /**
    * 組出送給伺服器的標頭。
    *
-   * 抽成函式是因為 send 與 sendTask 本來各寫了一份一模一樣的。
-   *
-   * ★ 其實是【三份】。rpc 也手寫了一份,但它漏掉了 Authorization 那半段,
-   *   所以當初抽的時候它長得不像重複,就被漏掉了 ——
-   *   「因為已經寫錯了,所以看起來不像是同一件事」是很容易漏掉重複的一種樣子。
-   *   (2026-07-27 補上,rpc 現在也走這裡。)
+   * 抽成函式是因為 send / sendTask / rpc 三邊都要用同一組標頭 ——
+   * 各寫一份的話,漏掉 Authorization 那半段不會有人發現。
    *
    * @param {string} token 登入用的憑證,沒有就傳空的
    * @returns {object} 可以直接給 fetch 用的 headers
@@ -116,8 +112,7 @@ function createApi(notify) {
 
   return {
     /** 開機時拿設定:@某人 的解析規則、以及伺服器有沒有開認證。
-        (這裡曾經也拿成員顏色。名冊動態化之後伺服器不再下發顏色,
-         改由前端從名字算 —— 見 util.js 的 colorHexOf。) */
+        (顏色不在這裡拿 —— 前端從名字自己算,見 util.js 的 colorHexOf。) */
     config: function () {
       return request("/api/config");
     },
@@ -128,7 +123,7 @@ function createApi(notify) {
     },
 
     /** 目前連著線的 agent(派任務的下拉選單用)。
-        不是「註冊過的名單」—— 註冊機制已退役,現在有誰算誰,
+        不是一份註冊名單 —— 現在有誰算誰,
         agent 的視窗一關就從這份清單上消失。 */
     agents: function () {
       return request("/agents", undefined, true);
@@ -150,7 +145,22 @@ function createApi(notify) {
     },
 
     /**
-     * 拿訊息。qs 是查詢字串,例如 "since_id=100&limit=50"。
+     * 強制敲某個 agent 的鈴 —— 人類的「喂,醒醒」。
+     *
+     * 為什麼需要這個按鈕:敲鈴器有「連敲三次沒反應就安靜」的不騷擾設計,
+     * 而觸發它的不一定是「卡住」,也可能只是「正在忙」。一旦安靜下來,
+     * 要重新開始敲得等對方的進度追上 —— 而追上需要被敲醒。**那是死結**,
+     * 從畫面上看就是「這個 agent 對整個聊天室完全沒反應」。
+     *
+     * 人看得見畫面,他比計數器清楚該不該吵 —— 所以把判斷權交給他。
+     */
+    ring: function (room, name) {
+      return request(`/api/rooms/${room}/ring/${encodeURIComponent(name)}`,
+                     { method: "POST" });
+    },
+
+    /**
+     * 拿訊息。qs 是查詢字串,例如 "tail=50" 或 "since_id=100"。
      * 這個**不是** quiet:使用者往上滑載入舊訊息失敗時,他需要知道。
      */
     messages: function (room, qs) {
@@ -164,7 +174,7 @@ function createApi(notify) {
      * 原因:送訊息失敗時伺服器會回一段說明(例如「這個名字不能用」),
      * 那段話是要**原封不動顯示給使用者看**的,不能被通用的錯誤處理吃掉。
      *
-     * ★ 前端【刻意不帶 expect_last_id】(伺服器支援的樂觀鎖),而 tools/say.py 帶。
+     * ★ 前端【刻意不帶 expect_last_id】(伺服器支援的樂觀鎖),而 agent 帶。
      *   這個不對稱是設計,不是漏做:
      *
      *     人在畫面上打字   撞車了就是多一則訊息,對話照樣成立 —— 擋下來反而礙事

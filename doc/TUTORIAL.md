@@ -173,7 +173,7 @@ agent 自己記住「我讀到第幾行了」,拿自己的數字跟旗子的數�
 | 中斷服務常式(ISR)收到一個 byte | 一則訊息 POST 進 hub |
 | **`rx_data` 單一變數(下一筆會蓋掉上一筆)** | **舊版的 true/false 旗子 —— 就是剛才那個 lost-wakeup** |
 | `rx_queue` 環形佇列接住每一筆 | `chat.jsonl`(只增不改的那本記事本) |
-| `in` 指標(寫到哪了) | `last_id` |
+| `in` 指標(寫到哪了) | `last_id`(房間的尾) |
 | `out` 指標(讀到哪了) | 每個 agent 的 `cursor` |
 | main handler 醒來去 poll queue | agent 被叫醒後回 hub 對帳 |
 
@@ -614,7 +614,7 @@ uv run bell.py --name alice -- claude --resume
 但門房同時盯著 hub 的直播頻道。一有新訊息,它就替你在 AI 的輸入框**打進一行固定暗號**:
 
 ```
-[A2A-BELL] cursor updated
+[A2A-BELL] cursor updated(你是 alice)
 ```
 
 並按下送出。AI 看到這行暗號,就知道「有新訊息了」,照老規矩回 hub 對帳撈訊息。
@@ -798,7 +798,7 @@ MCP 剛好相反:它在**最上層也活得很好**,因為它的方向是往下�
 **就在同一瞬間**,鈴聲也要送進去:
 
 ```
-[A2A-BELL] cursor updated
+[A2A-BELL] cursor updated(你是 alice)
 ```
 
 兩邊寫的是同一條通道。如果沒有人管秩序,結果可能長這樣:

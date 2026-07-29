@@ -125,6 +125,9 @@
       </div>
       <span v-if="isAgent(modal.member.name)" class="modal-link mono"
             @click="openAgentCard(modal.member.name)">&gt;&gt; AGENT CARD</span>
+      <!-- 只對 agent 顯示:人類不需要被敲鈴器叫醒 -->
+      <span v-if="isAgent(modal.member.name)" class="modal-link mono"
+            @click="forceRing(modal.member.name)">&gt;&gt; 強制敲鈴</span>
     </template>
   </holo-modal>
 

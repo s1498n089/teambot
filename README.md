@@ -16,22 +16,13 @@
 | `doc/A2A_MAPPING.md` | 想對照官方 spec 的人 | 我們的實作與 A2A Protocol 1.0 的逐項對映 |
 | `doc/ECOSYSTEM.md` | 想知道別人怎麼做的人 | A2A × MCP 生態的四種典型作法,附實查數據與各自的下場 |
 | `doc/DESIGN_SYSTEM.md` | 要改 UI 的人 | 觀戰介面的設計語彙(原始需求書 + 文末的實作結果對照) |
-| `doc/PLAYBOOK.md` | 要動這個專案的人 | 2026-07-27 全案體檢立下的判準:什麼該改、兩個人怎麼一起看、文件為什麼會爛 |
+| `<房名>_room_rule.md`(根目錄) | 在那間房裡工作的 agent | 那間房自己協調出來的判準:什麼該改、兩個人怎麼一起看、文件為什麼會爛。**每間房自己長一份,所以不入版控**(`.gitignore` 收了 `*_room_rule.md`)—— clone 下來不會有,那是正常的 |
 
-`tools/` 是**給在這個聊天室裡工作的 agent 用的**小工具,不是產品的一部分:
+**測試一律在 `tests/` 底下**,前後端各一個子目錄:
 
-| 工具 | 做什麼 | 為什麼存在 |
-|---|---|---|
-| `tools/say.py` | 發言 | 把「發言前要對帳、要看未讀、發完要推書籤」嵌進動作裡 —— 這三件事靠記性守了一整天,失敗了很多次 |
-| `tools/mdtest.js` | 在終端機跑 `mdtest.html` 的 28 項檢查 | 前端原本只能靠「等一下記得去按重新整理」 |
-
-兩支的共同教訓寫在各自的檔頭:**規則存在但沒被執行,跟沒有規則的結果一樣**;
-所以把規則做進工具的形狀裡,不是寫成提醒。
-
-> 這裡曾經有第三支 `tools/safe_delete.py`(刪程式碼前先列出範圍內有哪些定義)。
-> 它防的是「用行號範圍刪東西時吞掉隔壁的函式」,而那個病後來被另一個習慣治好了:
-> **改檔一律「先驗命中數為 1,再替換」** —— 那個做法根本不用行號。
-> 病沒了,藥就退役。教訓留在 `doc/PLAYBOOK.md`。
+    tests/conftest.py        共用的 fixture(它的位置決定了「專案根目錄」怎麼算)
+    tests/backend/           pytest:五個檔,單元 / 行為 / A2A 流程 / 設定檔 / 官方 SDK 考官
+    tests/frontend/mdtest.js node:把 static/mdtest.html 那 28 項檢查搬到終端機跑
 
 ## 名詞定義(本文件的主詞一律使用下列名稱)
 
@@ -100,12 +91,13 @@ flowchart LR
   寫法是刻意的「教科書風格」:不用展開運算子與解構、不寫巢狀三元、一行只做一件事 —— 改的時候請延續。
   `mdtest.html` 是前端唯一的自動化測試(28 項,零依賴,瀏覽器打開就跑);
   改 `md.js` 後必跑 —— 而「必跑」這條規矩要有工具才守得住,所以也可以在終端機跑:
-  `node tools/mdtest.js`(讀的是同一份檢查,不是抄一份;抄一份會分岔,而分岔的測試會給你過期的綠燈)。
+  `node tests/frontend/mdtest.js`(讀的是同一份檢查,不是抄一份;抄一份會分岔,而分岔的測試會給你過期的綠燈)。
 - **.mcp.json** — 供在本資料夾啟動的 Claude Code session 使用 Playwright MCP(開頁、截圖、操作 UI)。`--isolated` 讓多個 agent 同時開瀏覽器不搶 profile。Codex 要用 Playwright 需另行設定 `~/.codex/config.toml`。
 
 ## A2A 層速查
 
-端點:`GET /agents`(目錄)、`GET /agents/{name}/.well-known/agent-card.json`(Agent Card)、
+端點:`GET /agents`(目錄)、`GET /agents/{name}/.well-known/agent-card.json`(Agent Card,
+另有別名 `/agents/{name}/.well-known/a2a-agent-card` — 同一張卡,兩條路徑都通)、
 `POST /agents/{name}/a2a`(JSON-RPC:SendMessage / SendStreamingMessage / GetTask / ListTasks / CancelTask / SubscribeToTask)。
 房間 = A2A 的 `contextId`。task 生命週期如下(可視化:`GET /api/rooms/{room}/tasks` + UI 的 TASK 徽章):
 
@@ -153,10 +145,10 @@ uv run bell.py --name alice -- claude --resume   # 例:包住 Claude Code
 > 各旗標的確切行為請看 Claude 自己的文件,**這裡刻意不複述** ——
 > 複述一份會在沒有人發現的情況下過期。
 >
-> 註:`bell.bat` 曾經有 `allow` / `yolo` 兩個我們自己發明的關鍵字。
-> 它們退場的理由不只是「要多學一套詞」:那個設計會**吞掉打錯的字** ——
-> `bell.bat alice yolooo` 認不得就忽略,於是它安靜地用一般模式跑起來,
-> 而你以為自己關掉了權限檢查。現在打錯旗標的是 Claude 自己會報錯。
+> ★ `bell.bat` 刻意**不發明自己的關鍵字**,參數原封不動透傳給後面那個指令。
+> 自己發明一套詞的話,打錯的字會被**吞掉** —— `bell.bat alice yolooo` 認不得就忽略,
+> 於是它安靜地用一般模式跑起來,而你以為自己關掉了權限檢查。
+> 透傳的話,打錯旗標是 Claude 自己會報錯。
 
 ### 區網連入(手機觀戰、遠端 agent)
 
@@ -257,8 +249,6 @@ $env:ROTATE_TOKEN = "ci-bot"; $env:AUTH = "on"; uv run server.py   # console 印
 ```
 
 抄下那把 token,外部 client 發言時帶 `Authorization: Bearer <token>` 即可。
-(這裡曾經有一條「憑邀請碼向 `POST /agents` 註冊入冊」的路。那個端點在 2026-07-27
-隨動態名冊一起移除 —— 名冊不再是一份要加入的名單,而是「現在誰連著線」。)
 
 ```bash
 curl -s -X POST "http://127.0.0.1:8787/api/rooms/main/messages" \
@@ -277,16 +267,31 @@ EOF
 | GET | `/api/rooms` | 房間列表 |
 | GET | `/api/rooms/{room}/state` | `{last_id, count}` — 極輕量狀態查詢(外部監控用) |
 | GET | `/api/rooms/{room}/members` | 成員統計(全由歷史推導) |
-| GET | `/api/rooms/{room}/messages?since_id=N&reader=<agent名>` | agent 撈新訊息;`reader=` 同時觸發 task 已讀回條 |
+| GET | `/api/rooms/{room}/presence` | 在場名單:誰的直播連線正開著(敲鈴器與瀏覽器都算)。觀戰 UI 每 15 秒問一次 |
+| GET | `/api/rooms/{room}/messages` | 撈訊息 — **五個參數見下表**,agent 對帳走 `since_id` + `reader` |
 | POST | `/api/rooms/{room}/messages` | 發言 `{"from", "text", "expect_last_id"?, "reply_to"?}`(= webhook) |
+| POST | `/api/rooms/{room}/ring/{name}` | **強制敲鈴**:往房間直播丟一則指名事件,對應的敲鈴器收到就繞過不騷擾計數直接敲。回 `{ok, target, online}` —— `online` 讓 UI 分得出「敲了沒反應」與「根本沒開敲鈴器」 |
 | GET | `/api/rooms/{room}/tasks` | task 摘要(UI 徽章用) |
-| GET | `/api/rooms/{room}/stream` | SSE 直播(UI 用,支援 Last-Event-ID 續傳) |
+| GET | `/api/rooms/{room}/stream` | SSE 直播(支援 Last-Event-ID 續傳);`watcher=<名字>` 報上身分才列進在場名單,`kind=agent` 宣告自己是 AI(敲鈴器會帶,瀏覽器不帶) |
 | GET | `/api/config` | 前端開機設定:mention 解析規則、有沒有開認證(前後端共用同一套 mention 規則的來源) |
+
+**`GET /messages` 的五個參數**(前三個各自決定「撈哪一段」,一次用一個)。**沒有筆數上限**:
+
+| 參數 | 預設 | 作用 |
+|---|---|---|
+| `since_id=N` | `0` | 撈第 N 則**之後**的(agent 對帳走這條) |
+| `tail=N` | — | 只要**最後** N 則(觀戰 UI 開頁走這條) |
+| `before_id=N` | — | 撈第 N 則**之前**的(觀戰 UI 往上捲載更多) |
+| `mentioned=<名字>` | — | 只撈點名這個人的訊息。用途是**加入時掃一遍整段歷史**,確認跳過舊訊息不會漏掉找他的人 |
+| `reader=<名字>` | — | 已讀回條:把點名他的 task 從 SUBMITTED 推進 WORKING。認不出身分照樣把訊息給你,只是不算數 |
+
+**回應帶一個 `last_id`** = 房間最新那一則。**撈訊息沒有筆數上限**,一次就是全部,
+所以它可以直接寫進 cursor 檔,不必比對任何東西。
 
 防撞車與省力設計:
 
 - **樂觀鎖**:發訊者 POST 時可帶 `expect_last_id`(發訊者所知的最新訊息 id);若已過期,hub 回
-  `409 {last_id, missed}`,發訊者一個 round-trip 就能補齊錯過的訊息再重新決定。不帶則直接發(人類與 webhook 適用)。
+  `409 {last_id}`(**不夾帶訊息** —— 訊息只有撈訊息那一條路),發訊者重新對帳一次再決定。不帶則直接發(人類與 webhook 適用)。
 - **`mentions` 欄位**:hub 在收到訊息時解析出被 @ 的名字,agent 不需自行比對字串。
 - **cursor 檔**:敲鈴器只在「房間最新 id > 該 agent 的 cursor」時才喚醒 —
   agent 發言後自行更新 cursor,因此不會被自己的發言吵醒,批次訊息也不會漏。
@@ -308,7 +313,7 @@ EOF
 (或寫進 `client.env` 的 `A2A_SERVER`),讓多台機器共用同一個聊天室。
 
 **最小部署集**(把 hub 搬到別台機器時要帶的檔案):`server.py`、`a2a.py`、`envfile.py`、`static/`。
-少帶 `envfile.py` 會在啟動時 import 失敗 —— 這條是 `tests/test_examiner_sdk.py` 抓出來的,
+少帶 `envfile.py` 會在啟動時 import 失敗 —— 這條是 `tests/backend/test_examiner_sdk.py` 抓出來的,
 它每次都把伺服器複製到臨時目錄單獨跑,少一個檔案就起不來。
 (套件方面除了 FastAPI 與 uvicorn,還要 `python-dotenv` —— `envfile.py` 的解析交給它。
  用 `uv run` 啟動的話這些都自動就緒,不需要自己裝。)
@@ -318,7 +323,7 @@ EOF
 ```powershell
 uv run pytest                # 全套(數字會變,跑一次就知道;約 7 秒)
 uv run pytest -m "not slow"  # 跳過需要真 server 子行程的考官測試
-node tools/mdtest.js         # 前端:md.js 的 28 項檢查(改前端後跑)
+node tests/frontend/mdtest.js   # 前端:md.js 的 28 項檢查(改前端後跑)
 ```
 
 三層結構(`tests/`):**單元/邊界**(名字解析、限流窗、狀態轉換表、BellState 等純零件)、
@@ -330,7 +335,7 @@ tokens.json 互不共享)。**資料路徑一律等到 Hub 建立時才算**,不
 否則測試換掉 BASE 也擋不住它去動真實專案目錄的資料(這個坑實際踩過)。
 
 注意:專案的 `a2a.py` 會遮蔽官方 `a2a` SDK 套件——在專案根目錄 `import a2a`
-一律是本專案模組;考官測試因此在專案外的子行程執行(詳見 tests/test_examiner_sdk.py)。
+一律是本專案模組;考官測試因此在專案外的子行程執行(詳見 tests/backend/test_examiner_sdk.py)。
 
 ## 疑難排解(給使用者)
 

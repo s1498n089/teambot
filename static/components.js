@@ -71,11 +71,6 @@ const ChatHeader = {
           "focusTarget", "focusName"],
   emits: ["switch-room", "open-member", "set-focus", "adjust-font"],
 
-  /* 註:這裡曾經有一個 data() 把 FOCUS_ME 帶進元件,註解寫著「樣板裡要用到」——
-     但樣板從來沒有提到它,唯一用到 FOCUS_ME 的是下面的 toggleFocus,
-     而那裡用的是全域的那個。零使用的欄位加上一句解釋它為什麼存在的錯誤說明,
-     比單純的死碼更難清 —— 因為那句說明會讓下一個人以為刪了會壞。 */
-
   computed: {
     /**
      * 那顆燈旁邊的字。
@@ -288,12 +283,7 @@ const MessageItem = {
     /**
      * 滑鼠移到任務徽章上的說明。
      *
-     * ★ 這句話曾經寫著「伺服器重開之前的任務」—— 那在任務持久化(tasks.json)
-     *   上線之前是對的,現在不是:重開會從檔案復原。
-     *
-     *   會是【給使用者看的字】說錯了,比註解說錯嚴重:看到的人會照它推論
-     *   (「那我不要重開伺服器就好」),而那個推論是錯的。
-     *   真正的原因是這則訊息比持久化功能還老。
+     * ★ 同一句話在 app.js 的「TASK NOT FOUND」toast 還有一份,兩處要一起改。
      *
      *   同一句話在 app.js 的「TASK NOT FOUND」toast 還有一份,兩處要一起改。
      */

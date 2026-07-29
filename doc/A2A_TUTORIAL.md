@@ -485,8 +485,7 @@ https://某某網域/.well-known/agent-card.json
 > 這個區分很重要 —— 下一章你會看到那 4 則跟那 831 則的待遇差多少。
 >
 > (數字會變,方法不會:`hub_data/chat.jsonl` 裡帶 `task_id` 的就是任務。
->  ⚠️ 不要用 `GET /messages?since_id=0` 去數 —— 那個端點有預設上限 500 則,
->  你會拿到「500」然後以為那是總數。**這個坑我自己踩過,而且差點寫進這份教學。**)
+>  要數房間總共幾則,用 `GET /api/rooms/main/state` —— 它直接回 `count`。)
 
 ### 一句話收束
 

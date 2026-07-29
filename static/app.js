@@ -98,8 +98,8 @@ const FOCUS_ME = "@me";
    後端擋 user 是為了不讓 agent 註冊走人類的名字;而前端這裡問的對象就是人類,
    user 又是人類的預設名 —— 選它等於「不特別取名」,當然要允許。
 
-   ★ poller 已經退役了,名字仍然保留(兩邊都是):
-     退役的基礎設施名字被人拿去用,只會讓將來考古的人更困惑。 */
+   ★ poller 沒有對應的行程,名字仍然保留(兩邊都是):
+     基礎設施的代稱被人拿去當自己的名字用,只會製造混淆。 */
 const NAME_PATTERN = /^[\w\u4e00-\u9fff-]+$/;
 const RESERVED_NAMES = ["admin", "system", "hub", "server", "poller"];
 
@@ -335,8 +335,7 @@ createApp({
     /**
      * 可以派任務的對象 = 現在連著線的 agent。
      *
-     * ★ 這份清單會隨著 agent 上下線變動(2026-07-27 起)——
-     *   以前它是開機載入一次的靜態名冊,現在伺服器只回「此刻在線的」,
+     * ★ 這份清單會隨著 agent 上下線變動 —— 伺服器只回「此刻在線的」,
      *   所以要跟著在場名單一起定時重載(見 startTimers)。
      *
      *   沒有任何 agent 在線時這裡是空的 —— 那不是壞掉,
@@ -539,8 +538,6 @@ createApp({
         rt.mentionPattern = config.mentionPattern;
         rt.authEnabled = !!config.authEnabled;
 
-        // 註:這裡曾經一併收下伺服器下發的成員顏色。名冊動態化之後不再有那個欄位,
-        //     顏色改由前端從名字算 —— 正本說明在 util.js 的 colorHexOf。
       } catch (error) {
         // 預設值已經在 rt 裡了,不做事就是正確的處理
       }
@@ -601,9 +598,8 @@ createApp({
 
       setInterval(function () {
         self.loadPresence();
-        // ★ 名冊也要跟著重載:2026-07-27 起它是「現在誰連著線」,會隨 agent
-        //   開關視窗變動。以前它是開機載入一次的靜態清單,現在不重載的話,
-        //   一個剛上線的 agent 要等到你重整頁面才會出現在派任務選單裡。
+        // ★ 名冊也要跟著重載:它是「現在誰連著線」,會隨 agent 開關視窗變動 ——
+        //   不重載的話,一個剛上線的 agent 要等到你重整頁面才會出現在派任務選單裡。
         self.loadAgents();
       }, PRESENCE_POLL_MS);
     },
@@ -1267,6 +1263,24 @@ createApp({
     /** 開 agent 的名片(A2A 協定規定的那份 JSON)。 */
     openAgentCard(name) {
       window.open(`/agents/${name}/.well-known/agent-card.json`);
+    },
+
+    /** 強制敲醒一個 agent(理由見 api.js 的 ring)。 */
+    async forceRing(name) {
+      const result = await this.api.ring(this.room, name);
+
+      if (!result) {
+        return;                     // 連不上時 request 自己會提示,這裡不重複講
+      }
+
+      // ★ 分成兩種訊息,因為使用者要做的事不一樣:
+      //     敲到了     → 等它反應
+      //     沒連著線   → 去把那個視窗打開,按幾次都沒用
+      if (result.online) {
+        this.showToast(`>> 已敲醒 ${name}`, true);
+      } else {
+        this.showToast(`>> ${name} 的敲鈴器沒連著線,敲不到`, false);
+      }
     },
 
     /** 開任務視窗:先用手上的摘要立刻顯示,詳細內容再慢慢抓。 */

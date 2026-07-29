@@ -23,7 +23,8 @@ from pathlib import Path
 
 import pytest
 
-ROOT = Path(__file__).resolve().parent.parent
+# 專案根目錄 = 這個檔往上兩層(tests/backend/x.py → tests/backend → tests → 根)
+ROOT = Path(__file__).resolve().parents[2]
 PYTHON = sys.executable
 
 
@@ -101,9 +102,9 @@ def test_official_sdk_examiner(tmp_path):
     # ★ 這份清單就是「伺服器端的最小部署集」—— 少一個檔案,子行程就會 import 失敗、
     #   起不來,測試會以「server 子行程在時限內未就緒」的形式失敗。
     #   所以要往這裡加檔案之前,先想清楚:那真的是伺服器跑起來必需的嗎?
-    #   (envfile.py 是 2026-07-26 加入設定檔功能時進來的,server.py 啟動時要用它讀 server.env。
-    #    它 2026-07-28 起改用 python-dotenv —— 子行程跑的是 sys.executable,
-    #    也就是專案的 venv,所以那個套件 import 得到。)
+    #   (envfile.py 在清單裡,是因為 server.py 啟動時要用它讀 server.env;
+    #    它依賴 python-dotenv,而子行程跑的是 sys.executable —— 也就是專案的 venv,
+    #    所以那個套件 import 得到。)
     deploy = tmp_path / "deploy"
     deploy.mkdir()
     for f in ("server.py", "a2a.py", "envfile.py"):
@@ -132,7 +133,6 @@ def test_official_sdk_examiner(tmp_path):
         # ★ 讓 bob「上線」—— 這裡跑的是真 server,所以要用真實的方式:開一條直播連線,
         #   並在網址上宣告 kind=agent。這正是敲鈴器每次啟動時做的事。
         #
-        #   2026-07-27 之前不需要這步:名冊寫死在程式裡,bob 永遠存在。
         #   現在名冊是「誰連著線」,沒有這條連線,bob 連 Agent Card 都拿不到(404)。
         agent_link = urllib.request.urlopen(
             f"{base}/api/rooms/exam/stream?watcher=bob&kind=agent", timeout=5)

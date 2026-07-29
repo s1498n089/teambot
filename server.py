@@ -61,12 +61,8 @@ DATA_DIR_NAME = "hub_data"
 DEFAULT_PORT = 8787
 DEFAULT_HOST = "0.0.0.0"  # 預設開放區網(手機觀戰);要只聽本機可設 HOST=127.0.0.1
 SENDER_RE = re.compile(r"^[\w一-鿿-]{1,32}$")   # 名字白名單:擋空白與 @,防 parse 怪象
-# 註:這裡曾經有 LEGACY_AGENT_NAMES = {"alice", "bob", "dev"},
-#     用途是讀檔時替 2026-07-27 之前的舊訊息補上 kind。
-#     那份補全已經直接寫進 chat.jsonl 本體,所以這個常數與那段邏輯一起退役。
 
 SSE_KEEPALIVE_SECONDS = 15
-SSE_REPLAY_LIMIT = 10_000                        # 重連回放的上限
 SUBSCRIBER_QUEUE_MAXSIZE = 256                   # 慢客戶端的 backpressure 界線
 
 
@@ -96,7 +92,11 @@ class ApiError(Exception):
 
 
 class StaleCursorError(ApiError):
-    """樂觀鎖失敗(有人搶先發言),payload 附 missed 讓 agent 一次補齊。"""
+    """樂觀鎖失敗(有人搶先發言)。
+
+    payload 只說「房間現在到哪」,【不夾帶訊息】—— 訊息只有一條取得路徑
+    (撈訊息那個端點)。順便夾一份等於開第二條路,而兩條路要各自維護正確性。
+    """
     status = 409
 
 
@@ -187,13 +187,12 @@ class MessageStore:
 
         ★ 這裡【不修補任何格式】。檔案裡是什麼樣子,記憶體就是什麼樣子。
 
-          這裡曾經有一段「舊訊息沒有 kind 就當場補上」的邏輯,
-          結果是記憶體有、檔案沒有 —— 而那個分岔沒有寫在任何地方,
+          若在這裡補格式(例如「舊訊息沒有 kind 就當場補上」),結果會是
+          記憶體有、檔案沒有 —— 而那個分岔不會寫在任何地方,
           下一個直接讀檔案的人(備份腳本、資料分析)會拿到不一樣的東西。
 
-          正確的處理位置是【資料本身】:kind 已經補進 chat.jsonl 的每一則訊息,
-          所以讀取端不需要知道曾經有過舊格式。
-          (2026-07-28,allen 的裁決:「不要在程式裡面去做 workaround」。)
+          正確的處理位置是【資料本身】:要補就補進 chat.jsonl,
+          讓讀取端不必知道有過舊格式。
         """
         room = msg["room"]
         self.rooms.setdefault(room, []).append(msg)
@@ -229,10 +228,21 @@ class MessageStore:
     def exists(self, room: str, mid: int) -> bool:
         return mid in self._ids.get(room, set())
 
-    def query(self, room: str, since_id: int = 0, limit: int = 500,
+    def query(self, room: str, since_id: int = 0,
               mentioned: str | None = None, before_id: int | None = None,
               tail: int | None = None) -> tuple[list[dict], int]:
         """三種查詢模式。回傳 (訊息, 房間最新 id)。
+
+        ★ 這裡【沒有筆數上限】,要多少給多少。
+
+          上限原本是為了兩種一次要撈幾百則的情況:**初次加入**、**太久沒回來**。
+          那兩種現在由 AGENTS.md 的加入流程處理掉了 —— 讀最近 50 則 + 掃一遍點名,
+          中間那段刻意跳過。**沒有人會再要求撈一大段,上限也就沒有存在的理由。**
+
+          ★ 為什麼不留一個「以防萬一」的上限:因為切一半的回應跟完整的回應
+            【長得一模一樣】,照文件把回傳的 id 寫進 cursor 就會靜默漏讀。
+            要防它就得多回一個 id 讓呼叫端自己比對 —— 那是一整套呼叫端要記得做的事。
+            **不切,那整套就都不需要。**
 
         三種模式互斥,而且【判斷順序就是下面的順序】—— before_id 最優先。
         每一種的實際網址長這樣(都是真的有人在打的,不是舉例):
@@ -257,11 +267,11 @@ class MessageStore:
         │  誰在用   agent 被鈴聲叫醒之後
         │  網址     GET /api/rooms/main/messages?since_id=731&reader=alice
         │  意思     「#731 之後的全部給我」(reader= 順便回報已讀,見路由層)
-        │  來源     tools/say.py、AGENTS.md 教的 curl
+        │  來源     AGENTS.md 教的 curl
         │
-        │  變體     ?since_id=731&mentioned=alice
-        │           只要「有點名 alice」的那些 —— agent 醒來先用這個探一下,
-        │           空的就直接回去睡,不必把整段脈絡撈回來。
+        │  變體     ?since_id=0&mentioned=alice
+        │           只要「有點名 alice」的那些 —— 加入時掃一遍整段歷史,
+        │           確認跳過舊訊息不會漏掉找他的人(見 AGENTS.md 加入流程)。
         └─────────────────────────────────────────────────────────────────
 
         ★ 為什麼 UI 用 tail、agent 用 since_id:兩者要的東西不一樣。
@@ -275,21 +285,18 @@ class MessageStore:
         # 模式一:UI 往上捲,要「某則之前」的那一批
         if before_id is not None:
             older = [m for m in msgs if m["id"] < before_id]
-            page_size = tail
-            if page_size is None:
-                page_size = 100
-            sel = older[-page_size:]          # 取最後 N 則 = 離 before_id 最近的 N 則
-            return sel, last
+            page_size = tail if tail is not None else 100
+            return older[-page_size:], last   # 取最後 N 則 = 離 before_id 最近的 N 則
 
         # 模式二:UI 開頁,要最新的 N 則
         if tail is not None:
             return msgs[-tail:], last
 
-        # 模式三:agent 對帳,要「我的游標之後」的所有訊息
+        # 模式三:agent 對帳,要「我的游標之後」的所有訊息(有多少給多少)
         sel = [m for m in msgs if m["id"] > since_id]
         if mentioned is not None:
             sel = [m for m in sel if mentioned in m.get("mentions", [])]
-        return sel[:limit], last
+        return sel, last
 
     def append(self, room: str, sender: str, text: str, mentions: list[str],
                reply_to: int | None = None, task_id: str | None = None,
@@ -569,9 +576,8 @@ class Hub:
         self.post_lock = asyncio.Lock()
 
         # ── 認證、限流 ──
-        # 註:這裡曾經有 AgentRegistry(讀寫 agents.json)與 INVITE_TOKEN(邀請碼註冊)。
-        # 兩者於 2026-07-27 一起退役 —— 新的名冊是「誰現在連著線」,不需要註冊這個動作,
-        # 自然也不需要邀請碼。雲端階段若要控管誰能進房,那是另一道題(認證那道)。
+        # 名冊是動態的(誰連著線就是誰),所以這裡沒有註冊機制、也沒有邀請碼。
+        # 雲端階段若要控管誰能進房,那是另一道題(認證那道)。
         self.auth_enabled = os.environ.get("AUTH", "").lower() in ("on", "1", "true")
         self.token_store = TokenStore(self.data_dir / "tokens.json")
         self.rate_limiter = RateLimiter()
@@ -670,8 +676,9 @@ class Hub:
             # 樂觀鎖:發言者聲明「我以為現在最新是第 N 則」。
             # 對不上代表有人搶先發言了 —— 擋下來,並把他錯過的內容一起回給他。
             if expect_last_id is not None and expect_last_id != current:
-                missed, _ = self.store.query(room, since_id=expect_last_id)
-                raise StaleCursorError({"error": "stale", "last_id": current, "missed": missed})
+                # 只告訴他房間到哪,不夾帶訊息 —— 他重新對帳一次就拿得到,
+                # 而那條路本來就是取得訊息的唯一路徑。
+                raise StaleCursorError({"error": "stale", "last_id": current})
 
             # 引用檢查:不能引用一則不存在的訊息。
             if reply_to is not None and not self.store.exists(room, reply_to):
@@ -794,9 +801,9 @@ def register_page_routes(app: FastAPI, hub: Hub) -> None:
         點名規則(@某人 怎麼解析)由這裡下發,前後端因此共用同一套規則 ——
         那是它非在這裡不可的理由:規則若各寫一份,遲早會對不起來。
 
-        ★ 這裡【不再下發 agent 的顏色】。名冊動態化(2026-07-27)之後,
-          伺服器開機時並不知道會有誰連進來,所以顏色改由前端從名字算(同名同色)——
-          少一個要同步的東西,而且新成員第一次出現就有顏色,不必等重整。
+        ★ 這裡【不下發 agent 的顏色】。伺服器開機時並不知道會有誰連進來,
+          所以顏色由前端從名字算(同名同色)—— 少一個要同步的東西,
+          而且新成員第一次出現就有顏色,不必等重整。
         """
         return {
             "mentionPattern": MentionParser.JS_SOURCE,
@@ -829,7 +836,7 @@ def register_room_routes(app: FastAPI, hub: Hub) -> None:
                 "count": hub.store.count(room)}
 
     @app.get("/api/rooms/{room}/messages")
-    async def get_messages(room: str, request: Request, since_id: int = 0, limit: int = 500,
+    async def get_messages(room: str, request: Request, since_id: int = 0,
                            mentioned: str | None = None, before_id: int | None = None,
                            tail: int | None = None, reader: str | None = None):
         """撈訊息。
@@ -837,12 +844,22 @@ def register_room_routes(app: FastAPI, hub: Hub) -> None:
         reader=<名字> 是一個「順便」的動作:代表這個人真的把訊息看過了,
         所以派給他的任務要從「已送出」變成「處理中」—— 等於已讀回條。
         認不出身分時照樣把訊息給他,只是不算已讀(見 identify_optional_reader)。
+
+        ★ 回應永遠是 {messages, last_id},last_id = 房間的最後一則。
+          這裡沒有筆數上限,所以「拿到的」就是「那段區間的全部」,
+          last_id 可以直接寫進 cursor。
+
+          ★ 例外是 mentioned= 過濾模式:拿到的是子集,last_id 仍是房間的尾。
+            那個模式只有一個用途 —— AGENTS.md 加入流程的「掃一遍有沒有人叫過我」,
+            而在那裡把 cursor 推到房間尾正是【刻意跳過舊訊息】的決定。
+            拿它做別的事之前,先想清楚被濾掉的那些你是不是需要。
         """
-        selected, last_id = hub.store.query(room, since_id, limit, mentioned, before_id, tail)
+        selected, last = hub.store.query(room, since_id, mentioned, before_id, tail)
         who = hub.identify_optional_reader(reader, request)
         if who:
             hub.a2a_layer.on_reader_fetch(room, who, selected)
-        return {"messages": selected, "last_id": last_id}
+
+        return {"messages": selected, "last_id": last}
 
     @app.post("/api/rooms/{room}/messages", status_code=201)
     async def post_message(room: str, body: PostMessage, request: Request):
@@ -857,6 +874,27 @@ def register_room_routes(app: FastAPI, hub: Hub) -> None:
                                expect_last_id=body.expect_last_id,
                                kind=body.kind)
         return {"id": msg["id"]}
+
+    @app.post("/api/rooms/{room}/ring/{name}")
+    async def force_ring(room: str, name: str):
+        """人類的「喂,醒醒」—— 強制敲某個 agent 的鈴,不管它的不騷擾計數。
+
+        ★ 為什麼要有這個端點:
+
+          敲鈴器有一條「連敲三次沒反應就安靜」的不騷擾規則,而觸發它的
+          不一定是「卡住」,也可能只是「正在忙」。一旦安靜下來,要重新開始敲
+          得等該 agent 的 cursor 追上 —— 而追上需要被敲醒。**那是死結**,
+          從使用者的角度看就是「我在聊天室講話,這個 agent 完全沒反應」。
+
+          伺服器沒辦法直接戳敲鈴器(它是別台機器上的另一個行程),
+          但敲鈴器一直掛在這個房間的 SSE 上 —— 所以往那條線上丟一則
+          指名的事件就夠了。**現成的通道,不需要新的連線。**
+
+        回傳 online 讓 UI 分得出「敲了但對方沒開敲鈴器」與「敲了對方沒反應」。
+        """
+        hub.bus.publish(room, {"type": "ring", "target": name})
+        return {"ok": True, "target": name,
+                "online": name in hub.bus.live_agents(room)}
 
     @app.get("/api/rooms/{room}/tasks")
     async def get_room_tasks(room: str):
@@ -893,10 +931,21 @@ def register_stream_route(app: FastAPI, hub: Hub) -> None:
         # 人類接不了 A2A 任務,所以人類永遠不會出現在那個選單裡。
         subscription = hub.bus.subscribe(room, watcher=who, is_agent=(kind == "agent"))
 
-        def to_sse(msg: dict) -> str:
-            """把一則訊息包成直播的格式(id 那行讓瀏覽器記住進度)。"""
-            payload = json.dumps(msg, ensure_ascii=False)
-            return f"id: {msg['id']}\ndata: {payload}\n\n"
+        def to_sse(event: dict) -> str:
+            """把一則事件包成直播的格式。
+
+            ★ 只有【訊息】會帶 `id:` 那一行 —— 它是瀏覽器斷線續傳的游標
+              (Last-Event-ID)。這條直播上還有不是訊息的東西(例如強制敲鈴),
+              給它們一個 id 會讓續傳點跳掉;而假設「每一則都有 id」則會
+              直接 KeyError —— 那不只是這一則送不出去,是**整條直播當場結束**,
+              房間裡每一個訂閱者(含瀏覽器)一起被踢掉。
+
+              SSE 規格本來就允許沒有 id 的事件,所以沒有就不寫那一行。
+            """
+            payload = json.dumps(event, ensure_ascii=False)
+            if "id" not in event:
+                return f"data: {payload}\n\n"
+            return f"id: {event['id']}\ndata: {payload}\n\n"
 
         async def event_stream():
             try:
@@ -905,7 +954,7 @@ def register_stream_route(app: FastAPI, hub: Hub) -> None:
                 # 先補上他錯過的,再開始等新的。
                 # 順序是「先訂閱、後回放」,所以交界處可能重複送一兩則 ——
                 # 沒關係,對方會用 id 去掉重複的。反過來做則會漏訊息。
-                replay, _ = hub.store.query(room, since_id=since_id, limit=SSE_REPLAY_LIMIT)
+                replay, _ = hub.store.query(room, since_id=since_id)
                 for msg in replay:
                     yield to_sse(msg)
 
@@ -944,10 +993,6 @@ def register_agent_routes(app: FastAPI, hub: Hub) -> None:
             listing.append({"name": name,
                             "card": f"/agents/{name}/.well-known/agent-card.json"})
         return {"agents": listing}
-
-    # 註:這裡曾經有一個 POST /agents 的報到窗口(憑邀請碼註冊、寫進 agents.json)。
-    # 2026-07-27 隨名冊動態化一起退役 —— 現在連上線就算成員,沒有註冊這個動作。
-    # 那扇門從開通到拆除,一次都沒有人走過。考古請看 git 歷史。
 
     @app.get("/agents/{name}/.well-known/agent-card.json")
     @app.get("/agents/{name}/.well-known/a2a-agent-card")   # 常見的路徑別名,一併支援

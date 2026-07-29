@@ -21,13 +21,18 @@ class TestMessages:
         assert data["last_id"] == 1
         assert data["messages"][0]["mentions"] == ["bob"]
 
-    def test_optimistic_lock_409_with_missed(self, client):
+    def test_optimistic_lock_409_carries_no_messages(self, client):
+        """409 只說「房間現在到哪」,**不夾帶訊息**。
+
+        訊息只有一條取得路徑(撈訊息那個端點)。順便夾一份等於開第二條路,
+        而兩條路各自維護正確性 —— 那正是漏讀 bug 曾經同時長在兩個地方的原因。
+        """
         post_msg(client, "t1", "alice", "first")
         r = post_msg(client, "t1", "bob", "stale write", expect_last_id=0)
         assert r.status_code == 409
         body = r.json()
         assert body["last_id"] == 1
-        assert [m["text"] for m in body["missed"]] == ["first"]  # 一個 round-trip 補齊
+        assert "missed" not in body
 
     def test_reply_to_unknown_422(self, client):
         r = post_msg(client, "t1", "alice", "quote ghost", reply_to=99)
@@ -52,6 +57,104 @@ class TestMessages:
             "room": "empty", "last_id": 0, "count": 0}
 
 
+# ---------- last_id 的語意:本批的尾,不是房間的尾 ----------
+
+class TestFetchContract:
+    """撈訊息的契約:**沒有筆數上限**,而過濾模式回的欄位名字不一樣。
+
+    ★ 這個類別刻意造一個 600 則的房間,而它的任務是【證明不會被截斷】——
+      哪天有人把上限加回來,第一個測試就會紅。
+
+      (上限曾經存在,而它最貴的地方是:切一半的回應跟完整的回應
+       在 JSON 裡長得一模一樣,照文件把回傳的 id 寫進 cursor 就會靜默漏讀。
+       現在的做法是不切 —— 一次要撈幾百則的情境由 AGENTS.md 的加入流程
+       接手:讀最近 50 則 + 掃點名,中間刻意跳過。)
+    """
+
+    ROOM = "big"
+    TOTAL = 600
+
+    def fill(self, client, total=None):
+        """直接灌進 store,不走 HTTP —— 限流是 10 秒 10 則,600 則走不完。"""
+        store = client.app.state.hub.store
+        for i in range(total if total is not None else self.TOTAL):
+            store.append(self.ROOM, "alice", f"m{i}", [])
+
+    def test_no_limit_returns_everything(self, client):
+        """600 則就給 600 則。這一條紅了 = 有人把上限加回來了。"""
+        self.fill(client)
+        data = client.get(f"/api/rooms/{self.ROOM}/messages?since_id=0").json()
+
+        assert len(data["messages"]) == self.TOTAL
+        assert [m["id"] for m in data["messages"]] == list(range(1, self.TOTAL + 1))
+        assert data["last_id"] == self.TOTAL
+        assert "room_last_id" not in data      # 不會截斷,就不需要第二個 id
+
+    def test_mentioned_mode_filters_but_last_id_is_room_tail(self, client):
+        """過濾模式只回被點名的那些,但 `last_id` 仍是**房間的尾**。
+
+        這個模式只有一個用途:加入時掃一遍整段歷史,確認跳過舊訊息
+        不會漏掉找自己的人。在那裡把 cursor 推到房間尾正是【刻意跳過】的決定。
+        """
+        store = client.app.state.hub.store
+        store.append(self.ROOM, "alice", "hi @bob", ["bob"])
+        store.append(self.ROOM, "alice", "plain", [])
+
+        data = client.get(f"/api/rooms/{self.ROOM}/messages?mentioned=bob").json()
+        assert [m["id"] for m in data["messages"]] == [1]
+        assert data["last_id"] == 2                   # 房間的尾,不是這批的
+
+    def test_stale_409_only_reports_where_the_room_is(self, client):
+        """409 不論落後多少、或 cursor 超前,都只回一個 `last_id` = 房間的尾。
+
+        ★ 超前的情況(房間被清空重建過)也靠這個值把 cursor 拉回來 ——
+          方向是刻意選的:cursor 落後只是下次多讀幾則(無害),
+          超前才會漏讀(有害,而且沒有人會發現)。
+        """
+        self.fill(client)
+        behind = post_msg(client, self.ROOM, "bob", "stale", expect_last_id=0)
+        assert behind.status_code == 409
+        assert behind.json() == {"error": "stale", "last_id": self.TOTAL}
+
+        ahead = post_msg(client, self.ROOM, "bob", "ahead", expect_last_id=9999)
+        assert ahead.status_code == 409
+        assert ahead.json() == {"error": "stale", "last_id": self.TOTAL}
+
+
+class TestForceRing:
+    """人類的「喂,醒醒」:往房間的 SSE 丟一則指名事件,對應的敲鈴器收到就強制敲。
+
+    ★ 伺服器【不直接戳敲鈴器】—— 那是別台機器上的另一個行程。
+      但它一直掛在這個房間的直播上,所以用現成的通道就夠了。
+    """
+
+    def test_ring_reports_target_and_online(self, client):
+        r = client.post("/api/rooms/r1/ring/alice")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["ok"] is True and body["target"] == "alice"
+        assert body["online"] is False        # 沒有敲鈴器連著線
+
+    def test_ring_event_reaches_the_room_stream(self, client):
+        """事件要真的流進房間的直播 —— 敲鈴器就是靠那條線收到的。"""
+        bus = client.app.state.hub.bus
+        sub = bus.subscribe("r1", watcher="alice", is_agent=True)
+        try:
+            client.post("/api/rooms/r1/ring/alice")
+            assert sub.queue.qsize() == 1
+            assert sub.queue.get_nowait() == {"type": "ring", "target": "alice"}
+        finally:
+            bus.unsubscribe("r1", sub)
+
+    def test_ring_knows_the_bell_is_connected(self, client):
+        bus = client.app.state.hub.bus
+        sub = bus.subscribe("r1", watcher="bob", is_agent=True)
+        try:
+            assert client.post("/api/rooms/r1/ring/bob").json()["online"] is True
+        finally:
+            bus.unsubscribe("r1", sub)
+
+
 # ---------- AUTH 矩陣 ----------
 
 class TestAuth:
@@ -59,8 +162,6 @@ class TestAuth:
         """從 tokens.json 拿不到明文(只存 hash)——改由 TokenStore.issue 重生已知明文。"""
         import server as server_mod
         # ★ 路徑要跟伺服器一致:資料檔全部在 hub_data/ 底下。
-        #   這裡曾經寫成 base / "tokens.json"(根目錄),靠啟動時的搬移函式
-        #   把它搬進 hub_data/ 才碰巧能動 —— 搬移函式退役後就當場現形。
         data_dir = base / server_mod.DATA_DIR_NAME
         data_dir.mkdir(exist_ok=True)
         return server_mod.TokenStore(data_dir / "tokens.json").issue(name)
@@ -96,12 +197,6 @@ class TestAuth:
 
 
 # ---------- SSE 直播 ----------
-#
-# 註:這一段的標題曾經是「動態註冊鏈」,下面站著測「憑邀請碼註冊成員」的 TestRegister。
-# 2026-07-27 名冊改成「誰現在連著線」之後,註冊這個動作本身就不存在了,測試隨功能退役 ——
-# 但標題留了下來,於是它掛在一個 SSE 的輔助函式上面。
-# ★ 錯的標題比沒有標題更糟,因為它主動誤導:讀的人會以為那個函式跟註冊有關。
-# 考古請看 git 歷史。
 
 
 async def collect_sse_frames(app, path: str, headers: list, n_frames: int, timeout: float = 5.0):
@@ -148,6 +243,34 @@ class TestSSE:
         frames = asyncio.run(collect_sse_frames(
             client.app, "/api/rooms/s/stream", [("Last-Event-ID", "1")], n_frames=1))
         assert '"two"' in frames[0]  # 從斷點續傳,不重播 id 1
+
+    def test_non_message_event_survives_serialization(self, client):
+        """直播上不是只有訊息:強制敲鈴那種事件【沒有 id】,序列化不能因此炸掉。
+
+        ★ 這個測試是被一個真的 bug 逼出來的:第一版 to_sse 寫成
+          f"id: {msg['id']}…",而 ring 事件沒有 id → KeyError。
+          它在 async generator 裡,所以後果不是「這一則送不出去」,
+          是**整條直播結束**,房間裡每個訂閱者(含瀏覽器)一起被踢掉。
+
+        ★ 而只檢查 bus 佇列的測試【抓不到它】—— 佇列在序列化之前。
+          要抓到就得真的走完這條路,所以這個測試在這裡而不是在單元層。
+        """
+        async def drive():
+            bus = client.app.state.hub.bus
+
+            async def ring_soon():
+                await asyncio.sleep(0.15)      # 等串流掛上去再敲
+                bus.publish("ringroom", {"type": "ring", "target": "alice"})
+
+            pending = asyncio.ensure_future(ring_soon())
+            got = await collect_sse_frames(
+                client.app, "/api/rooms/ringroom/stream", [], n_frames=1)
+            await pending
+            return got
+
+        frames = asyncio.run(drive())
+        assert '"ring"' in frames[0] and '"alice"' in frames[0]
+        assert "id:" not in frames[0]          # 沒有 id 就不寫那一行(續傳點不受影響)
 
     def test_slow_subscriber_marked_dead(self, make_app):
         """backpressure:佇列灌滿後再 publish,訂閱者被標記淘汰(單元式驗證)。"""

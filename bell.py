@@ -128,6 +128,24 @@ SSE_READ_TIMEOUT = 60       # server 每 15 秒有 keep-alive,60 秒沒動靜視
 RECONNECT_MAX_BACKOFF = 30
 
 
+def bell_line(name: str) -> str:
+    """敲進 agent 輸入框的那一行:前綴 + 名字。
+
+    ★ 為什麼要帶名字:**那是 agent 唯一查得到自己是誰的地方。**
+
+      敲鈴器用偽終端把 agent 包起來,被包住的行程看不見自己是被誰、用什麼名字啟動的;
+      `--name` 只在敲鈴器自己的 argv 裡。所以在這行字之前,agent 知道自己叫什麼的
+      唯一途徑是「使用者手動打一句『你是 alice』」—— 那靠的是人的習慣,不是機制。
+      而名字錯了,agent 會去讀別人的進度、用別人的身分發言。
+
+      ★ 還有一個免費的好處:鈴聲每次都會重講一次。
+        對話被壓縮、session 重開之後名字會從脈絡裡消失,**下一聲鈴就把它補回來**。
+
+      前綴 BELL_TEXT 一個字都沒動 —— 文件裡「凡見 `[A2A-BELL]` 一律對帳」照樣成立。
+    """
+    return f"{BELL_TEXT}(你是 {name})"
+
+
 LOG_PATH: Path | None = None  # main() 依 --name 指定;None 時退回 stderr(僅啟動失敗前)
 
 # 離場時把終端機交還乾淨。TUI 子行程開了一堆終端機私有模式,若在它(或我們)退出時
@@ -212,8 +230,8 @@ class BellState:
         self.ring_fn = ring_fn
 
         # 這三個是「我是誰、要盯哪台的哪個房間」——sse_watch 會用到。
-        # ★ 它們曾經是建好物件之後才從外面塞進來的(state.name = ...)。
-        #   那樣做程式照跑,但有兩個實際壞處:讀這個類別的定義看不出它有這些欄位,
+        # ★ 它們收在建構式裡,不是建好之後才從外面塞(state.name = ...)。
+        #   從外面塞也能跑,但讀這個類別的定義看不出它有這些欄位,
         #   而且漏塞其中一個,錯誤要等到 sse_watch 連線時才炸。
         #   收進建構式之後,「少給一個就建不起來」變成結構保證,不必靠記性。
         self.name = name
@@ -308,6 +326,26 @@ class BellState:
                     f"(room={self.known_last_id} cursor={cursor})— pty 可能已關,靠重敲兜底")
             else:
                 log(f"叮咚 #{self.rings_this_gap}(room={self.known_last_id} cursor={cursor})")
+
+
+    def force_ring(self) -> None:
+        """人類從觀戰 UI 按下的「強制敲鈴」—— 繞過三道閘,並把不騷擾的計數歸零。
+
+        ★ 為什麼要有一條繞過去的路:
+
+          那三道閘是為了「不吵一個正在生成中的 agent」而設的,而觸發閘門二
+          (連敲三次沒反應就安靜)的不一定是「卡住」,也可能只是「正在忙」。
+          一旦安靜下來,要重新開始敲得等 cursor 追上 —— 而追上需要被敲醒。
+          **那是一個死結,而且從外面看起來就是「這個 agent 對整個聊天室沒反應」。**
+
+          人類看得見畫面,他比計數器清楚該不該吵。所以這條路把判斷權交給他。
+        """
+        with self.lock:
+            self.rings_this_gap = 0      # 歸零:這一下不算在不騷擾額度裡
+            self.warned = False
+            self.last_ring_at = time.monotonic()
+            delivered = self.ring_fn()
+        log(f"叮咚(強制,人類要求){'' if delivered is not False else ' —— WARN 沒送進子行程'}")
 
 
 def sse_watch(server: str, room: str, state: BellState, child_alive) -> None:
@@ -409,9 +447,18 @@ def sse_watch(server: str, room: str, state: BellState, child_alive) -> None:
                     line = raw.decode("utf-8", "replace").strip()
                     if line.startswith("data: "):                   # ⑥
                         try:
-                            state.on_message(int(json.loads(line[6:])["id"]))   # ⑦
-                        except (json.JSONDecodeError, KeyError, ValueError):
-                            pass  # keep-alive 或非訊息 payload,略過
+                            payload = json.loads(line[6:])
+                        except json.JSONDecodeError:
+                            continue                       # keep-alive 之類,略過
+                        # 人類按的「強制敲鈴」:只認指名自己的那一則
+                        if payload.get("type") == "ring":
+                            if payload.get("target") == state.name:
+                                state.force_ring()
+                            continue
+                        try:
+                            state.on_message(int(payload["id"]))    # ⑦
+                        except (KeyError, ValueError, TypeError):
+                            pass  # 非訊息 payload,略過
         except OSError as exc:                                      # ⑧
             # 被關掉(ConnectionResetError)、網路斷、太久沒動靜(TimeoutError)——
             # 這些全都是 OSError 的子類,所以一句就接得住。
@@ -815,6 +862,20 @@ def main() -> int:
     parser.add_argument("cmd", nargs=argparse.REMAINDER,
                         help="-- 之後接要包的指令,如:-- claude --resume")
     args = parser.parse_args()
+
+    # ★ 把【解析後】的位址與房間寫回環境變數,子行程(agent)才查得到。
+    #
+    #   AGENTS.md 教的指令長這樣:${A2A_SERVER:-http://127.0.0.1:8787}
+    #   —— 沒設定就落回預設值。而設定有兩條路進來:
+    #
+    #       client.env      load_env_file 會填進 os.environ  ✔ agent 繼承得到
+    #       --server 參數   只在這裡的 argv 裡                ✘ agent 看不到
+    #
+    #   第二條路上,agent 會安靜地落回 127.0.0.1 去連【自己這台】——
+    #   而遠端接入時那裡根本沒有 hub。所以在這裡補齊,兩條路合而為一。
+    os.environ["A2A_SERVER"] = args.server
+    os.environ["A2A_ROOM"] = args.room
+
     cmd = args.cmd[1:] if args.cmd and args.cmd[0] == "--" else args.cmd
     if not cmd:
         parser.error("缺少要包的指令,例:uv run bell.py --name alice -- claude --resume")
@@ -867,8 +928,8 @@ def main() -> int:
         而 BellState 完全不知道這件事 —— 那個「不知道」就是分層要換來的東西。
         """
         def ring_the_bell() -> bool:
-            """真正的「敲鈴」動作:往子行程送一行固定暗號 + 送出鍵。"""
-            return write_fn(BELL_TEXT + BELL_SUBMIT)
+            """真正的「敲鈴」動作:往子行程送一行暗號(帶名字)+ 送出鍵。"""
+            return write_fn(bell_line(args.name) + BELL_SUBMIT)
 
         return BellState(cursor_path, ring_the_bell,
                          name=args.name,

@@ -1,6 +1,7 @@
 # ── Python / uv ──
 .venv/
 __pycache__/
+.pytest_cache/
 
 # ── Runtime 狀態(不入版控:clone 的人不該繼承我們的即時狀態)──
 #
@@ -32,3 +33,7 @@ server.env
 # 資料檔的手動備份(清理測試房間時產生),不進版本庫
 *.bak-*
 *.tmp
+
+# ── 每間聊天室自己協調出來的判準(不是產品的一部分,不入版控)──
+#   命名慣例:<房名>_room_rule.md,例如 main_room_rule.md
+*_room_rule.md

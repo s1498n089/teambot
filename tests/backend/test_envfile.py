@@ -1,12 +1,11 @@
 """設定檔載入的行為測試。
 
-★ 2026-07-28 起,.env 的【解析】交給 python-dotenv,這裡只測**我們自己加的那一層**:
+★ .env 的【解析】交給 python-dotenv,這裡只測**我們自己加的那一層**:
 
       環境變數優先於檔案、回報套用了哪些鍵、壞行要出聲、警告不能炸掉呼叫者。
 
-  原本這裡還有六條在測解析規則本身(註解、等號兩邊的空白、空值、檔案不存在……)——
-  那些現在是 python-dotenv 的責任,**替第三方套件寫測試不是我們的工作**:
-  它們抓不到我們的 bug,只會在對方改版時發假警報。
+  解析規則本身(引號、export 前綴、變數展開……)不在這裡測 —— 那是 python-dotenv 的責任。
+  **替第三方套件寫測試不是我們的工作**:它們抓不到我們的 bug,只會在對方改版時發假警報。
 
   唯一非測不可的是「環境變數必須贏過設定檔」:它是這個模組的靈魂。
   換套件時我實際驗過 dotenv 的預設就是這個方向 ——
@@ -18,7 +17,9 @@ from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+# 專案根目錄 = 這個檔往上兩層(tests/backend/x.py → tests/backend → tests → 根)
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
 from envfile import load_env_file  # noqa: E402
 
 
@@ -69,7 +70,7 @@ def test_範本檔本身要解析得動(name, monkeypatch):
 
     這一條測的是【我們的檔案】,不是 dotenv 的解析能力,所以它留下來。
     """
-    path = Path(__file__).resolve().parent.parent / name
+    path = ROOT / name
     assert path.exists(), f"{name} 應該存在(它是給使用者複製的範本)"
 
     # 讓範本裡的鍵都算「新的」,否則跑測試時環境裡已經有的會被算成「沒套用」
