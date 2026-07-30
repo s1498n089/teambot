@@ -113,43 +113,6 @@ class TestPublicHost:
         assert server_mod.Hub(port=8787).base_url == "http://127.0.0.1:8787"
 
 
-class TestStampForYou:
-    """server 替每條連線蓋的「這則有沒有點名你」戳 —— bell 只看戳,不拆信。"""
-
-    def test_mentioned_gets_the_stamp(self):
-        assert server_mod.stamp_for_you({"id": 1, "mentions": ["alice"]},
-                                        "alice")["for_you"] is True
-
-    def test_not_mentioned(self):
-        assert server_mod.stamp_for_you({"id": 1, "mentions": ["bob"]},
-                                        "alice")["for_you"] is False
-
-    def test_broadcast_is_for_everyone(self):
-        assert server_mod.stamp_for_you({"id": 1, "mentions": ["all"]},
-                                        "alice")["for_you"] is True
-
-    def test_does_not_mutate_the_shared_event(self):
-        """★ 這條是這一族最重要的。
-
-        bus.publish 是把【同一個 dict】放進所有訂閱者的 queue —— 就地加欄位會污染
-        別人拿到的事件,而且症狀是隨機的(誰先序列化誰贏)。那種 bug 查起來最痛:
-        重現不了、看起來像「偶爾有人沒被敲醒」。
-        """
-        event = {"id": 1, "mentions": ["alice"]}
-        server_mod.stamp_for_you(event, "alice")
-        assert "for_you" not in event
-
-    def test_anonymous_watcher_gets_no_stamp(self):
-        """瀏覽器沒帶 watcher —— 蓋了也沒人看。"""
-        event = {"id": 1, "mentions": ["alice"]}
-        assert server_mod.stamp_for_you(event, None) is event
-
-    def test_non_message_event_gets_no_stamp(self):
-        """強制敲鈴那種事件沒有 mentions,沒有「點名」這回事。"""
-        event = {"type": "ring", "target": "alice"}
-        assert server_mod.stamp_for_you(event, "alice") is event
-
-
 class TestMessageStore:
     def test_per_room_independent_ids(self, tmp_path):
         store = MessageStore(tmp_path / "chat.jsonl")
@@ -494,92 +457,6 @@ class TestBellState:
 
         state.on_message(1010)          # 全新的一則,距上次遠不到 90 秒
         assert len(rings) == 2, "新訊息被 90 秒窗吃掉了 —— 那正是這個 bug"
-
-    # ── 抖動:沒點名我的訊息等 0~JITTER_MAX_SECONDS 秒隨機,錯開多個 agent 的同秒喚醒 ──
-
-    def test_mentioned_rings_immediately(self, tmp_path):
-        """被 @ 的人不等 —— @ 就是快速通道。"""
-        state, rings, _ = self._make(tmp_path, cursor=0)
-        state.on_message(1, for_you=True)
-        assert len(rings) == 1
-
-    def test_not_mentioned_waits(self, tmp_path, monkeypatch):
-        """沒被 @ 就先等一下,那一刻不敲。"""
-        monkeypatch.setattr(bell_mod.random, "uniform", lambda _a, _b: 2.0)
-        state, rings, _ = self._make(tmp_path, cursor=0)
-        state.on_message(1, for_you=False)
-        assert rings == []
-        assert state.hold_until > 0
-
-    def test_mention_during_the_wait_cancels_it(self, tmp_path, monkeypatch):
-        """★ 等待中來了一則點名我的 → 立刻醒,不把它一起壓在抖動裡。
-
-        少了這條,「@ 誰誰立刻回」這個心智模型就破了 —— 而那正是這整套
-        點名接力的基礎。
-        """
-        monkeypatch.setattr(bell_mod.random, "uniform", lambda _a, _b: 60.0)
-        state, rings, _ = self._make(tmp_path, cursor=0)
-        state.on_message(1, for_you=False)
-        assert rings == []
-        state.on_message(2, for_you=True)
-        assert len(rings) == 1
-        assert state.hold_until == 0
-
-    def test_burst_does_not_push_the_wait_further_out(self, tmp_path, monkeypatch):
-        """★ 連發多則不重排等待。
-
-        每則都重排的話,等待會被一路往後推 —— 變成【訊息越多醒得越晚】,
-        跟這個功能想要的正好相反(它要的是錯開,不是拖延)。
-        """
-        monkeypatch.setattr(bell_mod.random, "uniform", lambda _a, _b: 2.0)
-        state, _rings, _ = self._make(tmp_path, cursor=0)
-        state.on_message(1, for_you=False)
-        first = state.hold_until
-        state.on_message(2, for_you=False)
-        state.on_message(3, for_you=False)
-        assert state.hold_until == first
-
-    def test_expired_wait_gets_a_fresh_one(self, tmp_path, monkeypatch):
-        """★ 等待過期之後,下一則要【重新】抖動 —— 不是只抖第一次。
-
-        這個 bug 是實機抓到的,而當時 151 條測試全綠、五個突變也全紅(看起來很穩):
-        原本的條件寫成 `elif not self.hold_until`,判斷的是【有沒有設過】——
-        但 hold_until 是時間戳,設過一次就永遠 truthy,於是抖動只發生在第一則。
-        實機連發四則的實測是 2 / 0 / 0 / 0 秒。
-
-        ★★ 教訓有兩個:**時間戳不是旗標**;以及**測試綠不等於實機對** ——
-          上面那條 test_burst 只涵蓋「還在等的時候」,沒有人想到問「等完之後呢」。
-        """
-        delays = iter([2.0, 1.5])
-        monkeypatch.setattr(bell_mod.random, "uniform", lambda _a, _b: next(delays))
-        state, _rings, _ = self._make(tmp_path, cursor=0)
-
-        state.on_message(1, for_you=False)
-        state.hold_until = time.monotonic() - 1        # 讓這一輪的等待過期
-        state.on_message(2, for_you=False)
-
-        assert state.hold_until > time.monotonic()     # 新的等待排上了
-
-    def test_force_ring_ignores_the_wait(self, tmp_path, monkeypatch):
-        """人按的那一下不等抖動 —— 他要的就是「現在」。"""
-        monkeypatch.setattr(bell_mod.random, "uniform", lambda _a, _b: 60.0)
-        state, rings, _ = self._make(tmp_path, cursor=0)
-        state.on_message(1, for_you=False)
-        assert rings == []
-        state.force_ring()
-        assert len(rings) == 1
-        assert state.hold_until == 0
-
-    def test_for_you_defaults_to_true_for_old_servers(self, tmp_path, monkeypatch):
-        """★ 舊版 server 不送這個欄位 —— 不知道時要往「寧可吵也不要漏」那邊倒。
-
-        預設 False 的話,配上舊 server 就是每一則都白等,而且沒有人會發現。
-        跟 read_cursor 讀不到時回 0 是同一個方向。
-        """
-        monkeypatch.setattr(bell_mod.random, "uniform", lambda _a, _b: 60.0)
-        state, rings, _ = self._make(tmp_path, cursor=0)
-        state.on_message(1)                       # 沒帶 for_you,模擬舊 server
-        assert len(rings) == 1
 
     def test_same_batch_still_rings_once(self, tmp_path):
         """同一批連發多則仍然只敲一次 —— 修 bug 不能把原本要防的東西也拆掉。"""

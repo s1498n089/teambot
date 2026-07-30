@@ -244,31 +244,6 @@ class TestSSE:
             client.app, "/api/rooms/s/stream", [("Last-Event-ID", "1")], n_frames=1))
         assert '"two"' in frames[0]  # 從斷點續傳,不重播 id 1
 
-    def test_for_you_stamp_differs_per_connection(self, client):
-        """同一則訊息,對被 @ 的人是急件、對別人不是 —— 戳蓋在【每條連線】上。
-
-        ★ 只檢查 bus 佇列【抓不到這個】:佇列裡只有一份 dict,per-連線的差異
-          是在序列化那一步才產生的 —— 跟下面那個 ring 事件是同一條教訓。
-          真正要防的 bug 是「就地改共享 dict」,而它的症狀是隨機的:
-          誰先序列化誰贏,看起來像「偶爾有人沒被敲醒」。
-        """
-        post_msg(client, "stamp", "carol", "hi @alice")
-        alice = asyncio.run(collect_sse_frames(
-            client.app, "/api/rooms/stamp/stream?since_id=0&watcher=alice&kind=agent",
-            [], n_frames=1))
-        bob = asyncio.run(collect_sse_frames(
-            client.app, "/api/rooms/stamp/stream?since_id=0&watcher=bob&kind=agent",
-            [], n_frames=1))
-        assert '"for_you": true' in alice[0]
-        assert '"for_you": false' in bob[0]
-
-    def test_browser_stream_has_no_stamp(self, client):
-        """瀏覽器不帶 watcher —— 那個戳是給敲鈴器看的,前端用不到。"""
-        post_msg(client, "stamp2", "carol", "hi @alice")
-        frames = asyncio.run(collect_sse_frames(
-            client.app, "/api/rooms/stamp2/stream?since_id=0", [], n_frames=1))
-        assert "for_you" not in frames[0]
-
     def test_non_message_event_survives_serialization(self, client):
         """直播上不是只有訊息:強制敲鈴那種事件【沒有 id】,序列化不能因此炸掉。
 
