@@ -35,5 +35,6 @@ server.env
 *.tmp
 
 # ── 每間聊天室自己協調出來的判準(不是產品的一部分,不入版控)──
-#   命名慣例:<房名>_room_rule.md,例如 main_room_rule.md
-*_room_rule.md
+#   rooms/<房名>_room_rule.md,例如 rooms/main_room_rule.md
+#   ★ rooms/README.md 【要】進版控 —— clone 的人得知道那個空目錄是幹嘛的
+rooms/*_room_rule.md
