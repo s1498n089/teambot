@@ -125,10 +125,10 @@ def show(messages: list[dict], name: str, server: str, room: str) -> None:
     """
     if len(messages) > REJOIN_THRESHOLD:
         print(f"⚠ 未讀 {len(messages)} 則 —— 這已經不是發言前對帳,是重新加入。")
-        print("  照 AGENTS.md 的加入流程走(看最近的 + 掃一遍點名,中間刻意跳過):")
-        print(f'     curl -s "{server}/api/rooms/{room}/messages?tail=50"')
-        print(f'     curl -s "{server}/api/rooms/{room}/messages'
-              f'?since_id=0&mentioned={name}"')
+        # ★ 指路指到另一支工具,不是指到兩條手打的 curl:
+        #   手打的那兩條【打錯不會報錯】(尤其 mentioned= 那條,漏了等於跳過安全網),
+        #   而且兩支工具互相指路之後,agent 的世界只剩兩個名字。
+        print(f"  改跑:uv run read.py --name {name} --rejoin")
         return
 
     print(f"── {len(messages)} 則未讀(全文)──")

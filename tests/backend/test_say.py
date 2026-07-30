@@ -174,12 +174,15 @@ class TestUnreadStopsEverything:
         run(monkeypatch, http, "--name", "alice", "--expect", "0", "--text", "話")
         assert "重新加入" in capsys.readouterr().out         # 51:改指路
 
-    def test_huge_backlog_points_to_the_rejoin_flow_instead(
-            self, workspace, monkeypatch, capsys):
+    def test_huge_backlog_points_to_the_rejoin_tool(self, workspace, monkeypatch, capsys):
         """全文有一個邊界:幾百則硬印出來等於洗掉 agent 的 context。
 
         而那個場景 AGENTS.md 早有處方 —— 那已經不是「發言前對帳」,是「重新加入」。
         門檻跟加入流程的 tail=50 對齊:超過那個量,協定本身就建議跳過中間。
+
+        ★ 指路要指到 read.py --rejoin,【不是】指到兩條手打的 curl:
+          手打那兩條打錯不會報錯(尤其 mentioned= 那條,漏了等於跳過安全網),
+          而兩支工具互相指路之後,agent 的世界只剩兩個名字。
         """
         many = [{"id": i, "from": "bob", "text": f"第{i}則"}
                 for i in range(9, 9 + say_mod.REJOIN_THRESHOLD + 1)]
@@ -188,8 +191,9 @@ class TestUnreadStopsEverything:
                    "--text", "我的話") == 1
         out = capsys.readouterr().out
         assert "重新加入" in out
-        assert "tail=50" in out and "mentioned=alice" in out   # 兩條路都要指
-        assert "第9則" not in out                              # 沒有硬印出來
+        assert "read.py" in out and "--rejoin" in out
+        assert "curl" not in out                # 不再叫人手打 curl
+        assert "第9則" not in out               # 沒有硬印出來
 
 
 # ---------- 沒有未讀時:送出,而且只在成功之後才推 ----------
