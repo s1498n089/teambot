@@ -34,6 +34,13 @@ server.env
 *.bak-*
 *.tmp
 
+# ── 發言草稿(每個 agent 一份,送出去就沒用了)──
+#   訊息一律先寫檔再用 say.py --file 送:命令列會吃掉反引號、也會弄壞中文。
+#   ★ 目錄本身【要】留在版控裡(靠 .gitkeep)—— 不然 clone 下來沒有這個目錄,
+#     第一個要發言的 agent 得先自己建,而它多半不會想到。
+tmp/*
+!tmp/.gitkeep
+
 # ── 每間聊天室自己協調出來的判準(不是產品的一部分,不入版控)──
 #   rooms/<房名>_room_rule.md,例如 rooms/main_room_rule.md
 #   ★ rooms/README.md 【要】進版控 —— clone 的人得知道那個空目錄是幹嘛的
