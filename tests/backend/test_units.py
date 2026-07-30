@@ -74,6 +74,45 @@ class TestSanitizeSender:
 
 # ---------- MessageStore ----------
 
+class TestPublicHost:
+    """PUBLIC_HOST 只放主機/IP,port 由 PORT 接上 —— 設定裡 port 只有一個地方寫。"""
+
+    def test_bare_host_passes(self):
+        assert server_mod.clean_public_host("10.199.20.151") == "10.199.20.151"
+        assert server_mod.clean_public_host(" hub.local ") == "hub.local"
+
+    def test_blank_means_not_set(self):
+        assert server_mod.clean_public_host("") == ""
+        assert server_mod.clean_public_host("   ") == ""
+
+    def test_ipv6_literal_passes(self):
+        assert server_mod.clean_public_host("[::1]") == "[::1]"
+
+    @pytest.mark.parametrize("bad", [
+        "http://10.199.20.151:8787",   # 舊格式:整條網址
+        "10.199.20.151:8787",          # 帶了 port
+        "10.199.20.151/",              # 帶了路徑
+    ])
+    def test_url_shaped_values_are_rejected_loudly(self, bad):
+        """寫成網址就開機炸掉。
+
+        默默剝掉也做得到,但那樣錯誤會【沉下去】:hub 照跑,名片卻是壞的,
+        症狀要等到對方派的 task 逾時才浮出來,而那時沒有人會聯想到這一行設定。
+        """
+        with pytest.raises(SystemExit) as excinfo:
+            server_mod.clean_public_host(bad)
+        assert "PUBLIC_HOST" in str(excinfo.value)
+
+    def test_base_url_follows_port(self, isolated_base, monkeypatch):
+        """改 PORT,對外網址要跟著動 —— 這是把 port 從設定值裡拿掉的全部理由。"""
+        monkeypatch.setenv("PUBLIC_HOST", "10.199.20.151")
+        monkeypatch.setenv("PORT", "9999")
+        assert server_mod.Hub().base_url == "http://10.199.20.151:9999"
+
+    def test_falls_back_to_loopback(self, isolated_base):
+        assert server_mod.Hub(port=8787).base_url == "http://127.0.0.1:8787"
+
+
 class TestMessageStore:
     def test_per_room_independent_ids(self, tmp_path):
         store = MessageStore(tmp_path / "chat.jsonl")

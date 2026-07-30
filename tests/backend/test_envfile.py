@@ -74,7 +74,7 @@ def test_範本檔本身要解析得動(name, monkeypatch):
     assert path.exists(), f"{name} 應該存在(它是給使用者複製的範本)"
 
     # 讓範本裡的鍵都算「新的」,否則跑測試時環境裡已經有的會被算成「沒套用」
-    for key in ("HOST", "PORT", "PUBLIC_URL", "A2A_SERVER", "A2A_ROOM"):
+    for key in ("HOST", "PORT", "PUBLIC_HOST", "A2A_SERVER", "A2A_ROOM"):
         monkeypatch.delenv(key, raising=False)
 
     assert load_env_file(path), f"{name} 應該至少有一個有效設定"

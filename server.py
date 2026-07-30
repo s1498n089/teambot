@@ -35,6 +35,17 @@ from pydantic import BaseModel, Field
 
 import a2a as a2a_mod
 
+# ---------- 主控台編碼 ----------
+#
+# Windows 主控台預設不是 UTF-8,而這支程式印中文警告(還有 SystemExit 的錯誤訊息)。
+# 不處理的話,最需要被讀懂的那幾行會變成亂碼 —— 而它們正好都是「你設定寫錯了」那種訊息。
+#
+# hasattr 那道保護是給 pytest 的:測試會把 stdout 換成自己的擷取物件,
+# 那個物件不一定有 reconfigure。
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8")
+
 # ---------- 常數 ----------
 
 BASE = Path(__file__).resolve().parent
@@ -75,6 +86,27 @@ def sanitize_sender(raw: str) -> str | None:
     if SENDER_RE.match(name):
         return name
     return None
+
+
+def clean_public_host(raw: str) -> str:
+    """PUBLIC_HOST 只吃主機名或 IP —— 帶了 scheme 或 port 就當場擋下。
+
+    為什麼是擋下、而不是默默剝掉:
+        設定寫錯的後果是【遠端拿到一張打不通的名片】,而那個症狀會在
+        很遠的地方才浮出來 —— 對方派的 task 逾時變 FAILED,沒有人會聯想到
+        是 hub 這一行設定。開機就炸、訊息直接寫出正確寫法,比事後追那條線便宜太多。
+    """
+    value = (raw or "").strip()
+    if not value:
+        return ""
+    if value.startswith("[") and value.endswith("]"):    # IPv6 字面值,例如 [::1]
+        return value
+    if "://" in value or "/" in value or ":" in value:
+        raise SystemExit(
+            f"[hub] PUBLIC_HOST 只放主機名或 IP,不要帶 http:// 或 port —— 現在是 {value!r}。\n"
+            f"      port 請用 PORT 那一行設,scheme 固定 http。\n"
+            f"      正確寫法:PUBLIC_HOST=10.199.20.151")
+    return value
 
 
 # ---------- 自訂例外 ----------
@@ -571,12 +603,19 @@ class Hub:
     """
 
     def __init__(self, port: int | None = None, host: str | None = None,
-                 public_url: str | None = None):
+                 public_host: str | None = None):
         self.port = port or int(os.environ.get("PORT", str(DEFAULT_PORT)))
         self.host = host or os.environ.get("HOST", DEFAULT_HOST)
-        self.public_url = (public_url or os.environ.get("PUBLIC_URL", "")).rstrip("/")
-        self.base_url = self.public_url or f"http://127.0.0.1:{self.port}"
-        self.warn_if_exposed_without_public_url()
+        self.public_host = clean_public_host(public_host or os.environ.get("PUBLIC_HOST", ""))
+        # 對外網址只有【主機】那一段要設定,scheme 與 port 由這裡接上 ——
+        # port 只有 PORT 一個來源,不會出現「PORT 改了但網址還寫舊的」這種對不起來的設定。
+        #
+        # 誠實標一個取捨:這樣就固定是 http、固定用 PORT,
+        # **反向代理後面的 https://a2a.example.com(沒有 port)表達不出來**。
+        # 現階段是區網直連,設定直覺比那個彈性值錢;哪天真要上反向代理,
+        # 這行就是要改的地方(那時候該回到「整條網址」的形式)。
+        self.base_url = f"http://{self.public_host or '127.0.0.1'}:{self.port}"
+        self.warn_if_exposed_without_public_host()
 
         # 資料目錄在這裡才算完整路徑(不是模組層級的常數)——
         # 這樣測試 monkeypatch 掉 BASE 之後,資料自然落在它的隔離目錄裡。
@@ -621,19 +660,20 @@ class Hub:
 
     # ---------- 開機時的準備工作 ----------
 
-    def warn_if_exposed_without_public_url(self) -> None:
-        """對外開放卻沒設對外網址時,印一行警告。
+    def warn_if_exposed_without_public_host(self) -> None:
+        """對外開放卻沒設對外主機時,印一行警告。
 
         為什麼要警告:遠端的 client 會來問「你的名片在哪」,
         我們若回答 127.0.0.1,對它來說指的是【它自己那台機器】,永遠連不到我們。
         """
         if self.host in ("127.0.0.1", "localhost"):
             return
-        if self.public_url:
+        if self.public_host:
             return
-        print(f"[hub] WARN HOST={self.host}(對外開放)但未設 PUBLIC_URL — "
+        print(f"[hub] WARN HOST={self.host}(對外開放)但未設 PUBLIC_HOST — "
               f"遠端 client 取得的 Agent Card url 會指向對它無效的 {self.base_url};"
-              f"建議啟動時設 PUBLIC_URL=http://<你的區網IP>:{self.port}", file=sys.stderr)
+              f"建議啟動時設 PUBLIC_HOST=<你的區網IP>(port 會自動接上 {self.port})",
+              file=sys.stderr)
 
     def issue_startup_tokens(self) -> None:
         """開了認證時,確保名冊上每個人(加上人類 user)都有一把鑰匙。
@@ -1107,7 +1147,7 @@ def register_a2a_route(app: FastAPI, hub: Hub) -> None:
 # ═══════════════════════════════════════════════════════════════════════════
 
 def create_app(port: int | None = None, host: str | None = None,
-               public_url: str | None = None) -> FastAPI:
+               public_host: str | None = None) -> FastAPI:
     """把整個 hub 組起來,回傳一個可以跑的網頁應用。
 
     這個函式刻意保持很短 —— 它只做組裝,不做決定。
@@ -1116,7 +1156,7 @@ def create_app(port: int | None = None, host: str | None = None,
     關於綁定位址:HOST 決定要聽哪個網路介面,**預設是 0.0.0.0,也就是開放區網**
     (見 DEFAULT_HOST;想只聽本機請設 HOST=127.0.0.1)。
     """
-    hub = Hub(port, host, public_url)
+    hub = Hub(port, host, public_host)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):

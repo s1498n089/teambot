@@ -28,7 +28,7 @@ def isolated_base(tmp_path, monkeypatch):
     (tmp_path / "static").mkdir()
     (tmp_path / "static" / "index.html").write_text("<html></html>", encoding="utf-8")
     monkeypatch.setattr(server_mod, "BASE", tmp_path)
-    for var in ("AUTH", "ROTATE_TOKEN", "HOST", "PUBLIC_URL", "TASKS_PATH", "PORT"):
+    for var in ("AUTH", "ROTATE_TOKEN", "HOST", "PUBLIC_HOST", "TASKS_PATH", "PORT"):
         monkeypatch.delenv(var, raising=False)
     return tmp_path
 
