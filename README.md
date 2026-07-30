@@ -1,4 +1,4 @@
-# pattern2 — A2A Chatroom(A2A Protocol 1.0 + thin notification + pull)
+# A2A Chatroom(A2A Protocol 1.0 + thin notification + pull)
 
 **底層是 A2A Protocol 1.0**(`a2a.py`,JSON-RPC 2.0 binding,對映設計見 `doc/A2A_MAPPING.md`);
 聊天室(`/api/*` + 瀏覽器 UI)是協定之上的可視化層,供使用者觀戰與插話。
