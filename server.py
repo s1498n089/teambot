@@ -956,6 +956,37 @@ def register_room_routes(app: FastAPI, hub: Hub) -> None:
         return {"tasks": hub.a2a_layer.tasks_for_room(room)}
 
 
+def stamp_for_you(event: dict, watcher: str | None) -> dict:
+    """替【這一條連線】蓋一個戳:這則有沒有點名你。
+
+    ## 為什麼是 server 蓋,而不是 bell 自己讀 mentions
+
+    「敲鈴器不看訊息內容」是一道**單向門** —— 它現在只認得兩個數字(房間進度、
+    自己的 cursor),破了這個性質就收不回來:下一個需求會是「@我的才敲」,
+    再下一個是「關鍵字才敲」,然後敲鈴器就變成半個 agent 了。
+
+    而 server 本來就是 mentions 的解析主人(訊息是 parse 完才存的),
+    推送時比對一下訂閱者的名字是一行的事。
+
+    ★ 像信封上的急件戳:**郵差不拆信,看戳決定何時敲門。**
+
+    ## 為什麼一定要複製
+
+    `bus.publish` 是把【同一個 dict】放進所有訂閱者的 queue —— 就地加欄位會污染
+    別人拿到的事件,而且症狀是隨機的(誰先序列化誰贏),那種 bug 最難查。
+
+    ## 什麼情況不蓋
+
+        匿名觀眾(沒帶 watcher)   蓋了也沒人看 —— 瀏覽器不需要這個戳
+        沒有 mentions 的事件      那不是訊息(例如強制敲鈴),沒有「點名」這回事
+    """
+    mentions = event.get("mentions")
+    if not watcher or mentions is None:
+        return event
+    return {**event,
+            "for_you": watcher in mentions or MentionParser.BROADCAST in mentions}
+
+
 def register_stream_route(app: FastAPI, hub: Hub) -> None:
     """觀戰直播。獨立一組,因為它是唯一一個「連線會一直開著」的端點。"""
 
@@ -996,8 +1027,12 @@ def register_stream_route(app: FastAPI, hub: Hub) -> None:
               房間裡每一個訂閱者(含瀏覽器)一起被踢掉。
 
               SSE 規格本來就允許沒有 id 的事件,所以沒有就不寫那一行。
+
+            ★ 序列化【之前】蓋 for_you 戳:那個戳是 per-連線 的
+              (同一則訊息,對 alice 是急件、對 bob 不是),所以只能在這裡蓋 ——
+              廣播那一端只有一份 dict,蓋不了每個人不一樣的東西。
             """
-            payload = json.dumps(event, ensure_ascii=False)
+            payload = json.dumps(stamp_for_you(event, who), ensure_ascii=False)
             if "id" not in event:
                 return f"data: {payload}\n\n"
             return f"id: {event['id']}\ndata: {payload}\n\n"

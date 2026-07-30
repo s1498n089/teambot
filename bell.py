@@ -107,6 +107,7 @@ import argparse
 import codecs
 import json
 import os
+import random
 import shutil
 import sys
 import threading
@@ -125,6 +126,7 @@ BELL_SUBMIT = "\r"
 BELL_SUBMIT_GAP = 0.1       # 鈴聲的字與送出鍵之間隔多久(見 guarded_write)
 RE_RING_SECONDS = 90        # 【同一批】敲後多久 cursor 仍未推進就重敲
 PATROL_SECONDS = 5          # 節拍器一圈;也是【有新訊息時】的最短敲鈴間隔
+JITTER_MAX_SECONDS = 5      # 沒點名我的訊息,隨機等 0~這麼久再敲(見閘門二)
 MAX_RINGS = 3               # 同一段落後最多敲幾次,之後改印警告(不騷擾設計)
 SSE_READ_TIMEOUT = 60       # server 每 15 秒有 keep-alive,60 秒沒動靜視為死連線
 RECONNECT_MAX_BACKOFF = 30
@@ -280,6 +282,7 @@ class BellState:
         self.rings_this_gap = 0
         self.last_ring_at = 0.0
         self.rang_for_id = 0        # 上次是為了哪一則敲的 —— 分辨「同一批」與「新內容」
+        self.hold_until = 0.0       # 抖動:等到這個時刻才准敲(見閘門二)
         self.warned = False
         self.lock = threading.Lock()
 
@@ -300,14 +303,47 @@ class BellState:
         except (OSError, ValueError):
             return 0
 
-    def on_message(self, msg_id: int) -> None:
+    def on_message(self, msg_id: int, for_you: bool = True) -> None:
         """SSE 每收到一則訊息呼叫一次。
 
-        ★ 這裡【不看訊息內容】,只看 id。誰被點名、講了什麼,決策層一概不知道 ——
-          它只比兩個數字:房間到哪、這個 agent 讀到哪。
+        ★ 這裡【仍然不看訊息內容】,只看 id 跟一個布林 —— 誰被點名是 server
+          蓋好的戳(`for_you`),敲鈴器不拆信。那個分界很重要:
+          「敲鈴器不解析訊息」是一道單向門,破了就收不回來 ——
+          下一個需求會是「關鍵字才敲」,然後它就變成半個 agent 了。
+
+        ★★ for_you 預設 True(而不是 False)是刻意的:
+          舊版 server 不會送這個欄位,而「不知道是不是給我的」時要往
+          【寧可吵也不要漏】那邊倒 —— 跟 read_cursor 讀不到時回 0 同一個方向。
+          預設 False 的話,配上舊 server 就是每一則都白等,而且沒有人會發現。
         """
+        delay = 0.0
         with self.lock:
             self.known_last_id = max(self.known_last_id, msg_id)
+            now = time.monotonic()
+            if for_you:
+                self.hold_until = 0.0        # 點名了 → 取消等待,這一輪立刻敲
+            elif self.hold_until <= now:
+                # 【還在等的話】不重排 —— 否則連發五則會把等待一路往後推,
+                # 變成「訊息越多醒得越晚」,那跟這個功能想要的正好相反。
+                #
+                # ☠ 這個條件寫錯過一次,而且測試全綠、五個突變也沒抓到:
+                #   原本寫的是 `elif not self.hold_until`,判斷的是【有沒有設過】——
+                #   但 hold_until 是【時間戳】,設過一次就永遠是 truthy,
+                #   於是抖動只發生在第一則,之後每則都是 0 秒。
+                #   實機發四則訊息就露出來了(2 / 0 / 0 / 0 秒)。
+                #   ★ 時間戳不是旗標:要問「還在等嗎」就得跟現在比,不能只看有沒有值。
+                delay = random.uniform(0, JITTER_MAX_SECONDS)
+                self.hold_until = now + delay
+
+        if delay:
+            # ★ 一次性計時器,不是輪詢:節拍器 5 秒一圈,靠它的話這幾秒的抖動
+            #   會被拖成最多 5 秒 —— 抖動的意義(錯開)就沒了。
+            #   daemon:主程式收工時不要被它卡住。
+            timer = threading.Timer(delay, self.evaluate)
+            timer.daemon = True
+            timer.start()
+
+        # 照樣呼叫一次:抖動中會被閘門二擋下,但閘門一(追上了)仍然要跑。
         self.evaluate()
 
     def evaluate(self) -> None:
@@ -316,13 +352,14 @@ class BellState:
         ★ 這個方法【被呼叫得很頻繁】,但真正敲下去的次數很少。
           呼叫它的有兩邊:收到新訊息時(sse_watch)、以及每 5 秒一次(re_ring_loop)。
 
-        會敲下去,得先通過三道閘門 —— 任何一道擋下都直接返回:
+        會敲下去,得先通過四道閘門 —— 任何一道擋下都直接返回:
 
             1. 你追上了嗎?    cursor 已經不落後 → 不敲,順便把計數歸零
-            2. 敲滿三次了嗎?  已經敲了 MAX_RINGS 次 → 不敲,只印一次警告就閉嘴
-            3. 才剛敲過嗎?    距離上次太近 → 不敲
+            2. 還在抖動中嗎?  這批沒點名你 → 等 0~5 秒隨機,讓多個 agent 錯開
+            3. 敲滿三次了嗎?  已經敲了 MAX_RINGS 次 → 不敲,只印一次警告就閉嘴
+            4. 才剛敲過嗎?    距離上次太近 → 不敲
 
-        ★★ 閘門二與三都先問同一件事:**從上次敲到現在,房間有沒有前進?**
+        ★★ 閘門三與四都先問同一件事:**從上次敲到現在,房間有沒有前進?**
 
                有新內容  額度重新計算(閘二歸零),最短間隔只要一圈巡邏
                同一批    維持原本的不騷擾:三次封頂、90 秒才重敲
@@ -344,7 +381,7 @@ class BellState:
                     → 再 90 秒     → 敲第 3 次
                     → 再過去       → 安靜,印一行警告請人類看一眼
 
-        中間那幾十次每 5 秒的檢查,全部在第三道閘門就返回了 ——
+        中間那幾十次每 5 秒的檢查,全部在第四道閘門就返回了 ——
         **每 5 秒是「檢查」,不是「敲」。**
         """
         with self.lock:
@@ -360,9 +397,24 @@ class BellState:
                 return
 
             now = time.monotonic()
+
+            # ── 閘門二:抖動 —— 沒點名你的訊息,等 0~JITTER_MAX_SECONDS 秒隨機再敲 ──
+            #
+            #    它買到的【只有】一件事:多個 agent 不要在同一秒全部醒來。
+            #    ★ 它買不到「後面的人醒來時已經看得到別人回了所以不用發」——
+            #      實測從第一聲鈴到一個 agent 講完話,中位數 38 秒(29 組樣本),
+            #      而這幾秒差得太遠。要買那個效果窗得開到 40~60 秒,沒人會接受。
+            #      所以【不要把這個閘門的價值講大】,它是配菜:
+            #      真正解決撞車的是發言那一端收成一個動作(say.py)。
+            #
+            #    被點名的人不等(on_message 會把 hold_until 歸零)——
+            #    @ 就是快速通道,這個心智模型對人也直覺。
+            if now < self.hold_until:
+                return
+
             fresh = self.known_last_id > self.rang_for_id   # 上次敲之後又有新訊息
 
-            # ── 閘門二:敲滿了就不再騷擾,但要留一行紀錄讓人類知道有人卡住 ──
+            # ── 閘門三:敲滿了就不再騷擾,但要留一行紀錄讓人類知道有人卡住 ──
             #    warned 這個旗標是為了「只印一次」—— 否則每 5 秒就會刷一行同樣的警告。
             #    ★ 有新內容就把額度還回來:新訊息是【新的敲鈴理由】,
             #      不該被上一批的額度綁住(否則永久噤聲的死結解不開)。
@@ -383,7 +435,7 @@ class BellState:
                     self.warned = True
                 return
 
-            # ── 閘門三:才剛敲過 —— 這道擋掉了絕大多數的呼叫 ──
+            # ── 閘門四:才剛敲過 —— 這道擋掉了絕大多數的呼叫 ──
             #    (agent 可能正在生成中,給它時間反應,不要連珠炮)
             #    ★ 間隔看的是「有沒有新東西」:
             #        同一批   90 秒(等它回應那一批)
@@ -412,7 +464,7 @@ class BellState:
 
         ★ 為什麼要有一條繞過去的路:
 
-          那三道閘是為了「不吵一個正在生成中的 agent」而設的,而觸發閘門二
+          那四道閘是為了「不吵一個正在生成中的 agent」而設的,而觸發閘門三
           (連敲三次沒反應就安靜)的不一定是「卡住」,也可能只是「正在忙」。
           一旦安靜下來,要重新開始敲得等 cursor 追上 —— 而追上需要被敲醒。
           **那是一個死結,而且從外面看起來就是「這個 agent 對整個聊天室沒反應」。**
@@ -422,6 +474,7 @@ class BellState:
         with self.lock:
             self.rings_this_gap = 0      # 歸零:這一下不算在不騷擾額度裡
             self.warned = False
+            self.hold_until = 0.0        # 人按的那一下不等抖動 —— 他要的就是「現在」
             self.last_ring_at = time.monotonic()
             self.rang_for_id = self.known_last_id
             delivered = self.ring_fn(force_bell_line(self.name))
@@ -536,7 +589,11 @@ def sse_watch(server: str, room: str, state: BellState, child_alive) -> None:
                                 state.force_ring()
                             continue
                         try:
-                            state.on_message(int(payload["id"]))    # ⑦
+                            # ★ for_you 是 server 蓋的戳(這則有沒有點名我)。
+                            #   預設 True:舊版 server 沒有這個欄位,而不知道時
+                            #   要往「寧可吵也不要漏」那邊倒。
+                            state.on_message(int(payload["id"]),   # ⑦
+                                             payload.get("for_you", True))
                         except (KeyError, ValueError, TypeError):
                             pass  # 非訊息 payload,略過
         except OSError as exc:                                      # ⑧
