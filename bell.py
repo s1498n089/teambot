@@ -122,7 +122,8 @@ BELL_PREFIX = "[A2A-BELL]"      # 文件教的是「凡見這個前綴一律對�
 # 送出鍵。★ 一定是 \r 不是 \n:實測對真正的 CLI 送 \n,那行字會躺在輸入框裡
 # 不送出,agent 就永遠不會醒 —— 而且畫面上看起來「鈴有敲到」,最難查的那種。
 BELL_SUBMIT = "\r"
-RE_RING_SECONDS = 90        # 敲後多久 cursor 仍未推進就重敲
+RE_RING_SECONDS = 90        # 【同一批】敲後多久 cursor 仍未推進就重敲
+PATROL_SECONDS = 5          # 節拍器一圈;也是【有新訊息時】的最短敲鈴間隔
 MAX_RINGS = 3               # 同一段落後最多敲幾次,之後改印警告(不騷擾設計)
 SSE_READ_TIMEOUT = 60       # server 每 15 秒有 keep-alive,60 秒沒動靜視為死連線
 RECONNECT_MAX_BACKOFF = 30
@@ -258,6 +259,7 @@ class BellState:
         self.known_last_id = 0
         self.rings_this_gap = 0
         self.last_ring_at = 0.0
+        self.rang_for_id = 0        # 上次是為了哪一則敲的 —— 分辨「同一批」與「新內容」
         self.warned = False
         self.lock = threading.Lock()
 
@@ -298,7 +300,22 @@ class BellState:
 
             1. 你追上了嗎?    cursor 已經不落後 → 不敲,順便把計數歸零
             2. 敲滿三次了嗎?  已經敲了 MAX_RINGS 次 → 不敲,只印一次警告就閉嘴
-            3. 才剛敲過嗎?    距離上次不到 RE_RING_SECONDS(90 秒)→ 不敲
+            3. 才剛敲過嗎?    距離上次太近 → 不敲
+
+        ★★ 閘門二與三都先問同一件事:**從上次敲到現在,房間有沒有前進?**
+
+               有新內容  額度重新計算(閘二歸零),最短間隔只要一圈巡邏
+               同一批    維持原本的不騷擾:三次封頂、90 秒才重敲
+
+          為什麼非這樣不可 —— 綁錯對象會壞掉兩次:
+
+            閘二綁「落後」 → 敲滿三次就【永久】安靜,而解除需要 cursor 追上,
+                             追上又需要被敲醒。死結,從外面看就是這個 agent 死了。
+            閘三綁「時間」 → 敲完之後 90 秒內【新來的訊息】也被當成舊 backlog,
+                             使用者連發四則會一聲都沒有(2026-07-29 實地重現)。
+
+          兩個 bug 同一個根:**「要不要吵你」看的該是「有沒有新東西」,
+          不是「你落後多久」。**
 
         所以實際的節奏是這樣的:
 
@@ -319,12 +336,19 @@ class BellState:
                     log(f"cursor 已追上(={cursor}),鈴聲歸位")
                 self.rings_this_gap = 0
                 self.warned = False
+                self.rang_for_id = self.known_last_id
                 return
 
             now = time.monotonic()
+            fresh = self.known_last_id > self.rang_for_id   # 上次敲之後又有新訊息
 
             # ── 閘門二:敲滿了就不再騷擾,但要留一行紀錄讓人類知道有人卡住 ──
             #    warned 這個旗標是為了「只印一次」—— 否則每 5 秒就會刷一行同樣的警告。
+            #    ★ 有新內容就把額度還回來:新訊息是【新的敲鈴理由】,
+            #      不該被上一批的額度綁住(否則永久噤聲的死結解不開)。
+            if fresh:
+                self.rings_this_gap = 0
+                self.warned = False
             if self.rings_this_gap >= MAX_RINGS:
                 if not self.warned:
                     log(f"WARN 已敲 {MAX_RINGS} 次仍未見 cursor 推進"
@@ -332,13 +356,20 @@ class BellState:
                     self.warned = True
                 return
 
-            # ── 閘門三:才剛敲過,還在等待窗內 —— 這道擋掉了絕大多數的呼叫 ──
+            # ── 閘門三:才剛敲過 —— 這道擋掉了絕大多數的呼叫 ──
             #    (agent 可能正在生成中,給它時間反應,不要連珠炮)
-            if self.rings_this_gap and now - self.last_ring_at < RE_RING_SECONDS:
+            #    ★ 間隔看的是「有沒有新東西」:
+            #        同一批   90 秒(等它回應那一批)
+            #        新內容   一圈巡邏就好 —— 使用者剛講的話不該等一分半
+            #      連發多則仍然只敲一次:它們在同一圈巡邏內到達,
+            #      而 PATROL_SECONDS 的間隔把它們併成一次。
+            gap = PATROL_SECONDS if fresh else RE_RING_SECONDS
+            if self.last_ring_at and now - self.last_ring_at < gap:
                 return
 
             # ── 三道都過了,真的敲下去 ──
             delivered = self.ring_fn(bell_line(self.name, self.known_last_id))
+            self.rang_for_id = self.known_last_id
             # ★ 送不進去也照樣計數。這樣子行程已經死掉時,才不會變成無限重敲狂刷紀錄檔。
             self.rings_this_gap += 1
             self.last_ring_at = now
@@ -365,6 +396,7 @@ class BellState:
             self.rings_this_gap = 0      # 歸零:這一下不算在不騷擾額度裡
             self.warned = False
             self.last_ring_at = time.monotonic()
+            self.rang_for_id = self.known_last_id
             delivered = self.ring_fn(force_bell_line(self.name))
         log(f"叮咚(強制,人類要求){'' if delivered is not False else ' —— WARN 沒送進子行程'}")
 
@@ -492,7 +524,7 @@ def sse_watch(server: str, room: str, state: BellState, child_alive) -> None:
 def re_ring_loop(state: BellState, child_alive) -> None:
     """重敲節拍器:每 5 秒 evaluate 一次 — 落後未回應者到點重敲(SSE 靜默時也會跑)。"""
     while child_alive():
-        time.sleep(5)
+        time.sleep(PATROL_SECONDS)
         state.evaluate()
 
 

@@ -78,7 +78,8 @@ flowchart LR
   內部分三層:`Hub`(資料與規則)/ `register_*`(哪個網址對應哪個動作)/ `create_app`(只負責組裝)。
 - **bell.py(敲鈴器,預設喚醒)** — 以 ConPTY/pty 包住 agent CLI(TUI 體驗不變),
   盯 hub 的 SSE 直播;「房間最新 id > 該 agent 的 cursor」就把 `[A2A-BELL]` 敲進其 stdin。
-  連發只敲一次、追上歸位、90 秒重敲、三次封頂;log 在 `state/bell-<名字>.log`。
+  不騷擾的判準綁在**有沒有新訊息**:有就幾秒內敲(連發仍併成一次),
+  同一批則 90 秒重敲、三次封頂;追上歸位,log 在 `state/bell-<名字>.log`。
 - **AGENTS.md(根目錄)** — agent 的聊天協定:喚醒方式、發言規則、@點名接力、A2A 任務、收尾條件。
   放在根目錄而不是 `doc/`,是因為 **Codex 會自動載入根目錄的 `AGENTS.md`**;
   `CLAUDE.md` 只是一層薄殼,把同一份接給 Claude Code —— 規則只有一份,不維護兩套。

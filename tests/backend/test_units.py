@@ -332,7 +332,8 @@ class TestBellState:
         敲滿之後就再也不敲了。從使用者的角度看,就是這個 agent 對整個聊天室沒反應。
         """
         state, rings, _ = self._make(tmp_path, cursor=0)
-        state.rings_this_gap = bell_mod.MAX_RINGS      # 已經敲滿,正常路徑會安靜
+        state.rings_this_gap = bell_mod.MAX_RINGS      # 已經敲滿
+        state.rang_for_id = 99                         # 而且【沒有新內容】—— 額度才擋得住
         state.on_message(99)
         assert rings == []                             # 閘門二確實擋住了
 
@@ -349,7 +350,8 @@ class TestBellState:
         state.force_ring()
         assert len(rings) == 1
 
-    def test_catch_up_resets(self, tmp_path):
+    def test_catch_up_resets(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(bell_mod, "PATROL_SECONDS", 0)   # 拿掉最短間隔的地板
         state, rings, cursor_file = self._make(tmp_path, cursor=0)
         state.on_message(1)
         cursor_file.write_text("1", encoding="utf-8")
@@ -357,6 +359,31 @@ class TestBellState:
         assert state.rings_this_gap == 0  # 追上歸零
         state.on_message(2)
         assert len(rings) == 2  # 新落後配額重來
+
+    def test_new_message_is_not_muted_by_the_re_ring_window(self, tmp_path, monkeypatch):
+        """敲過一次之後【新來的】訊息不該被 90 秒窗擋住。
+
+        ★ 這是 2026-07-29 實地重現的 bug:使用者連發四則,鈴一聲都沒有 ——
+          因為「不要連珠炮」被寫成一個時間窗,於是新內容被當成舊 backlog。
+          意圖是「同一批不要吵很多次」,不是「90 秒內誰來都不理」。
+        """
+        monkeypatch.setattr(bell_mod, "PATROL_SECONDS", 0)
+        state, rings, cursor_file = self._make(tmp_path, cursor=0)
+
+        state.on_message(1009)
+        assert len(rings) == 1
+        cursor_file.write_text("1009", encoding="utf-8")   # 讀完了
+
+        state.on_message(1010)          # 全新的一則,距上次遠不到 90 秒
+        assert len(rings) == 2, "新訊息被 90 秒窗吃掉了 —— 那正是這個 bug"
+
+    def test_same_batch_still_rings_once(self, tmp_path):
+        """同一批連發多則仍然只敲一次 —— 修 bug 不能把原本要防的東西也拆掉。"""
+        state, rings, _ = self._make(tmp_path, cursor=0)
+        state.on_message(1)
+        state.on_message(2)
+        state.on_message(3)
+        assert len(rings) == 1          # 五秒地板把它們併成一次
 
     def _log_after_ring(self, tmp_path, monkeypatch, ring_fn) -> str:
         """把 log 導到 tmp,敲一次鈴,回傳落檔內容。"""
