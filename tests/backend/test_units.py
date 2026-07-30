@@ -309,7 +309,7 @@ class TestGuardedWrite:
 
     def test_normal_write_passes_through(self):
         got = []
-        assert bell_mod.guarded_write(got.append, "hi", threading.Lock()) is True
+        assert bell_mod.guarded_write(got.append, "hi", lock=threading.Lock()) is True
         assert got == ["hi"]
 
     @pytest.mark.parametrize("exc", [EOFError("Pty is closed"),   # pywinpty 實際丟的
@@ -318,12 +318,12 @@ class TestGuardedWrite:
     def test_closed_child_swallowed(self, exc):
         def boom(_):
             raise exc
-        assert bell_mod.guarded_write(boom, "x", threading.Lock()) is False  # 不拋,誠實回報沒寫進去
+        assert bell_mod.guarded_write(boom, "x", lock=threading.Lock()) is False  # 不拋,誠實回報沒寫進去
 
     def test_lock_is_held_during_write(self):
         """打字與鈴聲共用一把鎖 —— 沒鎖住就會互相插隊,鈴聲被剖成兩半。"""
         lock, seen = threading.Lock(), []
-        assert bell_mod.guarded_write(lambda _: seen.append(lock.locked()), "x", lock) is True
+        assert bell_mod.guarded_write(lambda _: seen.append(lock.locked()), "x", lock=lock) is True
         assert seen == [True]
 
     def test_lock_released_after_failure(self):
@@ -333,8 +333,50 @@ class TestGuardedWrite:
         def boom(_):
             raise EOFError("Pty is closed")
 
-        bell_mod.guarded_write(boom, "x", lock)
+        bell_mod.guarded_write(boom, "x", lock=lock)
         assert lock.locked() is False
+
+    # ── 分段寫入(鈴聲的字與送出鍵要分開送)──
+
+    def test_parts_are_written_in_order(self):
+        got = []
+        assert bell_mod.guarded_write(got.append, "hello", "\r",
+                                      lock=threading.Lock(), gap=0) is True
+        assert got == ["hello", "\r"]
+
+    def test_all_parts_share_one_lock_hold(self):
+        """整串必須在【同一次持鎖】內寫完。
+
+        ★ 這條是這次改動最關鍵的一條。分兩次呼叫 safe_write 也能達到「拆開送」,
+          但鎖會在中間放開 —— 使用者打到一半的字就插進「鈴聲」與「Enter」之間,
+          送出去的會是一行殘缺的鈴聲加半句人話。而那種錯誤只在有人剛好同時打字時出現,
+          測不到、重現不了,只會偶爾看到一則沒頭沒尾的訊息。
+        """
+        lock, seen = threading.Lock(), []
+        bell_mod.guarded_write(lambda part: seen.append((part, lock.locked())),
+                               "hello", "\r", lock=lock, gap=0)
+        assert seen == [("hello", True), ("\r", True)]
+
+    def test_gap_only_between_parts(self):
+        """段與段之間要真的等,但【只有一段時完全不等】—— 打字走的是單段路徑。"""
+        stamps = []
+        bell_mod.guarded_write(lambda _: stamps.append(time.monotonic()), "a", "b",
+                               lock=threading.Lock(), gap=0.05)
+        assert stamps[1] - stamps[0] >= 0.05
+
+        start = time.monotonic()
+        bell_mod.guarded_write(lambda _: None, "solo", lock=threading.Lock(), gap=10)
+        assert time.monotonic() - start < 1      # gap=10 也不該等:只有一段就沒有「之間」
+
+    def test_string_is_one_part_not_iterated(self):
+        """字串是【一整段】,不是可迭代的序列。
+
+        如果哪天有人把介面改回「收一個序列」,傳字串進來會被逐字迭代成
+        一個字一次 write —— 不報錯,只是輸入框裡出現奇怪的輸入。這條擋住那個回頭路。
+        """
+        got = []
+        bell_mod.guarded_write(got.append, "hi", lock=threading.Lock())
+        assert got == ["hi"]                     # 不是 ["h", "i"]
 
 
 # ---------- BellState ----------

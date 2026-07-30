@@ -122,6 +122,7 @@ BELL_PREFIX = "[A2A-BELL]"      # 文件教的是「凡見這個前綴一律對�
 # 送出鍵。★ 一定是 \r 不是 \n:實測對真正的 CLI 送 \n,那行字會躺在輸入框裡
 # 不送出,agent 就永遠不會醒 —— 而且畫面上看起來「鈴有敲到」,最難查的那種。
 BELL_SUBMIT = "\r"
+BELL_SUBMIT_GAP = 0.1       # 鈴聲的字與送出鍵之間隔多久(見 guarded_write)
 RE_RING_SECONDS = 90        # 【同一批】敲後多久 cursor 仍未推進就重敲
 PATROL_SECONDS = 5          # 節拍器一圈;也是【有新訊息時】的最短敲鈴間隔
 MAX_RINGS = 3               # 同一段落後最多敲幾次,之後改印警告(不騷擾設計)
@@ -195,8 +196,24 @@ def log(msg: str) -> None:
         pass  # log 寫不進去不能反過來炸掉轉發
 
 
-def guarded_write(write_fn, payload, lock) -> bool:
+def guarded_write(write_fn, *payloads, lock, gap: float = 0.0) -> bool:
     """所有「寫進子行程」的唯一閘門(打字與鈴聲共用一把鎖,互不插隊)。
+
+    payloads 是【依序寫入的幾段】,段與段之間隔 gap 秒。
+
+    ★ 為什麼要有「分段」這個能力:有些 TUI(Codex 就是)會把「一大串字瞬間湧入、
+      尾巴夾著 \r」判定成【貼上】,而貼上裡的換行是換行、不是送出 ——
+      於是鈴聲整行躺在輸入框裡,agent 永遠不會醒。中間隔 0.1 秒就打破那個判定。
+
+    ★★ 為什麼分段一定要在【這裡】、而不是呼叫端連呼叫兩次:
+      鎖會在兩次呼叫之間放開,使用者打到一半的字就插進「鈴聲」與「Enter」中間 ——
+      送出去的會是一行殘缺的鈴聲加半句人話。分段必須是一次持鎖內的原子動作。
+
+      代價誠實寫在這:多段時持鎖從「瞬間」變成 gap 秒,使用者那 0.1 秒打的字會排隊。
+      鈴聲不常敲、0.1 秒也感覺不到,拿它換「絕不交錯」划算。
+
+    ★ 用可變參數而不是「收一個序列」是刻意的:序列版傳字串進來會被【逐字迭代】,
+      靜默變成一個字寫一次 —— 那種 bug 不會報錯,只會讓人看到奇怪的輸入。
 
     吞掉寫入失敗是刻意的:子行程一退出,pty/master 隨即關閉,而此刻仍可能有東西要寫 ——
     退出瞬間殘留在終端機緩衝的按鍵、或剛好撞上的鈴聲。isalive() 擋不住這個空檔
@@ -211,7 +228,10 @@ def guarded_write(write_fn, payload, lock) -> bool:
     """
     with lock:
         try:
-            write_fn(payload)
+            for index, payload in enumerate(payloads):
+                if index:
+                    time.sleep(gap)
+                write_fn(payload)
             return True
         except (EOFError, OSError, ValueError):
             return False  # ValueError:POSIX 端 master fd 已被關閉
@@ -346,6 +366,13 @@ class BellState:
             #    warned 這個旗標是為了「只印一次」—— 否則每 5 秒就會刷一行同樣的警告。
             #    ★ 有新內容就把額度還回來:新訊息是【新的敲鈴理由】,
             #      不該被上一批的額度綁住(否則永久噤聲的死結解不開)。
+            #
+            #    ★★ 這個修法【拿掉了什麼】,要一起記住:
+            #      額度歸零的同時,下面那行 WARN 在【活躍的房間裡就永遠不會印】——
+            #      訊息一直來,額度一直歸零,到不了 MAX_RINGS。
+            #      所以它只在安靜的房間有效;熱鬧的房間要判斷「敲了但沒醒」,
+            #      得手動看 log:【「叮咚」有記、cursor 卻不動】就是敲進去沒送出。
+            #      不要以為有自動警報可以靠。
             if fresh:
                 self.rings_this_gap = 0
                 self.warned = False
@@ -642,9 +669,13 @@ def run_windows(cmd: list[str], state_factory) -> int:
     #   沒有鎖的話,鈴聲可能插進你打到一半的字中間,兩邊都變成亂碼。
     write_lock = threading.Lock()
 
-    def safe_write(text: str) -> bool:
-        """所有「寫進子行程」都要走這裡 —— 上鎖 + 吞掉子行程已死的錯誤。"""
-        return guarded_write(proc.write, text, write_lock)  # 回傳透傳給鈴聲,失敗才有案可查
+    def safe_write(*parts: str) -> bool:
+        """所有「寫進子行程」都要走這裡 —— 上鎖 + 吞掉子行程已死的錯誤。
+
+        收多段是給鈴聲用的(字一段、送出鍵一段);打字只傳一段,行為跟以前一模一樣。
+        """
+        return guarded_write(proc.write, *parts,           # 回傳透傳給鈴聲,失敗才有案可查
+                             lock=write_lock, gap=BELL_SUBMIT_GAP)
 
     # 到這裡才建 BellState,因為現在才有 safe_write 可以交給它。
     # (為什麼不能在 main() 就建好,見 main() 裡 state_factory 的說明)
@@ -825,17 +856,18 @@ def run_posix(cmd: list[str], state_factory) -> int:
         """往主控端寫 = 假裝使用者敲了這些鍵。"""
         os.write(master, payload)
 
-    def safe_write(data: bytes) -> bool:
+    def safe_write(*parts: bytes) -> bool:
         """所有寫入的唯一閘門:上鎖 + 吞掉子行程已死的錯誤。"""
-        return guarded_write(write_to_child, data, write_lock)
+        return guarded_write(write_to_child, *parts,
+                             lock=write_lock, gap=BELL_SUBMIT_GAP)
 
-    def ring(text: str) -> bool:
+    def ring(*parts: str) -> bool:
         """鈴聲是字串,但偽終端只收位元組,所以在這裡轉一次。
 
         ★ 這就是分層的意義:BellState 只知道「呼叫 ring 就會響」,
           完全不知道 POSIX 這邊多了一道編碼手續。Windows 那邊則沒有這道。
         """
-        return safe_write(text.encode("utf-8"))
+        return safe_write(*(part.encode("utf-8") for part in parts))
 
     def alive() -> bool:
         """子行程還活著嗎?
@@ -986,7 +1018,14 @@ def main() -> int:
             ★ 「要說什麼」由 BellState 決定,這裡只管「怎麼寫進去」——
               一般鈴與強制鈴說不一樣的話,而這一層完全不需要知道有兩種。
             """
-            return write_fn(text + BELL_SUBMIT)
+            # ★ 兩段【分開送】,不是 text + BELL_SUBMIT ——
+            #   合成一段的話,Codex 那種會偵測貼上的 TUI 只會換行、不會送出。
+            #   兩段之間的間隔與「不准有人插隊」都由 write_fn 底下那把鎖負責。
+            #
+            #   誠實標一個新的失敗模式:第一段寫進去、第二段失敗的話,
+            #   字會躺在輸入框裡沒送出,而這裡回 False。以前一次 write 沒有這個中間態。
+            #   兜底還是重敲機制(90 秒後再敲一次),代價是輸入框裡會多一行殘留。
+            return write_fn(text, BELL_SUBMIT)
 
         return BellState(cursor_path, ring_the_bell,
                          name=args.name,
