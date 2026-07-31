@@ -203,7 +203,16 @@ class BadSenderError(ApiError):
 
 
 class BadRoomError(ApiError):
-    """房間名不合法 —— 它會變成資料夾名字,所以規則比「好看」嚴格得多。"""
+    """房間名不合法、或房間不存在 —— 它會變成資料夾名字,規則比「好看」嚴格得多。"""
+    status = 422
+
+
+class BadCursorError(ApiError):
+    """cursor 的值不合理(負數、或超前房間的尾)。
+
+    ★ 超前是這裡真正要擋的:宣稱讀過還不存在的訊息 = 房間永遠追不上你 =
+      敲鈴器再也不會敲你,而你自己不會知道。**永久漏讀,無聲。**
+    """
     status = 422
 
 
@@ -307,6 +316,61 @@ class MessageStore:
 
     def chat_path(self, room: str) -> Path:
         return self.room_dir(room) / "chat.jsonl"
+
+    def cursor_path(self, room: str, name: str) -> Path:
+        """某個人在某個房讀到哪。**一房一份**,所以換房不會蓋掉別房的進度。
+
+        ★ 這個檔案以前住在 client 那邊(state/cursor-<名字>.txt),而且【不分房間】——
+          所以拿 --room 去別的房發言會把本房的進度蓋掉,然後敲鈴器
+          以為 agent 倒退了一千多則、開始瘋狂敲它。實際差點發生過。
+
+        ★★ 名字也要過白名單:它跟房間名一樣會變成檔名。
+          (不過它的失敗形狀比較輕:寫不進去而已,不會跳出目錄 ——
+           因為房間那一段已經先被 room_dir 擋過了。)
+        """
+        safe = sanitize_room(name)
+        if safe is None:
+            raise BadSenderError({"error": "bad_sender", "detail": f"名字不合法:{name!r}"})
+        return self.room_dir(room) / "cursors" / f"{safe}.txt"
+
+    def read_cursor(self, room: str, name: str) -> int:
+        """某個人在這個房讀到哪。**讀不到一律回 0。**
+
+        ★ 回 0 = 「當作他一則都沒讀過」,所以他會被叫醒。方向是刻意的:
+
+              回 0        最壞情況是白醒一次(無害,對帳後發現沒新訊息就回去睡)
+              回最新編號  最壞情況是【永遠不叫他】,而且安靜到沒有人會發現
+
+          這條跟 bell 那邊的 read_cursor 是同一條家規(寧可吵也不要漏),
+          搬到 server 之後也不能變 —— 檔案不存在、內容壞掉都往「會被注意到」那邊倒。
+        """
+        try:
+            return int(self.cursor_path(room, name).read_text(encoding="utf-8").strip() or "0")
+        except (OSError, ValueError):
+            return 0
+
+    def write_cursor(self, room: str, name: str, last_id: int) -> None:
+        path = self.cursor_path(room, name)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(str(last_id), encoding="utf-8")
+
+    def cursors_in(self, room: str) -> dict[str, int]:
+        """這個房裡誰讀到哪 —— **而「有檔案」本身就是「他在這個房間」**。
+
+        ★ 成員清單從目錄推導,跟「房間清單從訊息推導」是同一招:
+          沒有一份名冊需要維護,也就不會有名冊與實際不符的那種 bug。
+        """
+        folder = self.room_dir(room) / "cursors"
+        if not folder.exists():
+            return {}
+        result = {}
+        for entry in sorted(folder.iterdir()):
+            if entry.suffix == ".txt":
+                try:
+                    result[entry.stem] = int(entry.read_text(encoding="utf-8").strip() or "0")
+                except (OSError, ValueError):
+                    result[entry.stem] = 0
+        return result
 
     def _index(self, msg: dict) -> None:
         """load 與 append 共用的索引維護 — 三個結構同步只在這裡發生。
@@ -1095,6 +1159,81 @@ def register_room_routes(app: FastAPI, hub: Hub) -> None:
         who = sanitize_sender(by) or "anonymous"
         hub.check_writer(who, request)
         return await hub.drop_room(room, who)
+
+    @app.get("/api/rooms/{room}/cursor/{name}")
+    async def get_cursor(room: str, name: str):
+        """某個人在這個房讀到哪。敲鈴器靠它決定要不要敲。
+
+        ★ 讀不到回 0(見 store.read_cursor 的方向論證)—— 這條路上沒有「錯誤」,
+          只有「他還沒讀過」。所以不會有 404:一個從沒進過這個房的人,
+          答案就是 0,而那是誠實的。
+        """
+        return {"room": room, "name": name, "last_id": hub.store.read_cursor(room, name)}
+
+    @app.put("/api/rooms/{room}/cursor/{name}")
+    async def put_cursor(room: str, name: str, last_id: int, request: Request):
+        """『我讀到第 N 則了』—— 這是一句**聲明**,所以身分要驗。
+
+        ★ 走跟發言【完全一樣】的那道門(check_writer):AUTH 開著時 token 綁名字、
+          不能替別人宣告已讀;AUTH 關著時發言本來就能冒名,cursor 也一樣。
+          **不多不少 —— 不需要為它發明新的保護。**
+
+        ★★ 這個檔案從 client 搬到 server 之後,「只有本人寫得到」從
+          【結構保證】變成了【權限保證】。使用者知道並接受這個變化
+          (測試階段、機器都在他手上),而它在 AUTH 開啟後就會回到同等強度。
+
+        ★ 用 query 而不是 JSON body:值只有一個整數,而 query 讓
+          read.py 印出來的那行指令短到可以直接複製貼上 —— 那是它主要的使用方式。
+        """
+        who = sanitize_sender(name)
+        if who is None:
+            raise BadSenderError({"error": "bad_sender", "detail": f"名字不合法:{name!r}"})
+        hub.check_writer(who, request)
+
+        # ── 值域檢查:搬到 API 之後才需要的那一半 ──
+        #
+        # ★★ cursor 在 client 的時代,這些值【只有 agent 自己寫得出來】,而它沒有
+        #   動機寫錯。搬到 API 之後,任何一次打錯的 curl、任何一支寫錯的工具,
+        #   都會靜靜地把 agent 弄聾 —— 而「聾」這個症狀查起來要二十分鐘。
+        #
+        #   **從結構搬到 API,失去的不只是「誰能寫」,還有「能寫成什麼」。**
+        #   前者靠 check_writer 補回來,後者就是下面這幾行。
+        tail = hub.store.last_id(room)
+        if room not in hub.store.rooms:
+            # 房間不存在就不要自動長一個出來 —— 打錯字會變成一間幽靈房,
+            # 而它會出現在房間清單上,看起來像真的。
+            raise BadRoomError({"error": "no_such_room",
+                                "detail": f"房間 {room!r} 不存在(要先在裡面說一句話)"})
+        if last_id < 0:
+            raise BadCursorError({"error": "bad_cursor",
+                                  "detail": f"last_id 不能是負數:{last_id}"})
+        if last_id > tail:
+            # ★ 這一條是最重要的:超前 = 宣稱讀過還不存在的訊息 = 【永久漏讀】。
+            #   房間永遠追不上那個數字,於是敲鈴器再也不會敲他 —— 而他自己不會知道。
+            raise BadCursorError({
+                "error": "cursor_ahead",
+                "detail": f"你聲明讀到 #{last_id},但 {room} 只到 #{tail}"})
+
+        # ★ 倒退【允許】,而且不需要旗標 —— 這是刻意的,理由是既有的家規:
+        #
+        #       cursor 落後  最壞是多讀幾則(無害,而且 agent 會發現自己讀過了)
+        #       cursor 超前  永久漏讀,而且沒有人會發現
+        #
+        #   兩個方向的危險程度差一個量級,所以只擋危險的那一邊。
+        #   擋倒退的話,「我想重讀一段」這個合法需求就得繞路 ——
+        #   而它防的是一個無害的錯。**防護要跟危險成比例。**
+        hub.store.write_cursor(room, who, last_id)
+        return {"ok": True, "room": room, "name": who, "last_id": last_id}
+
+    @app.get("/api/rooms/{room}/cursors")
+    async def get_cursors(room: str):
+        """這個房裡誰讀到哪。
+
+        ★ 它同時是**成員清單**:cursors/ 底下有你的檔案 = 你在這個房間。
+          agent 第一次在這裡發言時檔案誕生,那就是「加入」——
+          跟「建房 = 在裡面說第一句話」是同一招,零新狀態。
+        """
+        return {"room": room, "cursors": hub.store.cursors_in(room)}
 
     @app.get("/api/rooms/{room}/presence")
     async def get_presence(room: str):

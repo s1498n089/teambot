@@ -1,6 +1,7 @@
 """單元/邊界層:純函式與小類別,毫秒級,不建 app。"""
 from __future__ import annotations
 
+import io
 import threading
 import time
 
@@ -448,15 +449,81 @@ class TestGuardedWrite:
 # ---------- BellState ----------
 
 class TestBellState:
+    def _bare(self, ring_fn=lambda text: True):
+        return bell_mod.BellState(ring_fn, name="x", server="http://test", room="main")
+
+    # ── read_cursor:它現在問 hub,而「問不到」只有一個正確方向 ──
+
+    def test_read_cursor_asks_the_hub(self, monkeypatch):
+        """cursor 從本地檔案搬到 hub 之後,這裡要打對房間與名字。"""
+        seen = []
+
+        class Resp(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return False
+
+        def fake_urlopen(req, *_a, **_kw):
+            seen.append(req.full_url)
+            return Resp(b'{"room":"main","name":"x","last_id":42}')
+
+        monkeypatch.setattr(bell_mod.urllib.request, "urlopen", fake_urlopen)
+        assert self._bare().read_cursor() == 42
+        assert seen == ["http://test/api/rooms/main/cursor/x"]
+
+    @pytest.mark.parametrize("failure", [
+        OSError("hub 沒開"),
+        ValueError("回了不是數字的東西"),
+    ])
+    def test_read_cursor_falls_back_to_zero(self, monkeypatch, failure):
+        """★ 問不到一律回 0 —— 這個方向不能因為搬到網路上就改。
+
+            回 0        最壞是白醒一次(無害,對帳後發現沒新訊息就回去睡)
+            回最新編號  最壞是【永遠不叫他】,而且安靜到沒有人會發現
+
+        兩種錯的代價差很多。異常時要往「會被注意到」的方向倒 ——
+        別把它「優化」成安靜的那一邊。
+        """
+        def boom(*_a, **_kw):
+            raise failure
+
+        monkeypatch.setattr(bell_mod.urllib.request, "urlopen", boom)
+        assert self._bare().read_cursor() == 0
+
+    def test_bell_never_writes_cursor(self):
+        """★★ 貫穿全檔的鐵則:**敲鈴器只讀 cursor,永遠不寫。**
+
+        能寫就能偽造「你已經讀了」—— 等於自己把叫醒你的證據銷毀掉。
+        搬到 API 之後這條更要釘住:寫變成了一個 PUT,而 PUT 就在隔壁。
+
+        ★ 斷言要精確到「HTTP 方法」這一層。我第一版寫的是 `"PUT" not in source`,
+          結果它抓到 `VT_INPUT` 與 `PROCESSED` 裡的那三個字母 —— **假陽性**。
+          粗糙的字串比對在這種測試裡特別危險:紅了還好(我就發現了),
+          萬一它剛好綠,我會以為自己驗過了。
+        """
+        source = (bell_mod.BASE / "bell.py").read_text(encoding="utf-8")
+        assert 'method="PUT"' not in source
+        assert "write_cursor" not in source
+        # 唯一碰 cursor 端點的地方必須是讀:整支程式只有一次 /cursor/,而它在 GET 裡
+        assert source.count("/cursor/") == 1
+
     def _make(self, tmp_path, cursor: int):
-        cursor_file = tmp_path / "cursor-x.txt"
-        cursor_file.write_text(str(cursor), encoding="utf-8")
+        """建一個 BellState,並把「他讀到哪」換成測試可以直接改的一個值。
+
+        ★ cursor 現在住在 hub 上(GET /api/rooms/<房>/cursor/<名字>)——
+          這一族測試要驗的是【決策層怎麼判斷】,不是【怎麼問 hub】,
+          所以把那個問法換掉。read_cursor 自己的行為由 TestReadCursor 驗。
+        """
         rings = []
         # name/server/room 是建構需求 ——
         # 這幾個測試不碰它們,但少給就建不起來,那正是把它們收進來的目的。
-        state = bell_mod.BellState(cursor_file, lambda text: rings.append(text),
+        state = bell_mod.BellState(lambda text: rings.append(text),
                                    name="x", server="http://test", room="main")
-        return state, rings, cursor_file
+        cursor_box = {"value": cursor}
+        state.read_cursor = lambda: cursor_box["value"]
+        return state, rings, cursor_box
 
     def test_ring_only_when_behind(self, tmp_path):
         state, rings, _ = self._make(tmp_path, cursor=5)
@@ -499,9 +566,9 @@ class TestBellState:
 
     def test_catch_up_resets(self, tmp_path, monkeypatch):
         monkeypatch.setattr(bell_mod, "PATROL_SECONDS", 0)   # 拿掉最短間隔的地板
-        state, rings, cursor_file = self._make(tmp_path, cursor=0)
+        state, rings, cursor = self._make(tmp_path, cursor=0)
         state.on_message(1)
-        cursor_file.write_text("1", encoding="utf-8")
+        cursor["value"] = 1
         state.evaluate()
         assert state.rings_this_gap == 0  # 追上歸零
         state.on_message(2)
@@ -515,11 +582,11 @@ class TestBellState:
           意圖是「同一批不要吵很多次」,不是「90 秒內誰來都不理」。
         """
         monkeypatch.setattr(bell_mod, "PATROL_SECONDS", 0)
-        state, rings, cursor_file = self._make(tmp_path, cursor=0)
+        state, rings, cursor = self._make(tmp_path, cursor=0)
 
         state.on_message(1009)
         assert len(rings) == 1
-        cursor_file.write_text("1009", encoding="utf-8")   # 讀完了
+        cursor["value"] = 1009                             # 讀完了
 
         state.on_message(1010)          # 全新的一則,距上次遠不到 90 秒
         assert len(rings) == 2, "新訊息被 90 秒窗吃掉了 —— 那正是這個 bug"
@@ -535,9 +602,7 @@ class TestBellState:
     def _log_after_ring(self, tmp_path, monkeypatch, ring_fn) -> str:
         """把 log 導到 tmp,敲一次鈴,回傳落檔內容。"""
         monkeypatch.setattr(bell_mod, "LOG_PATH", tmp_path / "bell.log")
-        cursor_file = tmp_path / "cursor-x.txt"
-        cursor_file.write_text("0", encoding="utf-8")
-        bell_mod.BellState(cursor_file, ring_fn,
+        state_for_log = bell_mod.BellState(ring_fn,
                            name="x", server="http://test", room="main").on_message(1)
         return (tmp_path / "bell.log").read_text(encoding="utf-8")
 
@@ -553,9 +618,7 @@ class TestBellState:
         """送不進去也計數 —— pty 已死時若不計數就會無限重敲刷 log。"""
         monkeypatch.setattr(bell_mod, "LOG_PATH", tmp_path / "bell.log")
         monkeypatch.setattr(bell_mod, "RE_RING_SECONDS", 0)
-        cursor_file = tmp_path / "cursor-x.txt"
-        cursor_file.write_text("0", encoding="utf-8")
-        state = bell_mod.BellState(cursor_file, lambda text: False,
+        state = bell_mod.BellState(lambda text: False,
                                    name="x", server="http://test", room="main")
         for _ in range(10):
             state.on_message(1)

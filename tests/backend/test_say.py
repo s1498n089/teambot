@@ -19,16 +19,24 @@ import say as say_mod
 class FakeHTTP:
     """把 urllib 換掉:GET 回預先排好的資料,POST 記下來(或丟 409)。"""
 
-    def __init__(self, get_results: list[dict], post_result=None):
+    def __init__(self, get_results: list[dict], post_result=None, cursor_fails=False):
         self.get_results = list(get_results)
         self.post_result = post_result
+        self.cursor_fails = cursor_fails
         self.posted: list[dict] = []
         self.get_urls: list[str] = []
+        self.cursor_puts: list[str] = []
 
     def __call__(self, request, *_args, **_kwargs):
         if isinstance(request, str):                      # GET:直接傳網址
             self.get_urls.append(request)
             return self._body(self.get_results.pop(0))
+        if request.get_method() == "PUT":                 # 推 cursor(201 之後)
+            self.cursor_puts.append(request.full_url)
+            if self.cursor_fails:
+                raise urllib.error.HTTPError(request.full_url, 500, "boom", {},
+                                             io.BytesIO(b"{}"))
+            return self._body({"ok": True})
         self.posted.append(json.loads(request.data.decode("utf-8")))
         if isinstance(self.post_result, urllib.error.HTTPError):
             raise self.post_result
@@ -65,9 +73,9 @@ def run(monkeypatch, http, *argv) -> int:
     return say_mod.main()
 
 
-def cursor_of(workspace, name="alice") -> str | None:
-    path = workspace / "state" / f"cursor-{name}.txt"
-    return path.read_text(encoding="utf-8") if path.exists() else None
+def pushed_cursor(http) -> str | None:
+    """cursor 現在推到 hub 上(PUT),不再是本地檔案 —— 所以看它有沒有打那個 PUT。"""
+    return http.cursor_puts[-1] if http.cursor_puts else None
 
 
 # ---------- 有未讀時:停手,而且什麼都不聲明 ----------
@@ -90,7 +98,7 @@ class TestUnreadStopsEverything:
         """
         http = FakeHTTP([{"messages": [{"id": 9, "from": "bob", "text": "x"}], "last_id": 9}])
         run(monkeypatch, http, "--name", "alice", "--expect", "8", "--text", "我的話")
-        assert cursor_of(workspace) is None           # 檔案根本沒被建立
+        assert http.cursor_puts == []                 # 一個 PUT 都沒發出去
 
     def test_tells_agent_the_next_expect(self, workspace, monkeypatch, capsys):
         """往前走的是 agent 下次給的 --expect —— 所以要告訴它該給哪個數字。"""
@@ -220,7 +228,37 @@ class TestCleanSend:
         """
         http = FakeHTTP([{"messages": [], "last_id": 8}], {"id": 999})
         run(monkeypatch, http, "--name", "alice", "--expect", "8", "--text", "我的話")
-        assert cursor_of(workspace) == "999"
+        assert pushed_cursor(http) == "http://127.0.0.1:8787/api/rooms/main/cursor/alice?last_id=999"
+
+    def test_cursor_goes_to_the_room_it_spoke_in(self, workspace, monkeypatch):
+        """★ cursor 一房一份 —— 在 lab 發言就推 lab 的進度,不會蓋掉 main 的。
+
+        以前它是 state/cursor-<名字>.txt(不分房間):拿 --room 去別的房發言,
+        推的那個 id 會蓋掉本房的進度,然後敲鈴器以為 agent 倒退了一千多則、
+        開始瘋狂敲它。**那是這一整批搬遷最實際的理由。**
+        """
+        http = FakeHTTP([{"messages": [], "last_id": 8}], {"id": 10})
+        run(monkeypatch, http, "--name", "alice", "--expect", "8",
+            "--room", "lab", "--text", "我的話")
+        assert pushed_cursor(http).endswith("/api/rooms/lab/cursor/alice?last_id=10")
+
+    def test_send_still_counts_when_the_cursor_push_fails(
+            self, workspace, monkeypatch, capsys):
+        """★★ 訊息已經送出去了,推 cursor 是【後續動作】—— 失敗不能假裝整件事失敗。
+
+        兩件事的後果差很多:
+            cursor 沒推   敲鈴器會再敲一次(無害)
+            假裝沒送出    agent 會把同樣的話再寫一遍(真的有害)
+
+        所以誠實講出兩件事各自的結果,並附上補推的指令。
+        """
+        http = FakeHTTP([{"messages": [], "last_id": 8}], {"id": 10}, cursor_fails=True)
+        assert run(monkeypatch, http, "--name", "alice", "--expect", "8",
+                   "--text", "我的話") == 0            # 送出成功就是 0
+        out = capsys.readouterr().out
+        assert "已送出 #10" in out
+        assert "cursor 沒推成" in out
+        assert "curl" in out and "last_id=10" in out   # 補推的指令要給
 
     def test_reply_to_is_passed_through(self, workspace, monkeypatch):
         http = FakeHTTP([{"messages": [], "last_id": 8}], {"id": 10})
@@ -260,7 +298,7 @@ class TestConflict:
                          {"messages": [{"id": 9, "from": "bob", "text": "x"}], "last_id": 9}],
                         http_409())
         run(monkeypatch, http, "--name", "alice", "--expect", "8", "--text", "我的話")
-        assert cursor_of(workspace) is None
+        assert http.cursor_puts == []
 
 
 # ---------- 輸入 ----------

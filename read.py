@@ -128,16 +128,19 @@ def show_called(messages: list[dict], name: str, server: str, room: str) -> None
     print("──────────────")
 
 
-def cursor_command(name: str, last_id: int) -> str:
-    """印出「把書籤推到這裡」的指令 —— 【絕對路徑】。
+def cursor_command(server: str, room: str, name: str, last_id: int) -> str:
+    """印出「把書籤推到這裡」的指令。
 
-    ★ 為什麼不能只寫 state/cursor-<名字>.txt:agent 的工作目錄不一定在專案根,
-      而相對路徑寫到錯的地方是**安靜失敗** —— 檔案建出來了、指令也沒報錯,
-      只是 bell 讀的還是舊的那個,於是它一直敲、agent 一直覺得自己已經追上了。
-      「猜路徑」跟「猜 cursor」是同一族的錯。
+    ★ cursor 住在 hub 上、而且一房一份,所以這行必須帶著房間與名字 ——
+      以前它是往本地檔案 printf 一個數字,而那個檔案【不分房間】:
+      換房之後推進去,蓋掉的是別的房的進度。
+
+    ★★ 這支工具仍然【不執行】這行指令,只把它印出來。
+      印出來不等於讀到 —— 中間隔著「指令返回」那個斷窗,
+      而 read 沒有任何動作可以證明「讀」發生了。**遞筆,不代簽。**
     """
-    path = BASE / "state" / f"cursor-{name}.txt"
-    return f"printf '%s' {last_id} > {path}"
+    return (f'curl -s -X PUT "{server}/api/rooms/{room}'
+            f'/cursor/{name}?last_id={last_id}"')
 
 
 def main() -> int:
@@ -170,7 +173,7 @@ def main() -> int:
 
         last_id = recent["last_id"]
         print(f"\n讀完之後,把書籤設到房間目前的位置(這是【刻意跳過】中間那段的決定):")
-        print(f"  {cursor_command(args.name, last_id)}")
+        print(f"  {cursor_command(server, args.room, args.name, last_id)}")
         return 0
 
     # ── 日常對帳 ──
@@ -195,7 +198,7 @@ def main() -> int:
     print("\n讀完之後 —— 這兩行都是【可以直接貼】的,選一條:")
     print(f"  要發言   uv run say.py --name {args.name} --expect {last_id} "
           f"--file tmp/msg-{args.name}.md")
-    print(f"  不發言   {cursor_command(args.name, last_id)}")
+    print(f"  不發言   {cursor_command(server, args.room, args.name, last_id)}")
     print("\n★ 這兩個數字是【你的聲明】:「我讀到這裡了」。"
           "工具不替你推,因為它不知道你有沒有真的讀進去。")
     return 0

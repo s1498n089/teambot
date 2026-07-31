@@ -94,25 +94,25 @@ class TestHandsOverThePen:
         http = FakeHTTP([{"messages": [{"id": 9, "from": "bob", "text": "hi"}], "last_id": 9}])
         run(monkeypatch, http, "--name", "alice", "--expect", "8")
         out = capsys.readouterr().out
-        assert "say.py --name alice --expect 9" in out      # 要發言
-        assert "printf '%s' 9 >" in out                     # 不發言
+        assert "say.py --name alice --expect 9" in out           # 要發言
+        assert "PUT" in out and "cursor/alice?last_id=9" in out  # 不發言
 
-    def test_cursor_command_is_absolute(self, workspace, monkeypatch, capsys):
-        """★ 印絕對路徑,不是 state/cursor-alice.txt。
+    def test_cursor_command_carries_the_room(self, workspace, monkeypatch, capsys):
+        """★ cursor 一房一份,所以那行指令必須帶著房間 —— 少了它就推錯房。
 
-        agent 的工作目錄不一定在專案根,而相對路徑寫到錯的地方是**安靜失敗**:
-        檔案建出來了、指令也沒報錯,只是 bell 讀的還是舊的那個 ——
-        於是它一直敲,而 agent 一直以為自己追上了。
+        (以前這條測的是「印絕對路徑」:那時 cursor 是本地檔案,而相對路徑
+         寫到錯的地方是安靜失敗。搬到 hub 之後路徑問題消失了,
+         換成【房間要對】—— 同一種錯,換了一個載體。)
         """
         http = FakeHTTP([{"messages": [{"id": 9, "from": "bob", "text": "hi"}], "last_id": 9}])
-        run(monkeypatch, http, "--name", "alice", "--expect", "8")
-        assert str(workspace / "state" / "cursor-alice.txt") in capsys.readouterr().out
+        run(monkeypatch, http, "--name", "alice", "--expect", "8", "--room", "lab")
+        assert "/api/rooms/lab/cursor/alice?last_id=9" in capsys.readouterr().out
 
     def test_rejoin_offers_the_init_command(self, workspace, monkeypatch, capsys):
         http = FakeHTTP([{"messages": [{"id": 9, "from": "bob", "text": "hi"}], "last_id": 42},
                          {"messages": [], "last_id": 42}])
         run(monkeypatch, http, "--name", "alice", "--rejoin")
-        assert "printf '%s' 42 >" in capsys.readouterr().out
+        assert "cursor/alice?last_id=42" in capsys.readouterr().out
 
 
 # ---------- 撈:reader= 與兩段式 rejoin ----------

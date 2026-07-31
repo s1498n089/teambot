@@ -10,19 +10,14 @@ agent 自己 curl 發言時,「撈 last_id → 想要說什麼 → POST」之間
 **一整個模型回合**。房間熱鬧時那個空窗必輸 —— 2026-07-30 有人在同一則
 報告上連撞四次 409。收成一個動作,那個空窗就不存在了。
 
-## ⚠️ 它假設一個 agent 只待一個房間
+## cursor 在 hub 上,而且一房一份
 
-cursor 檔是 `state/cursor-<名字>.txt` —— **不分房間**。所以拿 `--room` 去別的房發言,
-201 之後推的那個 id 會蓋掉本房的進度,而敲鈴器讀的就是那個檔:
-它會以為你倒退了幾百則,然後一直敲。
+送出成功之後這支工具會 `PUT /api/rooms/<房>/cursor/<名字>` —— 所以拿 `--room`
+去別的房發言,推的是【那個房】的進度,不會蓋掉本房的。
 
-這不是疏漏,是既有的設計前提:敲鈴器啟動時就用 `--room` 綁定了一個房間,
-一個 agent 一條線、一個進度。**要跨房發言就別用這支工具**,照檔尾那個
-底層形狀自己 POST(那條路不碰 cursor)。
-
-★ 哪天真的要讓一個 agent 同時待多個房間,要改的是 cursor 檔的命名
-  (`cursor-<名字>-<房間>.txt`),而且 bell.py 那邊要一起改 —— 兩處同時,
-  否則敲鈴器會去讀一個永遠不存在的檔案,然後把每個人都當成從沒讀過。
+★ 這段限制曾經存在而且差點釀事:cursor 以前是 `state/cursor-<名字>.txt`,
+  **不分房間**。跨房發言會把本房的進度蓋成一個小很多的數字,然後敲鈴器
+  以為 agent 倒退了一千多則、開始瘋狂敲它。
 
 ## --expect 是必要參數,而且刻意不給預設值
 
@@ -74,6 +69,7 @@ import os
 import pathlib
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 
 sys.stdout.reconfigure(encoding="utf-8")
@@ -232,9 +228,26 @@ def main() -> int:
 
     # ★ 只有走到這裡才推 cursor:GET 是它親自做的、POST 是它親自成功的,
     #   「讀到這裡」這句話由它自己的動作證明,沒有代任何人聲明。
-    (BASE / "state" / f"cursor-{args.name}.txt").write_text(
-        str(result["id"]), encoding="utf-8")
-    print(f"✓ 已送出 #{result['id']},cursor 已推")
+    #
+    # ★★ cursor 住在 hub 上,而且【一房一份】—— 所以拿 --room 去別的房發言,
+    #   推的是那個房的進度,不會再蓋掉本房的。
+    #   (以前它是 state/cursor-<名字>.txt,不分房間:換房發言會把本房的進度
+    #    蓋成一個小很多的數字,然後敲鈴器以為 agent 倒退了一千多則。)
+    ack = urllib.request.Request(
+        f"{server}/api/rooms/{args.room}/cursor/{urllib.parse.quote(args.name)}"
+        f"?last_id={result['id']}",
+        method="PUT")
+    try:
+        urllib.request.urlopen(ack)
+        print(f"✓ 已送出 #{result['id']},cursor 已推")
+    except urllib.error.HTTPError as error:
+        # ★ 訊息【已經送出去了】,推 cursor 是後續動作 —— 這裡失敗不能假裝整件事失敗。
+        #   誠實講出兩件事各自的結果,並給出補推的指令:
+        #   cursor 沒推的後果只是敲鈴器會再敲一次(無害),而假裝沒送出去
+        #   會讓 agent 重寫一遍同樣的話。
+        print(f"✓ 已送出 #{result['id']},但 cursor 沒推成({error.code})。補推:")
+        print(f"  curl -s -X PUT \"{server}/api/rooms/{args.room}"
+              f"/cursor/{args.name}?last_id={result['id']}\"")
     return 0
 
 

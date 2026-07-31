@@ -124,6 +124,114 @@ class TestFetchContract:
         assert ahead.json() == {"error": "stale", "last_id": self.TOTAL}
 
 
+class TestCursor:
+    """cursor 搬到 hub 之後,要補回它在 client 時代【天生就有】的值域保證。
+
+    ★★ 檔案在 client 的時代,這些值只有 agent 自己寫得出來,而它沒有動機寫錯。
+      變成 API 之後,任何一次打錯的 curl、任何一支寫錯的工具都寫得進來 ——
+      而後果是 agent 靜靜地變聾,查起來要二十分鐘。
+
+      **從結構搬到 API,失去的不只是「誰能寫」(那個 check_writer 補回來了),
+      還有「能寫成什麼」。**
+    """
+
+    def _room_with(self, client, room, n=3):
+        for i in range(n):
+            post_msg(client, room, "alice", f"m{i}")
+
+    def test_unread_person_is_zero_not_404(self, client):
+        """沒進過這個房的人,答案是 0 而不是錯誤 —— 那是誠實的答案,不是失敗。"""
+        r = client.get("/api/rooms/main/cursor/nobody")
+        assert r.status_code == 200 and r.json()["last_id"] == 0
+
+    def test_put_and_get_roundtrip(self, client):
+        self._room_with(client, "main")
+        assert client.put("/api/rooms/main/cursor/alice?last_id=2").status_code == 200
+        assert client.get("/api/rooms/main/cursor/alice").json()["last_id"] == 2
+
+    def test_ahead_of_the_room_tail_is_rejected(self, client):
+        """★★ 這條是這一族最重要的:**超前 = 永久漏讀,而且無聲。**
+
+        宣稱讀過還不存在的訊息,房間就永遠追不上那個數字 ——
+        敲鈴器再也不會敲他,而他自己不會知道。
+        """
+        self._room_with(client, "main")            # 只有 3 則
+        r = client.put("/api/rooms/main/cursor/alice?last_id=999999")
+        assert r.status_code == 422
+        assert "只到 #3" in r.json()["detail"]      # 錯誤訊息要說出房間到哪
+        assert client.get("/api/rooms/main/cursor/alice").json()["last_id"] == 0
+
+    def test_negative_is_rejected(self, client):
+        self._room_with(client, "main")
+        assert client.put("/api/rooms/main/cursor/alice?last_id=-5").status_code == 422
+
+    def test_unknown_room_does_not_grow_a_ghost(self, client, isolated_base):
+        """打錯房名不該長出一間幽靈房 —— 它會出現在清單上,看起來像真的。
+
+        ★ `last_id=0` 是刻意的:用 1 的話,擋下它的其實是【超前檢查】
+          (幽靈房的 tail 是 0),於是這條測試看起來過了,卻沒測到房間存在檢查 ——
+          突變測試就是這樣抓到我的。**要測某一道關,就得讓其他關都放行。**
+        """
+        assert client.put("/api/rooms/ghost/cursor/alice?last_id=0").status_code == 422
+        assert all(r["name"] != "ghost" for r in client.get("/api/rooms").json()["rooms"])
+        assert not (client.app.state.hub.store.rooms_dir / "ghost").exists()
+
+    def test_put_cannot_impersonate_when_auth_is_on(self, make_app, isolated_base):
+        """★ 「我讀到 N 了」是一句聲明,所以 AUTH 開著時不能替別人說。
+
+        走的是跟發言【完全一樣】的那道門(check_writer)——
+        不另開權限,因為兩套遲早分岔,而分岔的那天沒有人會發現。
+        """
+        import server as server_mod
+        data_dir = isolated_base / server_mod.DATA_DIR_NAME
+        data_dir.mkdir(exist_ok=True)
+        bob_token = server_mod.TokenStore(data_dir / "tokens.json").issue("bob")
+
+        with TestClient(make_app(AUTH="on")) as c:
+            c.post("/api/rooms/main/messages", json={"from": "bob", "text": "一則"},
+                   headers={"Authorization": f"Bearer {bob_token}"})
+            # 拿 bob 的鑰匙替 alice 宣告已讀 → 403
+            r = c.put("/api/rooms/main/cursor/alice?last_id=1",
+                      headers={"Authorization": f"Bearer {bob_token}"})
+            assert r.status_code == 403
+            # 完全沒帶鑰匙 → 401
+            assert c.put("/api/rooms/main/cursor/alice?last_id=1").status_code == 401
+
+    def test_rewind_is_allowed_on_purpose(self, client):
+        """★ 倒退【允許】,而且不需要旗標 —— 這是刻意的,理由是危險不對稱:
+
+            cursor 落後   最壞是多讀幾則(無害,而且 agent 會發現自己讀過了)
+            cursor 超前   永久漏讀,而且沒有人會發現
+
+        只擋危險的那一邊。擋倒退的話,「我想重讀一段」這個合法需求就得繞路,
+        而它防的是一個無害的錯 —— **防護要跟危險成比例。**
+        """
+        self._room_with(client, "main")
+        client.put("/api/rooms/main/cursor/alice?last_id=3")
+        assert client.put("/api/rooms/main/cursor/alice?last_id=1").status_code == 200
+        assert client.get("/api/rooms/main/cursor/alice").json()["last_id"] == 1
+
+    def test_cursors_list_is_the_member_list(self, client):
+        """★ 「cursors/ 底下有你的檔案」就是「你在這個房間」—— 零新狀態。
+
+        跟「房間清單從訊息推導」是同一招:沒有名冊要維護,
+        也就不會有名冊與實際不符的那種 bug。
+        """
+        self._room_with(client, "main")
+        client.put("/api/rooms/main/cursor/alice?last_id=2")
+        client.put("/api/rooms/main/cursor/bob?last_id=3")
+        assert client.get("/api/rooms/main/cursors").json()["cursors"] == {
+            "alice": 2, "bob": 3}
+
+    def test_cursor_is_per_room(self, client):
+        """★ 這一整批的理由:在 lab 推進度不會蓋掉 main 的。"""
+        self._room_with(client, "main")
+        self._room_with(client, "lab")
+        client.put("/api/rooms/main/cursor/alice?last_id=3")
+        client.put("/api/rooms/lab/cursor/alice?last_id=1")
+        assert client.get("/api/rooms/main/cursor/alice").json()["last_id"] == 3
+
+
 class TestDeleteRoom:
     """刪除房間 —— **全站唯一的破壞性操作**,所以測試的重點是它的邊界。"""
 

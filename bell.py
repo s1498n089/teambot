@@ -111,6 +111,7 @@ import shutil
 import sys
 import threading
 import time
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -127,6 +128,7 @@ RE_RING_SECONDS = 90        # 【同一批】敲後多久 cursor 仍未推進就
 PATROL_SECONDS = 5          # 節拍器一圈;也是【有新訊息時】的最短敲鈴間隔
 MAX_RINGS = 3               # 同一段落後最多敲幾次,之後改印警告(不騷擾設計)
 SSE_READ_TIMEOUT = 60       # server 每 15 秒有 keep-alive,60 秒沒動靜視為死連線
+CURSOR_READ_TIMEOUT = 5     # 問 hub「他讀到哪」的等待上限 —— 問不到就當作 0(見 read_cursor)
 RECONNECT_MAX_BACKOFF = 30
 
 
@@ -263,8 +265,7 @@ class BellState:
       (這個「一邊寫、另一邊讀、彼此不協調」的結構,來歷見 doc/TUTORIAL.md 第 3 章)
     """
 
-    def __init__(self, cursor_path: Path, ring_fn, name: str, server: str, room: str):
-        self.cursor_path = cursor_path
+    def __init__(self, ring_fn, name: str, server: str, room: str):
         self.ring_fn = ring_fn
 
         # 這三個是「我是誰、要盯哪台的哪個房間」——sse_watch 會用到。
@@ -284,20 +285,35 @@ class BellState:
         self.lock = threading.Lock()
 
     def read_cursor(self) -> int:
-        """讀這個 agent 的進度書籤。讀不到就回 0。
+        """問 hub:這個 agent 在這個房讀到哪。**問不到就回 0。**
 
         ★ 回 0 的意思是「當作他一則都沒讀過」,所以他會被叫醒。這是刻意選的方向:
 
             回 0        → 最壞情況是白醒一次(無害,他對帳後發現沒新訊息就回去睡)
             回最新編號  → 最壞情況是【永遠不叫他】,而且安靜到沒有人會發現
 
-        兩種錯的代價差很多,所以寧可吵也不要漏 —— 檔案讀不到(還沒建立、
-        權限問題、內容壞掉)本來就是異常狀態,異常時要往「會被注意到」的方向倒。
+        兩種錯的代價差很多,所以寧可吵也不要漏 —— 讀不到(hub 沒開、網路斷、
+        還沒進過這個房)本來就是異常狀態,異常時要往「會被注意到」的方向倒。
         別把它「優化」成安靜的那一邊。
+
+        ## 為什麼從本地檔案改成問 hub
+
+        cursor 檔以前在 `state/cursor-<名字>.txt`,而且【不分房間】——
+        拿 --room 去別的房發言就會蓋掉本房的進度,然後這裡讀到一個小很多的數字,
+        以為 agent 倒退了一千多則,開始瘋狂敲它。實際差點發生過。
+
+        ★ 「多一個網路依賴」這件事誠實看:**需要問的時刻與問不到的時刻不相交。**
+          這個函式只在「SSE 送來事件、要判斷該不該敲」時被呼叫,
+          而事件進得來就代表 hub 活著、API 也就通。hub 掛掉時 SSE 先斷,
+          那時根本沒有需要判斷的事。
         """
+        url = (f"{self.server}/api/rooms/{self.room}/cursor/"
+               f"{urllib.parse.quote(self.name)}")
         try:
-            return int(self.cursor_path.read_text(encoding="utf-8").strip() or "0")
-        except (OSError, ValueError):
+            req = urllib.request.Request(url, headers={"Accept": "application/json"})
+            with urllib.request.urlopen(req, timeout=CURSOR_READ_TIMEOUT) as resp:
+                return int(json.loads(resp.read().decode("utf-8"))["last_id"])
+        except (OSError, ValueError, KeyError, json.JSONDecodeError):
             return 0
 
     def on_message(self, msg_id: int) -> None:
@@ -986,7 +1002,6 @@ def main() -> int:
               file=sys.stderr)
         return 1
 
-    cursor_path = BASE / "state" / f"cursor-{args.name}.txt"
     global LOG_PATH
     LOG_PATH = BASE / "state" / f"bell-{args.name}.log"
     LOG_PATH.parent.mkdir(exist_ok=True)
@@ -1027,7 +1042,7 @@ def main() -> int:
             #   兜底還是重敲機制(90 秒後再敲一次),代價是輸入框裡會多一行殘留。
             return write_fn(text, BELL_SUBMIT)
 
-        return BellState(cursor_path, ring_the_bell,
+        return BellState(ring_the_bell,
                          name=args.name,
                          server=args.server.rstrip("/"),
                          room=args.room)
