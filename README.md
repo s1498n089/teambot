@@ -33,7 +33,7 @@
 | **敲鈴器(bell)** | `bell.py`:包住 agent CLI 的門房 — 盯 hub 直播,有新訊息就把 `[A2A-BELL]` 敲進該 agent 的輸入框(預設喚醒方式) |
 | **hub(server)** | `server.py`:訊息匯流排 + A2A 協定端點 + 觀戰 UI 的供應者,單一事實來源 |
 | **cursor 檔** | `state/cursor-<agent名>.txt`:各 agent 自行維護的已讀進度 |
-| **`hub_data/`** | **伺服器**的資料:訊息(`chat.jsonl`)、任務(`tasks.json`)、認證鑰匙(`tokens.json`)。只有跑 hub 的那台會有。沒有「成員名冊」這種檔案 —— 誰是成員是即時算出來的 |
+| **`hub_data/`** | **伺服器**的資料。**一房一資料夾**:`rooms/<房名>/chat.jsonl`(訊息)與 `rooms/<房名>/tasks.json`(那個房派的任務);認證鑰匙 `tokens.json` 在上層(**身分不綁房間**)。只有跑 hub 的那台會有。沒有「成員名冊」這種檔案 —— 誰是成員是即時算出來的 |
 | **`state/`** | **客戶端**的狀態:各 agent 的 cursor 檔、敲鈴器紀錄。跑 agent 的那台才有 |
 | **外部 client** | 不在聊天室內、透過 webhook 或 A2A JSON-RPC 與 hub 互動的任何程式 |
 
@@ -53,7 +53,7 @@ flowchart LR
     subgraph hub["hub:uv run server.py(port 8787)"]
         rest["/api/* 可視化層(REST + SSE)"]
         a2a["/agents/* A2A Protocol 1.0(JSON-RPC 2.0)"]
-        store[("MessageStore<br>hub_data/chat.jsonl")]
+        store[("MessageStore<br>hub_data/rooms/&lt;房名&gt;/")]
     end
 
     browser["瀏覽器觀戰 UI(使用者)"]
@@ -74,7 +74,8 @@ flowchart LR
 > 圖裡的 `alice` 與 `bob` 只是**舉例** —— 示意圖需要具體名字才畫得出來。
 > 實際上開幾個視窗、叫什麼名字都由使用者決定,hub 這邊沒有任何一份寫死的名單。
 
-- **server.py(hub)** — FastAPI 訊息匯流排 + A2A 端點 + 觀戰 UI。訊息落地 `hub_data/chat.jsonl`,hub 重啟不掉訊息。
+- **server.py(hub)** — FastAPI 訊息匯流排 + A2A 端點 + 觀戰 UI。訊息與任務落地 `hub_data/rooms/<房名>/`,hub 重啟不掉訊息。
+  ★ **一房一資料夾**:刪一個房間就是刪一個目錄 —— 那以前是「重寫整本聊天記錄」,全站最危險的操作。
   內部分三層:`Hub`(資料與規則)/ `register_*`(哪個網址對應哪個動作)/ `create_app`(只負責組裝)。
 - **bell.py(敲鈴器,預設喚醒)** — 以 ConPTY/pty 包住 agent CLI(TUI 體驗不變),
   盯 hub 的 SSE 直播;「房間最新 id > 該 agent 的 cursor」就把 `[A2A-BELL]` 敲進其 stdin。
@@ -352,7 +353,7 @@ tokens.json 互不共享)。**資料路徑一律等到 Hub 建立時才算**,不
 - **遠端打不通**:先查 Windows 防火牆(上方放行指令),再確認 HOST=0.0.0.0 有設、雙方在同一網段。
 - **同一個資料夾同時只跑一個 hub**(每個 port 一個):非預設 PORT 的實例會自動用
   `tasks-<port>.json` 隔離 task 快照,但 `chat.jsonl` 仍共用 — 測試實例請用獨立房間名。
-- **想清空聊天室**:**先停掉 hub**,刪 `hub_data/chat.jsonl` 與 `hub_data/tasks.json`,再重啟。
+- **想清空聊天室**:**先停掉 hub**,刪 `hub_data/rooms/`(或只刪其中某個房間的資料夾),再重啟。
   兩個都要刪,否則任務會引用到已經不存在的訊息。
   ⚠️ **一定要先停 hub**:`tasks.json` 是「整包蓋回去」的寫法,hub 還跑著時你刪掉它,
   只要任何一個任務狀態變動(連逾時判定都算),記憶體那份就會整包寫回來,清理當場作廢。

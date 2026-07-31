@@ -115,28 +115,45 @@ class TestPublicHost:
 
 class TestMessageStore:
     def test_per_room_independent_ids(self, tmp_path):
-        store = MessageStore(tmp_path / "chat.jsonl")
+        store = MessageStore(tmp_path / "rooms")
         a1 = store.append("roomA", "alice", "hi", [])
         store.append("roomB", "bob", "yo", [])
         a2 = store.append("roomA", "alice", "again", [])
         assert (a1["id"], a2["id"]) == (1, 2)  # roomB 的流量不影響 roomA
 
     def test_empty_room_last_id_zero(self, tmp_path):
-        store = MessageStore(tmp_path / "chat.jsonl")
+        store = MessageStore(tmp_path / "rooms")
         assert store.last_id("nowhere") == 0
         assert store.query("nowhere")[0] == []
 
     def test_bad_line_skipped_on_load(self, tmp_path):
-        p = tmp_path / "chat.jsonl"
-        p.write_text('{"id":1,"room":"r","from":"a","text":"ok","mentions":[],"ts":"t"}\n'
-                     "THIS IS NOT JSON\n"
-                     '{"id":2,"room":"r","from":"a","text":"ok2","mentions":[],"ts":"t"}\n',
-                     encoding="utf-8")
-        store = MessageStore(p)
+        room = tmp_path / "rooms" / "r"
+        room.mkdir(parents=True)
+        (room / "chat.jsonl").write_text(
+            '{"id":1,"room":"r","from":"a","text":"ok","mentions":[],"ts":"t"}\n'
+            "THIS IS NOT JSON\n"
+            '{"id":2,"room":"r","from":"a","text":"ok2","mentions":[],"ts":"t"}\n',
+            encoding="utf-8")
+        store = MessageStore(tmp_path / "rooms")
         assert store.count("r") == 2  # 壞行跳過,不炸啟動
 
+    def test_room_name_comes_from_the_directory(self, tmp_path):
+        """★ 目錄與行內的 room 欄位不一致時,以【目錄】為準。
+
+        目錄是這則訊息現在住在哪裡,欄位是它被寫下來時記的 ——
+        兩者衝突通常代表有人手動搬過檔案,而那時該相信看得見的那個。
+        """
+        room = tmp_path / "rooms" / "moved"
+        room.mkdir(parents=True)
+        (room / "chat.jsonl").write_text(
+            '{"id":1,"room":"old-name","from":"a","text":"x","mentions":[],"ts":"t"}\n',
+            encoding="utf-8")
+        store = MessageStore(tmp_path / "rooms")
+        assert store.count("moved") == 1
+        assert store.count("old-name") == 0
+
     def test_query_three_modes(self, tmp_path):
-        store = MessageStore(tmp_path / "chat.jsonl")
+        store = MessageStore(tmp_path / "rooms")
         for i in range(5):
             store.append("r", "a", f"m{i}", [])
         since, last = store.query("r", since_id=3)
@@ -148,7 +165,7 @@ class TestMessageStore:
         assert [m["id"] for m in older] == [1, 2] and last == 5
 
     def test_mentioned_filter(self, tmp_path):
-        store = MessageStore(tmp_path / "chat.jsonl")
+        store = MessageStore(tmp_path / "rooms")
         store.append("r", "a", "hi @bob", ["bob"])
         store.append("r", "a", "plain", [])
         sel, last = store.query("r", mentioned="bob")
@@ -156,10 +173,59 @@ class TestMessageStore:
         assert last == 2                              # 房間的尾,不是這批的
 
     def test_reload_restores_indexes(self, tmp_path):
-        p = tmp_path / "chat.jsonl"
-        MessageStore(p).append("r", "alice", "hi", [])
-        store2 = MessageStore(p)  # 模擬重啟
+        rooms = tmp_path / "rooms"
+        MessageStore(rooms).append("r", "alice", "hi", [])
+        store2 = MessageStore(rooms)  # 模擬重啟
         assert store2.exists("r", 1) and "alice" in store2.known("r")
+
+    def test_rooms_live_in_separate_files(self, tmp_path):
+        """一房一資料夾 —— 刪一個房不必碰別人的檔案,這是整批重構的理由。"""
+        rooms = tmp_path / "rooms"
+        store = MessageStore(rooms)
+        store.append("a", "alice", "在 a", [])
+        store.append("b", "bob", "在 b", [])
+        assert (rooms / "a" / "chat.jsonl").exists()
+        assert (rooms / "b" / "chat.jsonl").exists()
+        assert "在 b" not in (rooms / "a" / "chat.jsonl").read_text(encoding="utf-8")
+
+    def test_dropping_a_room_removes_its_directory(self, tmp_path):
+        rooms = tmp_path / "rooms"
+        store = MessageStore(rooms)
+        store.append("doomed", "alice", "x", [])
+        store.append("keep", "bob", "y", [])
+        assert store.drop_room("doomed") == 1
+        assert not (rooms / "doomed").exists()
+        assert (rooms / "keep" / "chat.jsonl").exists()
+
+    @pytest.mark.parametrize("reserved", ["CON", "con", "NUL", "COM1", "LPT9", "AUX", "PRN"])
+    def test_windows_device_names_are_rejected(self, tmp_path, reserved):
+        """★ Windows 的保留裝置名不能當資料夾 —— 而且兩種失敗長得不一樣:
+
+            CON/PRN/AUX/COM1/LPT1   mkdir 當場失敗(WinError 267)
+            NUL                     mkdir【成功】,但往裡面寫檔案時才失敗
+
+        NUL 那個比較陰:房間看起來建起來了、清單上有它,訊息卻永遠寫不進去 ——
+        而使用者只會看到「我發的話不見了」。所以不能靠「mkdir 失敗就知道」,
+        要在名字這一關攔。
+
+        ★★ 這跟路徑穿越同源:**都是「房間名變成路徑」那天才長出來的**。
+          sanitize_sender 沒有這個問題,因為名字不會變成路徑。
+        """
+        store = MessageStore(tmp_path / "rooms")
+        with pytest.raises(server_mod.BadRoomError):
+            store.room_dir(reserved)
+
+    @pytest.mark.parametrize("evil", ["..", "../..", "a/b", "a\\b", ""])
+    def test_path_traversal_is_rejected(self, tmp_path, evil):
+        """★★ 房間名分資料夾之後【變成路徑的一段】,所以必須過白名單。
+
+        沒有這道關的話,`DELETE /api/rooms/..` 會 rmtree 掉整個 hub_data ——
+        房間名以前只是 dict 的 key(怎麼寫都安全),而那個安全性是隨著
+        「改成資料夾」一起消失的,**消失得毫無聲息**。
+        """
+        store = MessageStore(tmp_path / "rooms")
+        with pytest.raises(server_mod.BadRoomError):
+            store.room_dir(evil)
 
 
 # ---------- TokenStore ----------

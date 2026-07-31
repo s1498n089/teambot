@@ -219,10 +219,12 @@ class TestPersistence:
                      "state_ts": a2a_mod.now_iso(), "state_message": None,
                      "history": [], "metadata": {}, "feed_mid": None,
                      "completed_mid": None, "created_ts": a2a_mod.now_iso()}]
-        # 路徑要跟伺服器一致(hub_data/),不能寫在專案根目錄
-        data_dir = isolated_base / server_mod.DATA_DIR_NAME
-        data_dir.mkdir(exist_ok=True)
-        (data_dir / "tasks.json").write_text(json.dumps(snapshot), encoding="utf-8")
+        # 路徑要跟伺服器一致:hub_data/rooms/<房名>/tasks.json
+        # ★ 一房一個 tasks.json —— 所以快照要放進【那個房間的資料夾】,
+        #   而房間名以目錄為準(不是以快照裡的 context_id)。
+        room_dir = isolated_base / server_mod.DATA_DIR_NAME / "rooms" / "main"
+        room_dir.mkdir(parents=True, exist_ok=True)
+        (room_dir / "tasks.json").write_text(json.dumps(snapshot), encoding="utf-8")
         with TestClient(make_app()) as c:
             got = rpc(c, "bob", "GetTask", {"id": "zombie"})["result"]
             assert got["status"]["state"] == "TASK_STATE_FAILED"

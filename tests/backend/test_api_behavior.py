@@ -3,10 +3,13 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 
 import httpx
 import pytest
 from fastapi.testclient import TestClient
+
+import server as server_mod
 
 from conftest import bring_agent_online, post_msg
 
@@ -197,6 +200,56 @@ class TestDeleteRoom:
         assert registry.in_room("doomed") == []
         assert not any(t.context_id == "doomed" for t in registry.all_tasks())
 
+    def test_tasks_live_in_their_own_room_directory(self, client, isolated_base):
+        """★ 一房一個 tasks.json —— 「全量快照、最後寫者贏」的範圍縮到單一房間。
+
+        以前所有房間的任務擠在一個檔案裡,任何一次狀態轉換都會把【全部】重寫一次;
+        A 房的 checkpoint 有機會洗掉 B 房剛寫進去的東西。分房之後那個交叉沒了。
+        """
+        self._make_task_in(client, "alpha", "m-alpha")
+        self._make_task_in(client, "beta", "m-beta")
+
+        rooms_dir = client.app.state.hub.store.rooms_dir
+
+        # ★ 【後建】的那個房才是關鍵。只檢查 alpha 的話這條測試是裝飾:
+        #   快照就算寫成「全部 task 混在一起」,alpha 落盤的當下也只有它自己一個,
+        #   所以永遠是 1 —— 突變測試就是這樣抓到我的:改壞了它照樣綠。
+        for room in ("alpha", "beta"):
+            path = rooms_dir / room / "tasks.json"
+            assert path.exists()
+            snap = json.loads(path.read_text(encoding="utf-8"))
+            assert len(snap) == 1, f"{room} 的快照混進了別房的 task"
+            assert snap[0]["context_id"] == room
+
+    def test_task_room_comes_from_the_directory(self, client, make_app, isolated_base):
+        """★ 快照裡的 context_id 跟目錄不一致時,以【目錄】為準 —— 跟訊息同一條規則。
+
+        目錄是這個 task 現在住在哪裡,欄位是它被寫下來時記的。兩者衝突通常代表
+        有人手動搬過檔案(例如遷移腳本跑歪了),而那時該相信看得見的那個。
+        """
+        room_dir = isolated_base / server_mod.DATA_DIR_NAME / "rooms" / "moved"
+        room_dir.mkdir(parents=True, exist_ok=True)
+        (room_dir / "tasks.json").write_text(json.dumps([{
+            "id": "t1", "context_id": "old-name", "target": "bob",
+            "deadline_seconds": 600.0, "state": "TASK_STATE_COMPLETED",
+            "state_ts": "2026-01-01T00:00:00+00:00", "state_message": None,
+            "history": [], "metadata": {}, "feed_mid": 1, "completed_mid": None,
+            "created_ts": "2026-01-01T00:00:00+00:00"}]), encoding="utf-8")
+
+        with TestClient(make_app()) as c:
+            assert len(c.get("/api/rooms/moved/tasks").json()["tasks"]) == 1
+            assert c.get("/api/rooms/old-name/tasks").json()["tasks"] == []
+
+            # ★ 索引查得到【不代表】欄位是對的:_by_room 用的是目錄名,
+            #   所以就算沒把 context_id 改正,上面兩行照樣過 ——
+            #   突變測試就是這樣抓到我的。要看 task 自己報的 contextId 才算數,
+            #   因為那是 A2A 協定對外的答案(GetTask 回的東西)。
+            task_id = c.get("/api/rooms/moved/tasks").json()["tasks"][0]["id"]
+            spec = c.post("/agents/bob/a2a", json={
+                "jsonrpc": "2.0", "id": 1, "method": "GetTask",
+                "params": {"id": task_id}}).json()
+            assert spec["result"]["contextId"] == "moved"
+
     def test_tasks_do_not_survive_a_restart(self, client, make_app, isolated_base):
         """★★ 同一個 bug 的【檔案那一半】—— 而這一半上面那條測不到。
 
@@ -219,19 +272,57 @@ class TestDeleteRoom:
         client.delete("/api/rooms/doomed?by=allen")
         assert sub.dead is True
 
-    def test_keeps_unparseable_lines(self, client, isolated_base):
-        """★ 刪一個房間不該順便清理別的東西。
+    def test_other_rooms_files_are_not_touched(self, client, isolated_base):
+        """★ 刪一個房間不該碰到別人的檔案 —— 而分資料夾之後這是【結構保證】。
 
-        壞行(載入時跳過的那種)要原樣留著 —— 一個動作只做一件事,
-        順手清理會讓這個操作的後果變得無法預期。
+        這條測試取代了原本的 `test_keeps_unparseable_lines`。那條守的是
+        「重寫 chat.jsonl 時壞行要原樣保留」,而那個規則隨著重寫路徑一起消失了:
+        現在刪房是 rmtree 一個目錄,根本不會讀到別人的行。
+
+        ★ 規則消失時,守著它的測試也該跟著走 —— 留著會變成「守著一個不存在的行為」,
+          而那種測試永遠是綠的,還會讓人以為某個保護還在。
         """
         post_msg(client, "doomed", "alice", "會被刪掉")
-        path = client.app.state.hub.store.path
-        with path.open("a", encoding="utf-8") as f:
-            f.write("THIS IS NOT JSON\n")
+        post_msg(client, "keep", "bob", "要留著")
+        keep_path = client.app.state.hub.store.chat_path("keep")
+        before = keep_path.read_text(encoding="utf-8")
 
         client.delete("/api/rooms/doomed?by=allen")
-        assert "THIS IS NOT JSON" in path.read_text(encoding="utf-8")
+        assert keep_path.read_text(encoding="utf-8") == before   # 一個位元組都沒動
+
+    def test_path_traversal_leaves_the_data_dir_intact(self, client, isolated_base):
+        """★★ 房間名會變成路徑之後,`..` 這種東西不能讓資料目錄消失。
+
+        ★ 斷言的是【後果】不是【狀態碼】:HTTP 那條路上 `..` 會先被 URL 正規化吃掉
+          (回 404),而不是走到我們的白名單 —— 兩種都算擋住了,但擋的層不一樣。
+          釘住狀態碼會讓這條測試變成在測 Starlette 的路由行為,那不是我們的東西。
+        """
+        post_msg(client, "keep", "alice", "要留著")
+        rooms_dir = client.app.state.hub.store.rooms_dir
+
+        for evil in ["..", "%2E%2E", "..%2F.."]:
+            client.delete(f"/api/rooms/{evil}?by=attacker")
+
+        assert rooms_dir.exists()
+        assert (rooms_dir / "keep" / "chat.jsonl").exists()
+
+    def test_a2a_context_id_cannot_escape_the_rooms_dir(self, client, isolated_base):
+        """★★ 真正的攻擊面在這裡 —— A2A 的 contextId 【沒有 URL 正規化】。
+
+        contextId 是 JSON body 裡的一個字串,原封不動變成房間名、再變成資料夾名。
+        HTTP 那條路上 `..` 會被路由層吃掉,這條路上不會 —— 所以白名單是這裡唯一的關。
+        """
+        bring_agent_online(client.app, "bob", room="../escape")
+        client.post("/agents/bob/a2a", json={
+            "jsonrpc": "2.0", "id": 1, "method": "SendMessage",
+            "params": {"message": {"role": "ROLE_USER", "parts": [{"text": "逃"}],
+                                   "messageId": "m-escape", "contextId": "../escape"},
+                       "configuration": {"returnImmediately": True},
+                       "metadata": {"senderName": "attacker"}}})
+
+        rooms_dir = client.app.state.hub.store.rooms_dir
+        assert not (rooms_dir.parent / "escape").exists()   # 沒有跳出 rooms/
+        assert not (rooms_dir / ".." / "escape").exists()
 
 
 class TestForceRing:

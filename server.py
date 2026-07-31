@@ -21,6 +21,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import sys
 import tempfile
 import time
@@ -92,6 +93,48 @@ def sanitize_sender(raw: str) -> str | None:
     return None
 
 
+# Windows 保留給裝置的名字 —— 不能拿來當資料夾。
+#
+# ★ 實測(2026-07-31,本機 Windows 11),而且兩種失敗長得【不一樣】:
+#
+#       CON/PRN/AUX/COM1/LPT1   mkdir 當場失敗   WinError 267 目錄名稱無效
+#       NUL                     mkdir 【成功】   但往裡面寫檔案時才 FileNotFoundError
+#
+#   NUL 那個比較陰:房間看起來建起來了(清單上有它),訊息卻永遠寫不進去 ——
+#   而使用者只會看到「我發的話不見了」。所以不能靠「mkdir 失敗就知道」來擋,
+#   要在名字這一關就攔。
+#
+# 副檔名的變體(CON.txt)不必特別處理:白名單本來就不收 `.`。
+WINDOWS_RESERVED = {"CON", "PRN", "AUX", "NUL"} | {
+    f"{prefix}{n}" for prefix in ("COM", "LPT") for n in range(10)}
+
+
+def sanitize_room(raw: str) -> str | None:
+    """房間名消毒。不合法回 None(呼叫端決定 422)。
+
+    ★★ 這個函式是【資料夾化那天才變得必要的】,而它擋的東西跟名字完全不同:
+
+        名字的白名單   擋空白與 @ —— 防的是 @點名解析出怪東西
+        房間的白名單   擋 / . \\ —— 防的是【路徑穿越】
+
+      房間名以前只是 dict 的 key(怎麼寫都安全),分資料夾之後它變成路徑的一段。
+      沒有這道關的話:
+
+          DELETE /api/rooms/..        → rmtree 掉整個 hub_data
+          POST   /api/rooms/a%2Fb     → 訊息寫到別人的目錄裡
+
+      ★ 規則跟名字一樣是巧合,不是同一條規則 —— 所以寫成兩個函式,
+        各自帶自己的理由。共用一個函式的話,哪天名字的規則要放寬(例如允許空白),
+        房間名會【跟著被放寬】,而放寬的人不會知道自己順手打開了一個路徑漏洞。
+    """
+    name = (raw or "").strip()
+    if not SENDER_RE.match(name):
+        return None
+    if name.upper() in WINDOWS_RESERVED:
+        return None
+    return name
+
+
 def clean_public_host(raw: str) -> str:
     """PUBLIC_HOST 只吃主機名或 IP —— 帶了 scheme 或 port 就當場擋下。
 
@@ -159,6 +202,11 @@ class BadSenderError(ApiError):
     status = 422
 
 
+class BadRoomError(ApiError):
+    """房間名不合法 —— 它會變成資料夾名字,所以規則比「好看」嚴格得多。"""
+    status = 422
+
+
 # ---------- MentionParser ----------
 
 class MentionParser:
@@ -218,20 +266,47 @@ class MentionParser:
 # ---------- MessageStore ----------
 
 class MessageStore:
-    """訊息的儲存與查詢(Repository)。
+    """訊息的儲存與查詢(Repository)。**一個房間一個資料夾。**
 
     - id 為房間內獨立遞增(別房流量不造成本房跳號)
-    - chat.jsonl 逐行落地,重啟自動載回;壞行跳過記 warning,不讓一行毀掉啟動
-    - _ids / _known 為增量索引:exists()/known() O(1),
-      維護只發生在 _index() 一處
+    - `<rooms_dir>/<房名>/chat.jsonl` 逐行落地,重啟自動載回;
+      壞行跳過記 warning,不讓一行毀掉啟動
+    - _ids / _known 為增量索引:exists()/known() O(1),維護只發生在 _index() 一處
+
+    ## 為什麼從「一個大檔」改成「一房一個資料夾」
+
+    刪一個房間本來是全系統最危險的操作:逐行讀原檔、濾掉該房、寫暫存檔、原子替換 ——
+    那是唯一會【重寫】聊天記錄的動作,寫壞就是全部一起沒。
+
+    分資料夾之後,它變成刪一個目錄。★ **同樣的功能,危險等級差一個量級。**
+
+    誠實標一個代價:房間多到幾千個時,啟動要開幾千個檔案(現在是開一個)。
+    那個量級不在這個專案的射程內(它是團隊內部的聊天室),真到那天要改的是
+    「只載入活躍房間」,而不是把檔案合回去。
     """
 
-    def __init__(self, path: Path):
-        self.path = path
+    def __init__(self, rooms_dir: Path):
+        self.rooms_dir = rooms_dir
         self.rooms: dict[str, list[dict]] = {}
         self._ids: dict[str, set[int]] = {}
         self._known: dict[str, set[str]] = {}
         self._load()
+
+    def room_dir(self, room: str) -> Path:
+        """房間名 → 資料夾。**這是唯一把房間名變成路徑的地方,所以驗證只放這裡。**
+
+        ★ 只在這裡驗,是刻意的:重複的防禦會讓後人以為某一層可以省略,
+          而這種「每層都擋一下」的寫法,最後總是有一層被跳過。
+          單一入口的代價是錯誤在比較深的地方拋出,換來的是【不可能繞過】。
+        """
+        safe = sanitize_room(room)
+        if safe is None:
+            raise BadRoomError({"error": "bad_room",
+                                "detail": f"房間名不合法:{room!r}(只能用中英數、- 與 _,32 字以內)"})
+        return self.rooms_dir / safe
+
+    def chat_path(self, room: str) -> Path:
+        return self.room_dir(room) / "chat.jsonl"
 
     def _index(self, msg: dict) -> None:
         """load 與 append 共用的索引維護 — 三個結構同步只在這裡發生。
@@ -251,16 +326,33 @@ class MessageStore:
         self._known.setdefault(room, set()).add(msg["from"])
 
     def _load(self) -> None:
-        if not self.path.exists():
+        """掃過 rooms_dir 底下每個資料夾,各載各的。
+
+        ★ 房間的存在【由目錄推導】,跟「房間清單由訊息推導」是同一招 ——
+          沒有一份「房間名冊」需要維護,也就不會有名冊與實際不符的那種 bug。
+        """
+        if not self.rooms_dir.exists():
             return
-        for lineno, line in enumerate(self.path.read_text(encoding="utf-8").splitlines(), 1):
+        for entry in sorted(self.rooms_dir.iterdir()):
+            if entry.is_dir():
+                self._load_room(entry.name, entry / "chat.jsonl")
+
+    def _load_room(self, room: str, path: Path) -> None:
+        if not path.exists():
+            return
+        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
             line = line.strip()
             if not line:
                 continue
             try:
-                self._index(json.loads(line))
+                msg = json.loads(line)
+                # ★ 以【目錄】為準,不是以行內的 room 欄位為準:
+                #   目錄是這一則訊息現在住在哪裡,而欄位是它被寫下來時記的。
+                #   兩者不一致時(例如手動搬過檔案),相信看得見的那個。
+                msg["room"] = room
+                self._index(msg)
             except (json.JSONDecodeError, KeyError, TypeError) as exc:
-                print(f"[store] WARN skip bad line {lineno}: {exc}", file=sys.stderr)
+                print(f"[store] WARN skip bad line {room}/{lineno}: {exc}", file=sys.stderr)
 
     def last_id(self, room: str) -> int:
         """這個房間最新一則訊息的編號。空房間回 0。"""
@@ -381,50 +473,32 @@ class MessageStore:
         if task_id is not None:
             msg["task_id"] = task_id
         self._index(msg)
-        with self.path.open("a", encoding="utf-8") as f:
+        path = self.chat_path(room)
+        path.parent.mkdir(parents=True, exist_ok=True)   # 第一則訊息就是這個房間的誕生
+        with path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(msg, ensure_ascii=False) + "\n")
         return msg
 
     def drop_room(self, room: str) -> int:
-        """把一個房間的訊息從記事本裡刪掉,回傳刪了幾則。
+        """刪掉一個房間的訊息:**刪它的資料夾**。回傳刪了幾則。
 
-        ★★ 這是【全系統唯一會重寫 chat.jsonl 的操作】,而重寫的做法是
-          「寫暫存檔 → 原子替換」,不是就地改:
+        ★ 這裡曾經是全系統最危險的一段:逐行讀原檔、濾掉該房、寫暫存檔、原子替換,
+          外加「壞行要原樣保留」與「以檔案為準」兩條特別規則 ——
+          因為那時所有房間住在同一個檔案裡,刪一個房要動到全部人的資料。
 
-              就地改   寫到一半斷電 → 留下半個檔案 → 連救都救不回來
-              原子替換 斷在哪裡都只有兩種結果:舊的完整,或新的完整
+          分資料夾之後那整段消失了。**同一個功能,危險等級差一個量級。**
+          留這段註解是為了說明「為什麼這裡這麼短」—— 它短是因為結構對了,
+          不是因為有人偷懶少寫了防護。
 
-          ★ 這跟「要不要備份」是兩件事。使用者選了真刪(不留備份),
-            但原子替換仍然必要 —— 它防的是「刪除本身把整個聊天記錄毀掉」。
-
-        ★ 逐行讀原檔來濾,不是把記憶體裡的資料倒出去重寫。兩個理由:
-              ① 保留原本的行順序(記憶體是按房間分組的,倒出去會重排)
-              ② 記憶體與檔案萬一不同步時,以【檔案】為準 —— 它才是事實來源
-
-        ★ 壞行(load 時跳過的那種)原樣保留:刪一個房間不該順便清理別的東西。
-          「一個動作只做一件事」—— 順手清理會讓這個操作的後果變得無法預期。
+        ⚠️ 仍然要在 post_lock 裡呼叫:rmtree 到一半有人往這個房 POST,
+          結果會是半刪的目錄加一則孤兒訊息。分資料夾解決的是「刪 A 房會不會
+          弄壞 B 房」,**不是「刪 A 房 vs 正在寫 A 房」**。
         """
         removed = len(self.rooms.get(room, []))
         self.rooms.pop(room, None)
         self._ids.pop(room, None)
         self._known.pop(room, None)
-
-        if not self.path.exists():
-            return removed
-
-        fd, tmp = tempfile.mkstemp(dir=str(self.path.parent), suffix=".tmp")
-        with open(fd, "w", encoding="utf-8") as out:
-            for line in self.path.read_text(encoding="utf-8").splitlines():
-                stripped = line.strip()
-                if not stripped:
-                    continue
-                try:
-                    if json.loads(stripped).get("room") == room:
-                        continue
-                except json.JSONDecodeError:
-                    pass                      # 壞行保留,見 docstring
-                out.write(stripped + "\n")
-        os.replace(tmp, str(self.path))
+        shutil.rmtree(self.room_dir(room), ignore_errors=True)
         return removed
 
     def rooms_index(self) -> list[dict]:
@@ -698,7 +772,11 @@ class Hub:
         self.data_dir.mkdir(exist_ok=True)
 
         # ── 訊息與廣播 ──
-        self.store = MessageStore(self.data_dir / "chat.jsonl")
+        # 一房一資料夾:<rooms_dir>/<房名>/{chat.jsonl,tasks.json}
+        # ★ store 與 a2a_layer 共用同一個根 —— 訊息與任務住在一起,
+        #   刪房間才會是「刪一個目錄」而不是「去兩個地方各清一次」。
+        self.rooms_dir = self.pick_rooms_dir()
+        self.store = MessageStore(self.rooms_dir)
         self.bus = EventBus()
         # 這把鎖讓「寫進聊天室」這件事一次只有一個人在做。
         # 沒有它的話,兩個人同時發言會讓樂觀鎖失效 —— 兩邊都以為自己是最新的。
@@ -730,7 +808,7 @@ class Hub:
             # 哪天真的多房間常態運作,這裡就是要改的第一個地方。
             live_agents_fn=self.bus.live_agents_maybe_room,
             auth_enabled=self.auth_enabled,
-            tasks_path=self.pick_tasks_path(),
+            rooms_dir=self.rooms_dir,
         )
 
     # ---------- 開機時的準備工作 ----------
@@ -767,19 +845,28 @@ class Hub:
             new_token = self.token_store.issue(rotate)
             print(f"[auth] {rotate} 的新 token(舊的已失效):{new_token}", file=sys.stderr)
 
-    def pick_tasks_path(self) -> Path:
-        """決定任務狀態要存到哪個檔案。
+    def pick_rooms_dir(self) -> Path:
+        """決定房間資料要放哪個根目錄。
 
-        為什麼不固定一個檔名:任務檔是【整包蓋回去】的寫法,
-        兩個 hub 共用同一個檔案會互相把對方的狀態洗掉(實際踩過)。
-        所以用非預設埠號跑的實例,自動改用自己的檔名。TASKS_PATH 可以手動指定。
+        為什麼不固定一個名字:任務檔是【整包蓋回去】的寫法,
+        兩個 hub 共用同一份資料會互相把對方的狀態洗掉(實際踩過)。
+        所以用非預設埠號跑的實例,自動用自己的目錄。ROOMS_DIR 可以手動指定。
+
+        ★ 這個隔離以前只保護 tasks.json(檔名帶 port),chat.jsonl 是共用的 ——
+          而那個不對稱其實是個沒人踩到的 bug:兩個 hub 各自從記憶體算
+          `last_id + 1`,共用同一份訊息時**會產生重複的 id**。
+          隔離提到目錄這一層之後,兩邊完全不相干,那個 bug 也一起沒了。
+
+        ★★ 環境變數從 TASKS_PATH 改名成 ROOMS_DIR:它指的東西變了
+          (以前是一個任務檔,現在是整個房間根目錄),名字不跟著改就是騙人。
+          舊名字沒有留相容 —— 它在 server.env.example 裡是註解掉的,沒有使用者。
         """
-        custom = os.environ.get("TASKS_PATH")
+        custom = os.environ.get("ROOMS_DIR")
         if custom:
             return Path(custom)
         if self.port == DEFAULT_PORT:
-            return self.data_dir / "tasks.json"
-        return self.data_dir / f"tasks-{self.port}.json"
+            return self.data_dir / "rooms"
+        return self.data_dir / f"rooms-{self.port}"
 
     async def restore_tasks(self) -> None:
         """伺服器重開時,把還沒做完的任務接回來。

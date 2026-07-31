@@ -157,45 +157,81 @@ class TaskRegistry:
       2. 狀態轉換後(由 A2ALayer._transition 呼叫 checkpoint)
     """
 
-    def __init__(self, path=None):
-        self.path = path  # None = 不持久化(隔離測試用)
+    def __init__(self, rooms_dir=None):
+        """rooms_dir = 房間根目錄;None = 不持久化(隔離測試用)。
+
+        ★ 一房一個 tasks.json。全量快照的「最後寫者贏」因此縮到單一房間 ——
+          A 房的狀態轉換不會再有機會洗掉 B 房的任務。
+        """
+        self.rooms_dir = rooms_dir
         self._by_id: dict[str, Task] = {}
         self._by_room: dict[str, list[str]] = defaultdict(list)
         self._by_feed: dict[tuple[str, int], str] = {}  # (room, feed_mid) -> task id
         self._load()
 
+    def tasks_path(self, room: str):
+        return self.rooms_dir / room / "tasks.json"
+
     def _load(self) -> None:
-        if not self.path or not self.path.exists():
+        """掃過每個房間目錄,各載各的 tasks.json。
+
+        ★ 以【目錄名】為房間,不是以快照裡的 context_id —— 跟訊息那邊同一條規則:
+          目錄是這個 task 現在住在哪裡,欄位是它被寫下來時記的。
+        """
+        if not self.rooms_dir or not self.rooms_dir.exists():
+            return
+        for entry in sorted(self.rooms_dir.iterdir()):
+            if entry.is_dir():
+                self._load_room(entry.name, entry / "tasks.json")
+
+    def _load_room(self, room: str, path) -> None:
+        if not path.exists():
             return
         try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
+            data = json.loads(path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError) as exc:
-            print(f"[tasks] WARN tasks.json 載入失敗,以空名冊啟動:{exc}", file=sys.stderr)
+            print(f"[tasks] WARN {room}/tasks.json 載入失敗,這個房以空名冊啟動:{exc}",
+                  file=sys.stderr)
             return
         for item in data:
             try:
                 task = Task.from_snapshot(item)
             except (KeyError, TypeError) as exc:
-                print(f"[tasks] WARN 跳過壞快照:{exc}", file=sys.stderr)
+                print(f"[tasks] WARN 跳過壞快照({room}):{exc}", file=sys.stderr)
                 continue
+            task.context_id = room                # 目錄為準
             self._by_id[task.id] = task
-            self._by_room[task.context_id].append(task.id)
+            self._by_room[room].append(task.id)
             if task.feed_mid is not None:
-                self._by_feed[(task.context_id, task.feed_mid)] = task.id
+                self._by_feed[(room, task.feed_mid)] = task.id
 
-    def checkpoint(self) -> None:
-        """全量快照原子落地。失敗只記 warning 繼續跑 —
-        可用性優先於持久性(最壞退回蒸發行為,不炸訊息流)。"""
-        if not self.path:
+    def checkpoint(self, room: str | None = None) -> None:
+        """把快照落地。給了房間就只寫那一個,沒給就每個房各寫一次。
+
+        ★ 「全量快照、最後寫者贏」的範圍從此縮到【單一房間】——
+          A 房的狀態轉換不再有機會洗掉 B 房的任務。
+
+        失敗只記 warning 繼續跑:可用性優先於持久性
+        (最壞退回蒸發行為,不炸訊息流)。
+        """
+        if not self.rooms_dir:
             return
+        rooms = [room] if room is not None else list(self._by_room)
+        for name in rooms:
+            self._checkpoint_room(name)
+
+    def _checkpoint_room(self, room: str) -> None:
+        path = self.tasks_path(room)
         try:
-            snap = [t.to_snapshot() for t in self._by_id.values()]
-            fd, tmp = tempfile.mkstemp(dir=str(self.path.parent), suffix=".tmp")
+            snap = [self._by_id[t].to_snapshot() for t in self._by_room.get(room, [])
+                    if t in self._by_id]
+            path.parent.mkdir(parents=True, exist_ok=True)
+            fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
             with open(fd, "w", encoding="utf-8") as f:
                 json.dump(snap, f, ensure_ascii=False)
-            os.replace(tmp, str(self.path))
+            os.replace(tmp, str(path))
         except OSError as exc:
-            print(f"[tasks] WARN 快照落地失敗(繼續運行):{exc}", file=sys.stderr)
+            print(f"[tasks] WARN {room} 快照落地失敗(繼續運行):{exc}", file=sys.stderr)
 
     def add(self, task: Task) -> None:
         self._by_id[task.id] = task
@@ -207,7 +243,7 @@ class TaskRegistry:
         這一刻 task 才算「建立完成」,也是第一次落盤的時機。"""
         task.feed_mid = feed_mid
         self._by_feed[(task.context_id, feed_mid)] = task.id
-        self.checkpoint()
+        self.checkpoint(task.context_id)   # 只寫這個房 —— 分房之後不必動別人的檔
 
     def all_tasks(self) -> list[Task]:
         return list(self._by_id.values())
@@ -240,7 +276,9 @@ class TaskRegistry:
             task = self._by_id.pop(task_id, None)
             if task is not None and task.feed_mid is not None:
                 self._by_feed.pop((room, task.feed_mid), None)
-        self.checkpoint()
+        # ★ 不必 checkpoint:整個房間的目錄馬上會被刪掉(見 server 的 drop_room)。
+        #   寫一份「這個房沒有任何 task」的快照到一個即將消失的目錄裡,
+        #   是純粹的浪費,而且會在 rmtree 與寫檔之間開一個沒有意義的競態窗口。
         return len(ids)
 
     def all_ids(self) -> list[str]:
@@ -257,7 +295,7 @@ class A2ALayer:
 
     def __init__(self, ingest, sanitize_sender, base_url: str,
                  live_agents_fn: Callable[..., set[str]],   # 吃可選的房間,見下方註解
-                 auth_enabled: bool = False, tasks_path=None):
+                 auth_enabled: bool = False, rooms_dir=None):
         self._ingest = ingest
         self._sanitize = sanitize_sender
         self.base_url = base_url.rstrip("/")
@@ -274,7 +312,9 @@ class A2ALayer:
         #   但「他能不能收到這個房的任務」必須綁房間。
         self.live_agents = live_agents_fn
         self.auth_enabled = auth_enabled  # 影響 Agent Card 的 securitySchemes 誠實聲明(③)
-        self.registry = TaskRegistry(tasks_path)  # 任務狀態落地,伺服器重開不失憶
+        # 任務狀態落地,伺服器重開不失憶。★ 跟訊息住同一個房間目錄 ——
+        # 刪房間才會是「刪一個目錄」,而不是「去兩個地方各清一次然後祈禱順序對」。
+        self.registry = TaskRegistry(rooms_dir)
         self._handlers = {  # 方法分派表建一次即可,dispatch 熱路徑不重建
             "SendMessage": self._send_message,
             "SendStreamingMessage": self._send_streaming_message,
@@ -344,7 +384,7 @@ class A2ALayer:
             task.done.set()
             if state in TERMINAL and task.deadline_handle:
                 task.deadline_handle.cancel()  # 終態即取消計時器,免空轉
-        self.registry.checkpoint()  # 持久化唯二咽喉之二(轉換即落盤,不可能忘)
+        self.registry.checkpoint(task.context_id)  # 持久化唯二咽喉之二(轉換即落盤,不可能忘)
         return True
 
     async def _deadline_watch(self, task: Task, seconds: float | None = None) -> None:
