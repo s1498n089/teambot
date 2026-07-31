@@ -6,7 +6,7 @@ import time
 
 from fastapi.testclient import TestClient
 
-from conftest import post_msg
+from conftest import bring_agent_online, post_msg
 
 
 import pytest
@@ -69,6 +69,44 @@ class TestSenderKind:
         send_task(client)
         feed = client.get("/api/rooms/main/messages?since_id=0").json()["messages"]
         assert feed[-1]["kind"] == "human"
+
+
+class TestTargetAvailability:
+    """派任務之前,目標得【在這個房間裡】—— 而兩種失敗要分開講。
+
+    ★ 為什麼不能講成同一句話:因為處理方式不同。
+          agent not online    → 去把那個 agent 的視窗開起來
+          agent not in room   → 去那個房間開,或改派給這個房裡的人
+      講成一樣的話,收到的人會往錯的方向找。
+    """
+
+    def test_offline_agent_is_rejected(self, client):
+        """完全沒連線的名字派不了 —— 名冊就是「誰連著線」。"""
+        result = rpc(client, "ghost", "SendMessage", _send_params())
+        assert "error" in result
+        assert "not online" in result["error"]["message"]
+
+    def test_agent_in_another_room_is_rejected(self, client):
+        """★ bob 掛在 main,派【別房】的任務給他要當場擋下。
+
+        不擋的話那個 task 從第一秒就註定逾時 FAILED —— 而發起方要等滿
+        deadline(預設 300 秒)才知道,那時的錯誤訊息只會說「逾時」,
+        不會說「你派給了一個收不到這個房間訊息的人」。
+
+        ★★ 這個洞當初被誠實標在 code 裡,連「哪天真的多房間常態運作,
+          這裡就是要改的第一個地方」都寫了 —— 那一天到了。
+        """
+        result = rpc(client, "bob", "SendMessage", _send_params(target_room="lab"))
+        assert "error" in result
+        message = result["error"]["message"]
+        assert "not in room" in message
+        assert "lab" in message          # 要說是哪個房間,不然還是得自己猜
+
+    def test_agent_present_in_that_room_is_accepted(self, client):
+        """對照組:bob 也掛在那個房間的話就派得成 —— 擋的是「不在」,不是「別房」。"""
+        bring_agent_online(client.app, "bob", room="lab")
+        result = rpc(client, "bob", "SendMessage", _send_params(target_room="lab"))
+        assert "result" in result, result
 
 
 class TestLifecycle:

@@ -39,13 +39,20 @@
 
   <div v-if="toast" class="toast mono" :class="{ ok: toastOk }">{{ toast }}</div>
 
-  <!-- 首訪取名框:第一次打開這個頁面時問一次,之後記住不再問。
-       用現成的 holo-modal 外框,不另外做一套視窗。 -->
-  <holo-modal v-if="askingName" @close="skipNaming">
+  <!-- 進場框:每次打開這個頁面都問「你是誰、要去哪一間」。
+       用現成的 holo-modal 外框,不另外做一套視窗。
+
+       ★ 這裡曾經是「第一次來問一次,之後記住不再問」—— 改掉的理由不是 UX,
+         是那個「記住」讓名字可以中途改,而【已發出的訊息不會跟著改】:
+         同一個人在歷史裡有兩個名字,而 @點名 只認得其中一個。
+         身分的生命週期跟「這一次進房」對齊之後,那個怪象從機制上消失。 -->
+  <!-- ★ :dismissable="false" —— 這個框關不掉(沒有 ✕、點背景也不關)。
+       「進房就要先確定你是誰」是這一版的前提,給一條繞過的路等於沒有前提。 -->
+  <holo-modal v-if="askingName" :dismissable="false">
     <template #head>
       <div>
-        <div class="modal-title mono">你是誰?</div>
-        <div class="modal-sub mono">取個名字,大家才知道是誰在說話</div>
+        <div class="modal-title mono">你是誰?要去哪一間?</div>
+        <div class="modal-sub mono">名字每次進來都要選 —— 進房之後就不能改了</div>
       </div>
     </template>
 
@@ -65,14 +72,46 @@
         <div v-else-if="nameWarning" class="naming-warn mono">{{ nameWarning }}</div>
 
         <div class="naming-note">
-          <div>· 這個名字只存在你自己的瀏覽器,別台電腦要再取一次</div>
-          <div>· 之前用 <b>user</b> 發的訊息不會改名 —— 這裡的記錄只增不改</div>
-          <div>· 隨時可以在下面的輸入列直接改</div>
+          <div>· 這個名字【只用於這一次】—— 重新整理就要再選一次</div>
+          <div>· 進房之後不能改名:訊息只增不改,改了名歷史會分裂成兩個人</div>
+        </div>
+
+        <!-- 房間:選一間現成的、或開一間新的 -->
+        <div class="room-picker">
+          <div class="room-picker-title mono">去哪一間?</div>
+
+          <div class="room-list">
+            <div v-for="r in rooms" :key="r.name"
+                 class="room-item mono"
+                 :class="{ picked: (pendingRoom || room) === r.name }">
+              <span class="room-pick" @click="pickRoom(r.name)">
+                {{ r.name }} <span class="room-count">{{ r.count }} 則</span>
+              </span>
+              <!-- 兩段式:第一下上膛(變成紅色的「確定刪?」),第二下才真的刪。
+                   main 不畫這個鍵 —— 伺服器用結構擋著,畫出來只會讓人按了才發現。 -->
+              <span v-if="r.name !== 'main'" class="room-del"
+                    :class="{ arming: armingDelete === r.name }"
+                    @click="askDeleteRoom(r.name)"
+                    :title="armingDelete === r.name ? '再按一次就真的刪掉' : '刪掉這個房間'">
+                {{ armingDelete === r.name ? '確定刪?' : '✕' }}
+              </span>
+            </div>
+          </div>
+
+          <div class="room-new">
+            <input class="naming-input mono" v-model="roomDraft" maxlength="32"
+                   placeholder="或開一間新的…"
+                   @keydown.enter.prevent="createRoom">
+            <button class="mono room-add" @click="createRoom">開一間</button>
+          </div>
+
+          <div v-if="roomError" class="naming-error mono">{{ roomError }}</div>
         </div>
 
         <div class="naming-actions">
-          <button class="mono naming-skip" @click="skipNaming">先跳過(繼續當 user)</button>
-          <button class="mono naming-go" @click="confirmName">就叫這個</button>
+          <button class="mono naming-go" @click="confirmName">
+            進 {{ pendingRoom || room }}
+          </button>
         </div>
       </div>
     </template>
@@ -98,7 +137,7 @@
 
   <chat-composer ref="composer" :name="name" :room="room" :reply-to="replyTo"
                  :auth-enabled="authOn" :token="token" :targets="taskTargets"
-                 @update:name="name = $event" @update:token="token = $event"
+                 @update:token="token = $event"
                  @send="send" @send-task="sendTask" @cancel-reply="replyTo = null">
   </chat-composer>
 

@@ -224,6 +224,25 @@ class TaskRegistry:
     def in_room(self, room: str) -> list[Task]:
         return [self._by_id[t] for t in self._by_room.get(room, [])]
 
+    def drop_room(self, room: str) -> int:
+        """把一個房間的所有 task 從名冊裡移除並落盤。回傳移除了幾個。
+
+        ★★ 順序是【先清記憶體,再 checkpoint】,不能反 ——
+          checkpoint 寫的是「當下記憶體裡的全部」(全量快照,最後寫者贏)。
+          先落盤再清記憶體的話,**下一次任何狀態轉換都會把剛刪的那些寫回去** ——
+          而症狀是「刪掉的房間過一會兒自己長回來」,查起來像鬧鬼。
+
+        三個索引都要清:漏掉 _by_feed 的話,那個房間重建之後、
+        某則訊息剛好拿到同一個 id,就會反查到一個已經不存在的 task。
+        """
+        ids = self._by_room.pop(room, [])
+        for task_id in ids:
+            task = self._by_id.pop(task_id, None)
+            if task is not None and task.feed_mid is not None:
+                self._by_feed.pop((room, task.feed_mid), None)
+        self.checkpoint()
+        return len(ids)
+
     def all_ids(self) -> list[str]:
         return list(self._by_id)
 
@@ -237,7 +256,7 @@ class A2ALayer:
     """
 
     def __init__(self, ingest, sanitize_sender, base_url: str,
-                 live_agents_fn: Callable[[], set[str]],
+                 live_agents_fn: Callable[..., set[str]],   # 吃可選的房間,見下方註解
                  auth_enabled: bool = False, tasks_path=None):
         self._ingest = ingest
         self._sanitize = sanitize_sender
@@ -247,6 +266,12 @@ class A2ALayer:
         # 名單是靜態的,函式每次呼叫都給出當下的答案,而 agent 隨時上下線。
         # 寫死的名冊會留下永遠不上線的幽靈成員,而派任務給幽靈只會得到逾時失敗 ——
         # 所以「誰能被派任務」不由任何檔案決定,由這個函式當場回答。
+        # ★ 它吃一個【可選的房間】:
+        #       live_agents()        任何房間裡連著線的 —— 「這個名字現在有沒有開著」
+        #       live_agents(room)    掛在那個房間的   —— 「他收不收得到這個房的訊息」
+        #
+        #   兩個問題不同,答案也不同,而混用會壞掉:名片(Agent Card)不該綁房間,
+        #   但「他能不能收到這個房的任務」必須綁房間。
         self.live_agents = live_agents_fn
         self.auth_enabled = auth_enabled  # 影響 Agent Card 的 securitySchemes 誠實聲明(③)
         self.registry = TaskRegistry(tasks_path)  # 任務狀態落地,伺服器重開不失憶
@@ -427,6 +452,22 @@ class A2ALayer:
             raise A2AError(ERR_CONTENT_TYPE, "only non-empty TextPart is supported")
 
         context = message.get("contextId") or uuid.uuid4().hex
+
+        # ★ 目標在不在【這個房間】—— dispatch 那道只問「有沒有連著線」,不夠。
+        #
+        #   一個只掛在 A 房的 agent 收不到 B 房的訊息,所以 B 房派給它的任務
+        #   從第一秒就註定逾時 FAILED —— 而發起方要等滿 deadline 才知道。
+        #   當場擋下來,錯誤訊息才說得出真正的原因。
+        #
+        #   ★ 兩種錯誤要分開講,因為【處理方式不同】:
+        #         agent not online   → 去把那個 agent 的視窗開起來
+        #         agent not in room  → 去那個房間開,或改派給這個房裡的人
+        #     講成同一句話的話,收到的人會往錯的方向找。
+        if agent not in self.live_agents(context):
+            raise A2AError(ERR_UNSUPPORTED_OPERATION,
+                           f"agent not in room: {agent} 沒有掛在 {context} "
+                           f"—— 它收不到這個房間的訊息,派過去只會逾時")
+
         if message.get("taskId"):
             # spec MUST:taskId 與 contextId 不匹配就拒絕
             existing = self.registry.get(message["taskId"])

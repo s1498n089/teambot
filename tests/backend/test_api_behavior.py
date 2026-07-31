@@ -8,7 +8,7 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from conftest import post_msg
+from conftest import bring_agent_online, post_msg
 
 
 # ---------- 訊息流:樂觀鎖 / reply_to / 邊界 ----------
@@ -119,6 +119,119 @@ class TestFetchContract:
         ahead = post_msg(client, self.ROOM, "bob", "ahead", expect_last_id=9999)
         assert ahead.status_code == 409
         assert ahead.json() == {"error": "stale", "last_id": self.TOTAL}
+
+
+class TestDeleteRoom:
+    """刪除房間 —— **全站唯一的破壞性操作**,所以測試的重點是它的邊界。"""
+
+    def test_removes_messages_from_that_room_only(self, client):
+        post_msg(client, "doomed", "alice", "會被刪掉")
+        post_msg(client, "keep", "bob", "要留著")
+
+        r = client.delete("/api/rooms/doomed?by=allen")
+        assert r.status_code == 200 and r.json()["messages"] == 1
+
+        assert client.get("/api/rooms/doomed/messages?since_id=0").json()["messages"] == []
+        kept = client.get("/api/rooms/keep/messages?since_id=0").json()
+        assert kept["messages"][0]["text"] == "要留著"
+
+    def test_rewrites_the_file_not_just_memory(self, client, make_app, isolated_base):
+        """★ 記憶體清掉不算刪掉 —— hub 重啟會從 chat.jsonl 重新載入。
+
+        只清記憶體的話,症狀是「刪掉的房間重開伺服器就回來了」。
+        """
+        post_msg(client, "doomed", "alice", "會被刪掉")
+        post_msg(client, "keep", "bob", "要留著")
+        client.delete("/api/rooms/doomed?by=allen")
+
+        with TestClient(make_app()) as restarted:      # 同一個 hub_data,重新載入
+            assert restarted.get("/api/rooms/doomed/messages?since_id=0").json()["messages"] == []
+            assert restarted.get("/api/rooms/keep/messages?since_id=0").json()["messages"]
+
+    def test_main_is_protected_by_structure(self, client):
+        """★ 用結構擋,不是用確認框擋。
+
+        確認框可以按錯,而按錯的代價是所有人的預設房消失 ——
+        能用結構擋掉的就不要靠人小心。
+        """
+        post_msg(client, "main", "alice", "預設房的訊息")
+        r = client.delete("/api/rooms/main?by=allen")
+        assert r.status_code == 403
+        assert client.get("/api/rooms/main/messages?since_id=0").json()["messages"]
+
+    def test_drops_the_rooms_tasks(self, client):
+        """task 也要跟著走 —— 留下來的話會指向一個不存在的房間。"""
+        bring_agent_online(client.app, "bob", room="doomed")
+        client.post("/agents/bob/a2a", json={
+            "jsonrpc": "2.0", "id": 1, "method": "SendMessage",
+            "params": {"message": {"role": "ROLE_USER", "parts": [{"text": "做事"}],
+                                   "messageId": "m-drop", "contextId": "doomed"},
+                       "configuration": {"returnImmediately": True},
+                       "metadata": {"senderName": "alice"}}})
+        assert client.get("/api/rooms/doomed/tasks").json()["tasks"]
+
+        client.delete("/api/rooms/doomed?by=allen")
+        assert client.get("/api/rooms/doomed/tasks").json()["tasks"] == []
+
+    def _make_task_in(self, client, room: str, message_id: str) -> None:
+        bring_agent_online(client.app, "bob", room=room)
+        client.post("/agents/bob/a2a", json={
+            "jsonrpc": "2.0", "id": 1, "method": "SendMessage",
+            "params": {"message": {"role": "ROLE_USER", "parts": [{"text": "做事"}],
+                                   "messageId": message_id, "contextId": room},
+                       "configuration": {"returnImmediately": True},
+                       "metadata": {"senderName": "alice"}}})
+
+    def test_tasks_do_not_come_back_after_a_checkpoint(self, client):
+        """★★ 這條守的是一個會「鬧鬼」的 bug(記憶體那一半)。
+
+        tasks.json 是**全量快照、最後寫者贏**。如果刪除時只動了檔案、沒清記憶體,
+        那麼下一次任何狀態轉換觸發 checkpoint,就會把剛刪掉的 task 原封不動寫回去 ——
+        症狀是「刪掉的東西過一會兒自己長回來」,而查的人會從檔案系統開始懷疑起。
+        """
+        self._make_task_in(client, "doomed", "m-ghost")
+        client.delete("/api/rooms/doomed?by=allen")
+
+        registry = client.app.state.hub.a2a_layer.registry
+        registry.checkpoint()                       # 模擬刪除後的任何一次狀態轉換
+        assert registry.in_room("doomed") == []
+        assert not any(t.context_id == "doomed" for t in registry.all_tasks())
+
+    def test_tasks_do_not_survive_a_restart(self, client, make_app, isolated_base):
+        """★★ 同一個 bug 的【檔案那一半】—— 而這一半上面那條測不到。
+
+        清了記憶體卻沒落盤的話,記憶體檢查全過(它真的空了),
+        但 tasks.json 裡那些 task 原封不動 —— hub 一重啟就全部回來。
+
+        ★ 這條是突變測試逼出來的:我把 drop_room 的 checkpoint 拿掉,
+          上面那條照樣綠 —— 那時才知道它只守了一半。
+        """
+        self._make_task_in(client, "doomed", "m-persist")
+        client.delete("/api/rooms/doomed?by=allen")
+
+        with TestClient(make_app()) as restarted:      # 同一個 hub_data,重新載入
+            assert restarted.get("/api/rooms/doomed/tasks").json()["tasks"] == []
+
+    def test_disconnects_that_rooms_subscribers(self, client):
+        """掛在被刪房間上的直播連線要收掉 —— 不然它們掛在一個不存在的房間上。"""
+        sub = bring_agent_online(client.app, "carol", room="doomed")
+        post_msg(client, "doomed", "alice", "x")
+        client.delete("/api/rooms/doomed?by=allen")
+        assert sub.dead is True
+
+    def test_keeps_unparseable_lines(self, client, isolated_base):
+        """★ 刪一個房間不該順便清理別的東西。
+
+        壞行(載入時跳過的那種)要原樣留著 —— 一個動作只做一件事,
+        順手清理會讓這個操作的後果變得無法預期。
+        """
+        post_msg(client, "doomed", "alice", "會被刪掉")
+        path = client.app.state.hub.store.path
+        with path.open("a", encoding="utf-8") as f:
+            f.write("THIS IS NOT JSON\n")
+
+        client.delete("/api/rooms/doomed?by=allen")
+        assert "THIS IS NOT JSON" in path.read_text(encoding="utf-8")
 
 
 class TestForceRing:

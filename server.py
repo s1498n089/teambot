@@ -71,6 +71,10 @@ DATA_DIR_NAME = "hub_data"
 
 DEFAULT_PORT = 8787
 DEFAULT_HOST = "0.0.0.0"  # 預設開放區網(手機觀戰);要只聽本機可設 HOST=127.0.0.1
+
+# 預設房間。前端沒帶 ?room= 時進這裡,client.env 的 A2A_ROOM 預設也是它。
+# ★ 它【不能被刪除】—— 刪掉等於把所有人的預設房抽走,而那個錯誤沒有回頭路。
+DEFAULT_ROOM = "main"
 SENDER_RE = re.compile(r"^[\w一-鿿-]{1,32}$")   # 名字白名單:擋空白與 @,防 parse 怪象
 
 SSE_KEEPALIVE_SECONDS = 15
@@ -381,6 +385,48 @@ class MessageStore:
             f.write(json.dumps(msg, ensure_ascii=False) + "\n")
         return msg
 
+    def drop_room(self, room: str) -> int:
+        """把一個房間的訊息從記事本裡刪掉,回傳刪了幾則。
+
+        ★★ 這是【全系統唯一會重寫 chat.jsonl 的操作】,而重寫的做法是
+          「寫暫存檔 → 原子替換」,不是就地改:
+
+              就地改   寫到一半斷電 → 留下半個檔案 → 連救都救不回來
+              原子替換 斷在哪裡都只有兩種結果:舊的完整,或新的完整
+
+          ★ 這跟「要不要備份」是兩件事。使用者選了真刪(不留備份),
+            但原子替換仍然必要 —— 它防的是「刪除本身把整個聊天記錄毀掉」。
+
+        ★ 逐行讀原檔來濾,不是把記憶體裡的資料倒出去重寫。兩個理由:
+              ① 保留原本的行順序(記憶體是按房間分組的,倒出去會重排)
+              ② 記憶體與檔案萬一不同步時,以【檔案】為準 —— 它才是事實來源
+
+        ★ 壞行(load 時跳過的那種)原樣保留:刪一個房間不該順便清理別的東西。
+          「一個動作只做一件事」—— 順手清理會讓這個操作的後果變得無法預期。
+        """
+        removed = len(self.rooms.get(room, []))
+        self.rooms.pop(room, None)
+        self._ids.pop(room, None)
+        self._known.pop(room, None)
+
+        if not self.path.exists():
+            return removed
+
+        fd, tmp = tempfile.mkstemp(dir=str(self.path.parent), suffix=".tmp")
+        with open(fd, "w", encoding="utf-8") as out:
+            for line in self.path.read_text(encoding="utf-8").splitlines():
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                try:
+                    if json.loads(stripped).get("room") == room:
+                        continue
+                except json.JSONDecodeError:
+                    pass                      # 壞行保留,見 docstring
+                out.write(stripped + "\n")
+        os.replace(tmp, str(self.path))
+        return removed
+
     def rooms_index(self) -> list[dict]:
         """所有房間的一覽:名字、訊息數、最新編號(給 UI 的房間下拉選單用)。"""
         index = []
@@ -525,6 +571,35 @@ class EventBus:
         """當前在場者(具名且連線未死)— presence 的唯一事實來源。"""
         return {s.watcher for s in self.subs.get(room, set()) if s.watcher and not s.dead}
 
+    def live_agents_maybe_room(self, room: str | None = None) -> set[str]:
+        """協定層要的那個函式:給房間就答那個房間,不給就答全部。
+
+        ★ 為什麼收成一個函式而不是注入兩個:它們回答的是同一種問題
+          (「現在有哪些 agent 可以被派任務」),只是範圍不同。
+          注入兩個函式的話,協定層得自己記住「什麼時候該用哪一個」——
+          而那正是這個 bug 當初的成因:派任務借用了為 Agent Card 而生的那一個。
+
+              live_agents_maybe_room()       名片用:名字不綁房間
+              live_agents_maybe_room(room)   派任務用:他收不收得到這個房的訊息
+        """
+        return self.live_agents(room) if room else self.all_live_agents()
+
+    def drop_room(self, room: str) -> int:
+        """房間被刪掉了 —— 把掛在上面的直播連線全部收掉。回傳收了幾條。
+
+        ★ 做法是把它們標成 dead(既有的 backpressure 機制),不是直接砍 queue:
+          那些連線的產生器正在 await,標記讓它們**自己收尾**,
+          而「自己收尾」那條路已經寫好了(finally 會 unsubscribe)。
+          用現成的機制,不發明第二種結束方式。
+
+        ★ 對端收到的是連線中斷 → 它會重連 → 掛上一個空房間。
+          那是無害的:房裡沒訊息,敲鈴器的「追上」判斷永遠成立,不會亂敲。
+        """
+        subs = self.subs.pop(room, set())
+        for sub in subs:
+            sub.dead = True
+        return len(subs)
+
     def all_live_agents(self) -> set[str]:
         """任何房間裡連著線的 agent。
 
@@ -653,7 +728,7 @@ class Hub:
             # 我們選擇不擋,因為擋的話要把「目標房間」一路傳進協定層,
             # 而這個情境至今沒發生過(通常只有一個房間),逾時機制也已經兜住後果。
             # 哪天真的多房間常態運作,這裡就是要改的第一個地方。
-            live_agents_fn=self.bus.all_live_agents,
+            live_agents_fn=self.bus.live_agents_maybe_room,
             auth_enabled=self.auth_enabled,
             tasks_path=self.pick_tasks_path(),
         )
@@ -753,6 +828,50 @@ class Hub:
         self.bus.publish(room, msg)                 # 通知所有正在看的人
         self.a2a_layer.on_room_message(room, msg)   # 通知協定層(任務狀態可能要變)
         return msg
+
+    async def drop_room(self, room: str, by: str) -> dict:
+        """刪掉一個房間:直播連線、任務、訊息,一次清乾淨。
+
+        ## 為什麼整個流程要進 post_lock
+
+        不是為了防兩個刪除撞在一起(那很罕見),是為了防**刪除與寫入賽跑**:
+
+            重寫 chat.jsonl 的窗口裡有人 POST 進這個房
+                → 那則訊息寫進【舊檔案】
+                → 然後被「濾掉該房」的新檔案覆蓋
+                → 訊息蒸發,而發的人收到 201
+
+        ★ 用現成的鎖,不發明新的同步機制 —— post_lock 本來就是
+          「寫進聊天室一次只有一個人在做」,刪除也是一種寫。
+
+        ## 順序不能反
+
+            1. 收掉直播連線   不要讓它們看到刪除過程中的半截狀態
+            2. 清 task 再落盤 tasks.json 是全量快照、最後寫者贏 ——
+                              先落盤再清記憶體的話,下一次狀態轉換就把它寫回去了
+            3. 重寫 chat.jsonl(原子替換)
+
+        ## main 房禁刪
+
+        ★ 這裡用【結構】擋,不是用確認框擋:確認框可以按錯,而按錯的代價是
+          所有人的預設房消失。能用結構擋掉的就不要靠人小心。
+          (要用別的房仍然可以,`?room=` 那條路沒被擋住。)
+        """
+        if room == DEFAULT_ROOM:
+            raise ForbiddenError({"error": "protected_room",
+                                  "detail": f"{DEFAULT_ROOM} 是預設房間,不能刪除"})
+
+        dropped_subs = self.bus.drop_room(room)
+        async with self.post_lock:
+            dropped_tasks = self.a2a_layer.registry.drop_room(room)
+            dropped_msgs = self.store.drop_room(room)
+
+        # ★ 留痕是這個操作唯一剩下的義務:使用者選了真刪(不留備份),
+        #   所以「誰在什麼時候刪了什麼」只剩這一行紀錄。
+        print(f"[hub] {by} 刪除房間 {room}:"
+              f"{dropped_msgs} 則訊息、{dropped_tasks} 個任務、{dropped_subs} 條連線")
+        return {"ok": True, "room": room, "messages": dropped_msgs,
+                "tasks": dropped_tasks, "subscribers": dropped_subs}
 
     def check_writer(self, name: str, request: Request) -> None:
         """寫入前的身分檢查。沒開認證就直接放行。
@@ -873,6 +992,22 @@ def register_room_routes(app: FastAPI, hub: Hub) -> None:
     @app.get("/api/rooms")
     async def rooms_index():
         return {"rooms": hub.store.rooms_index()}
+
+    @app.delete("/api/rooms/{room}")
+    async def delete_room(room: str, request: Request, by: str = ""):
+        """刪掉一個房間 —— **全站唯一的破壞性操作**。
+
+        ★ 身分走跟發言【完全一樣】的路:`by` 是自報的名字,`check_writer` 驗它 ——
+          AUTH 開了就不能冒名,沒開就跟發言一樣是信任制。
+          不另開一套權限,因為「另一套」意味著兩處要各自維護正確性,
+          而它們遲早會分岔(而且分岔的那一天沒有人會發現)。
+
+        ★ 名字消毒也共用 sanitize_sender:留痕要誠實,
+          與其記一個怪名字,不如記「anonymous」——**不知道就說不知道**。
+        """
+        who = sanitize_sender(by) or "anonymous"
+        hub.check_writer(who, request)
+        return await hub.drop_room(room, who)
 
     @app.get("/api/rooms/{room}/presence")
     async def get_presence(room: str):

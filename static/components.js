@@ -39,15 +39,23 @@
    ─────────────────────────────────────────────────────────────────────── */
 
 /* 只負責「外框」:半透明背景、四個角、關閉鈕。裡面要放什麼由使用它的人決定
-   (那就是 slot 的用途)—— 這樣成員視窗與任務視窗可以共用同一個外框。 */
+   (那就是 slot 的用途)—— 這樣成員視窗與任務視窗可以共用同一個外框。
+
+   ★ dismissable=false 的框【關不掉】:沒有 ✕、點背景也不關。
+     進場那個「你是誰」就是這種 —— 名字是必填的,而給一條繞過的路等於沒有必填。
+
+     為什麼不是「照畫 ✕、但按了不處理」:那更糟 —— 看得到卻按不動的按鈕
+     會讓人以為畫面壞了,而它其實正在正確運作。**能按的東西就要有反應,
+     沒反應的東西就不要畫出來。** */
 const HoloModal = {
+  props: { dismissable: { type: Boolean, default: true } },
   emits: ["close"],
   template: `
-  <div class="overlay" @click.self="$emit('close')">
+  <div class="overlay" @click.self="dismissable && $emit('close')">
     <div class="modal">
       <span class="corner tl"></span><span class="corner tr"></span>
       <span class="corner bl"></span><span class="corner br"></span>
-      <button class="modal-close mono" @click="$emit('close')">✕</button>
+      <button v-if="dismissable" class="modal-close mono" @click="$emit('close')">✕</button>
       <div class="modal-head"><slot name="head"></slot></div>
       <div class="modal-body"><slot name="body"></slot></div>
     </div>
@@ -438,7 +446,7 @@ const MessageItem = {
 
 const ChatComposer = {
   props: ["name", "room", "replyTo", "authEnabled", "token", "targets"],
-  emits: ["update:name", "update:token", "send", "send-task", "cancel-reply"],
+  emits: ["update:token", "send", "send-task", "cancel-reply"],
 
   data: function () {
     return {
@@ -570,8 +578,12 @@ const ChatComposer = {
       <!-- 身分區:上面一列是「我是誰、在哪個房間」,下面一列是「這則要走哪道門」 -->
       <span class="identity">
         <span class="prompt mono">
-          <input class="name" :value="name" :style="{ width: nameWidth }"
-                 @input="$emit('update:name', $event.target.value)">@{{ room }} &gt;_
+          <!-- ★ 名字【不可在這裡改】:身分在進場那一刻就定死了。
+               以前這裡是個 input,而它造成一個沒人注意的怪象 ——
+               改名之後【已經發出去的訊息不會跟著改】,同一個人在歷史裡
+               有兩個名字,而 @點名 只認得其中一個。
+               要換名字的路只剩一條:重新整理,重新進場。 -->
+          <span class="name">{{ name }}</span>@{{ room }} &gt;_
         </span>
 
         <span class="mode-ctl">

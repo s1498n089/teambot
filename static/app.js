@@ -44,7 +44,6 @@ const FLASH_MS = 2000;                 // 跳到某則訊息時,那則閃爍多�
 const API_FAIL_TOAST_THRESHOLD = 3;    // 連續失敗幾次才跳出來吵使用者
 const DEFAULT_DEADLINE_SECONDS = 300;  // 派任務的預設逾時(跟伺服器同步)
 const AVATAR_SLOTS = 6;                // 標題列最多擺幾張頭像
-const RENAME_DEBOUNCE_MS = 800;        // 改名後等多久才重連(見 watch.myName)
 const NAME_MAX_LENGTH = 32;            // 名字最長幾個字 —— 對齊伺服器 SENDER_RE 的 {1,32}
 const FONT_DEFAULT = 20;               // 聊天基準字級,整個介面依此等比縮放
 const FONT_MIN = 14;
@@ -54,7 +53,7 @@ const FONT_MAX = 28;
 
    政策 = 產品決定,而且通常在別的地方也有一份對應物:
      NAME_MAX_LENGTH 對齊伺服器的白名單、字級三數與 styles.css 的 calc 綁在一起、
-     AVATAR_SLOTS 與 RENAME_DEBOUNCE_MS 是使用者感覺得到的行為。
+     AVATAR_SLOTS 是使用者感覺得到的行為。
 
    參數 = 某一段程式的局部手感,離開使用它的那幾行就沒有意義:
      isNearBottom 的 120 像素、onScroll 的 40 與 60 —— 這三個是同一個
@@ -260,12 +259,13 @@ createApp({
   },
 
   data() {
-    /* 這個人以前取過名字嗎?
-       ★ 要看 getItem 是不是 null,不能看「有沒有值」——
-         因為沒取名時我們給的預設值就是 "user",兩者混在一起就分不出
-         「他自己選了 user」和「他還沒被問過」。 */
-    const hasChosenName = localStorage.getItem("a2a-name") !== null;
-    const savedName = localStorage.getItem("a2a-name") || "user";
+    /* ★ 名字【不從 localStorage 讀】—— 每次進來都要重選。
+       身分的生命週期從此跟「這一次進房」一致,而那修掉了一個舊怪象:
+       名字本來可以隨時改,但【已經發出去的訊息不會跟著改】——
+       同一個人在歷史裡有兩個名字,而 @點名 只認得其中一個。
+
+       token 與字級仍然記著:它們是【設定】不是【身分】,
+       每次重整都要重設會很煩,而記錯了也不會讓歷史分裂。 */
     const savedToken = localStorage.getItem("a2a-token") || "";
     const savedFont = localStorage.getItem("a2a-font") || String(FONT_DEFAULT);
 
@@ -277,9 +277,18 @@ createApp({
       presenceSupported: true,  // 舊版伺服器沒有這個功能,遇到 404 就自動關掉
       rooms: [],
       lastId: 0,
-      name: savedName,
-      askingName: !hasChosenName,   // 第一次來的人,先問他叫什麼
-      nameDraft: "",                // 取名框裡正在打的字
+      name: "",                     // 進場前沒有身分 —— modal 填完才有
+      askingName: true,             // ★ 每次進來都問,不看瀏覽器記得什麼
+      roomDraft: "",                // 建新房間時輸入的名字
+      roomError: "",                // 房間那一區的錯誤訊息
+      pendingRoom: "",              // 選好的房間(還沒進場)
+      armingDelete: "",             // 刪除鍵按過一次的那個房間(見 askDeleteRoom)
+      /* 取名框裡正在打的字。★ 從網址預填(見 goToRoom):
+         換房間會重新載入頁面,而「換個房間就要重打一次名字」很煩。
+         把名字放網址而不是 storage 有兩個好處:狀態看得見(可分享、可清掉),
+         而且不新增任何儲存機制 —— 房間本來就是靠網址傳的,順路而已。
+         ★ 預填【不等於自動進場】:框還是會跳出來,還是要按一下確認。 */
+      nameDraft: new URLSearchParams(location.search).get("name") || "",
       nameError: "",                // 取名框的錯誤訊息(空字串 = 沒問題)
       nameWarning: "",              // 取名框的提醒(不擋人,再按一次就放行)
       nameChecking: false,          // 正在跟伺服器查撞名(避免連按)
@@ -300,14 +309,15 @@ createApp({
     /* ★ 約定:「把手」類的東西【不進 data】—— 直接掛在 this 上就好。
 
        這裡指的是計時器 id、EventSource 物件這種【不需要驅動畫面】的東西
-       (this.renameTimer、this.stream、this.toastTimer)。
+       (this.stream、this.toastTimer)。
        放進 data 會讓 Vue 替它們建立一整套響應式追蹤,而那份追蹤永遠不會被用到 ——
        它們不會出現在任何樣板裡。
 
        也不要用底線開頭:Vue 自己用 _ 與 $ 當內部命名空間,自訂屬性帶底線有撞名風險。
 
-       (renameTimer 原本在 data 裡,是這三個裡唯一的例外。三個一樣的東西
-        三種寫法,下一個要加把手的人不知道該學誰,所以在這裡把規矩寫死。) */
+       (這條規矩是被一個反例逼出來的:曾經有第三個把手 renameTimer 放在 data 裡,
+        三個一樣的東西兩種寫法,下一個要加把手的人不知道該學誰。
+        那個計時器隨著「行內改名」一起退役了,但規矩留著。) */
   },
 
   computed: {
@@ -470,32 +480,18 @@ createApp({
 
   watch: {
     /**
-     * 改了名字就重建即時連線 —— 否則伺服器的在場名單會一直記著舊名字。
+     * 名字定下來就(重)掛即時連線 —— 直播連線要報上身分,伺服器的在場名單才對。
      *
-     * 為什麼要等一下才做:這個名字來自輸入框,使用者每按一個鍵都會觸發一次。
-     * 不等的話「kevin」五個字會斷線重連五次,而每次重連伺服器都要重送一批訊息 ——
-     * 打字打到一半畫面就開始卡。
-     *
-     * RENAME_DEBOUNCE_MS(800 毫秒)是「打字停下來了」的常見門檻:
-     * 比一般按鍵間隔長,又短到使用者不會覺得延遲。
+     * ★ 這裡曾經有一個 800 毫秒的 debounce,因為名字來自一個【隨時可打字的輸入框】,
+     *   每按一鍵都會觸發重連。那個輸入框已經拿掉了(身分在進場時定死),
+     *   所以 debounce 也跟著走 —— 為某個機制而生的東西,那個機制沒了就該一起走,
+     *   留下來就是沒人用的空殼。
      */
     myName(newName, oldName) {
-      if (newName === oldName) {
+      if (newName === oldName || !newName) {
         return;
       }
-      clearTimeout(this.renameTimer);
-      const self = this;
-      this.renameTimer = setTimeout(function () {
-        /* ★ 兩件事一起做,因為改名有【三個身分載體】,少一個就會出現怪現象:
-             ① 發言身分 —— 發言時帶當下的名字,本來就會跟上
-             ② 在線身分 —— 直播連線報上的名字,靠下面這行重建
-             ③ 瀏覽器記憶 —— 下次打開時用哪個名字,靠這行存起來
-
-           原本 ③ 只在「發言成功」與「取名框確認」時才寫入,所以
-           單純改名字欄的人會遇到:改完當下正常,一重整又變回舊名字。 */
-        localStorage.setItem("a2a-name", newName);
-        self.openStream();
-      }, RENAME_DEBOUNCE_MS);
+      this.openStream();
     },
   },
 
@@ -743,8 +739,105 @@ createApp({
       }
 
       this.name = name;
-      localStorage.setItem("a2a-name", this.name);
       this.askingName = false;
+      // ★ 名字【不寫進 localStorage】—— 見 data() 的說明。
+      //   選好的房間跟現在的不一樣就換過去(換房要重新掛直播與撈訊息)。
+      if (this.pendingRoom && this.pendingRoom !== this.room) {
+        this.goToRoom(this.pendingRoom);
+      }
+    },
+
+    /**
+     * 換房間 = 換網址重新載入。
+     *
+     * ★ 為什麼不用前端狀態切換:換房要重掛 SSE、重撈訊息、重算未讀、
+     *   重置捲動位置……那等於把「載入一個房間」這件事寫兩遍(第一次載入一遍、
+     *   切換再一遍),而兩遍遲早會分岔。重新載入只有一條路。
+     */
+    goToRoom(room) {
+      const params = new URLSearchParams();
+      params.set("room", room);
+      const draft = (this.nameDraft || "").trim();
+      if (draft) {
+        params.set("name", draft);      // 讓下一頁的取名框預填,見 data()
+      }
+      window.location.search = params.toString();
+    },
+
+    /**
+     * 建一個新房間 —— 而「建立」的動作就是【在裡面說第一句話】。
+     *
+     * ★ 房間不是一種資料,它是從訊息推導出來的(有訊息的房間就存在)。
+     *   所以建房不需要新的儲存、新的 API、新的清理邏輯 ——
+     *   發一則開場訊息,房間就在清單上了。
+     *   而那則訊息本身也有用:它記下誰在什麼時候開的房。
+     */
+    async createRoom() {
+      const room = (this.roomDraft || "").trim();
+      this.roomError = "";
+      if (!room) {
+        this.roomError = "房間名不能空白";
+        return;
+      }
+      const name = (this.nameDraft || "").trim();
+      if (!name) {
+        this.roomError = "先填上面的名字 —— 開場訊息要記下是誰開的房";
+        return;
+      }
+      const body = { from: name, text: name + " 建立了這個房間" };
+      const result = await this.api.send(room, body, this.authOn ? this.token : "");
+      if (!result.ok) {
+        this.roomError = "建不起來:"
+          + (result.data.detail || result.data.error || ("HTTP " + result.status));
+        return;
+      }
+      this.pendingRoom = room;
+      this.roomDraft = "";
+      await this.loadRooms();
+    },
+
+    /**
+     * 刪掉一個房間 —— 連同它的訊息與任務,而且【找不回來】。
+     *
+     * ★ 這是全站唯一的破壞性操作,所以要二次確認。
+     *   main 由伺服器用結構擋住(不是靠這裡的確認框)——
+     *   確認框可以按錯,而按錯的代價是所有人的預設房消失。
+     */
+    /**
+     * 刪除鍵按第一下 —— 只是「上膛」,不會真的刪。
+     *
+     * ★ 為什麼不用 window.confirm:它會跳出系統對話框、阻塞整個頁面,
+     *   而且長得跟這個介面完全不搭。兩段式按鈕用的是【已經有的狀態】,
+     *   不新增 UI、不阻塞,而且危險程度看得見(鍵會變成紅色的「確定刪?」)。
+     */
+    askDeleteRoom(room) {
+      if (this.armingDelete !== room) {
+        this.armingDelete = room;
+        return;
+      }
+      this.armingDelete = "";
+      this.deleteRoom(room);
+    },
+
+    /** 選一間房。順便解除刪除鍵的上膛 —— 手移到別處就不該還舉著槍。 */
+    pickRoom(room) {
+      this.pendingRoom = room;
+      this.armingDelete = "";
+    },
+
+    async deleteRoom(room) {
+      const name = (this.nameDraft || "").trim() || "anonymous";
+      this.roomError = "";
+      try {
+        await this.api.deleteRoom(room, name);
+      } catch (error) {
+        this.roomError = "刪不掉:" + error.message;
+        return;
+      }
+      if (this.pendingRoom === room) {
+        this.pendingRoom = "";
+      }
+      await this.loadRooms();
     },
 
     /**
@@ -780,12 +873,6 @@ createApp({
     onNameDraftInput() {
       this.nameError = "";
       this.nameWarning = "";
-    },
-
-    /** 按下「先跳過」:沿用預設的 user,但一樣記下來,不再問第二次。 */
-    skipNaming() {
-      localStorage.setItem("a2a-name", this.name);
-      this.askingName = false;
     },
 
     /**
@@ -997,8 +1084,7 @@ createApp({
      */
     async send(text) {
       const from = this.myName;
-      localStorage.setItem("a2a-name", from);
-      localStorage.setItem("a2a-token", this.token);
+      localStorage.setItem("a2a-token", this.token);   // 名字不記了,見 data()
 
       const body = { from: from, text: text };
 
@@ -1032,7 +1118,6 @@ createApp({
      */
     async sendTask(payload) {
       const sender = this.myName;
-      localStorage.setItem("a2a-name", sender);
 
       let token = "";
       if (this.authOn) {

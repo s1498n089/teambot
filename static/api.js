@@ -122,6 +122,20 @@ function createApi(notify) {
       return request("/api/rooms", undefined, true);
     },
 
+    /**
+     * 刪掉一個房間 —— **全站唯一的破壞性操作**。
+     *
+     * `by` 是刪除者的名字,伺服器會記進 log。它走的是跟發言一樣的身分檢查:
+     * AUTH 開了就不能冒名,沒開就跟發言一樣是信任制。
+     *
+     * ★ 這個【不是】quiet:刪不掉的時候使用者一定要知道
+     *   —— 例如刪 main(伺服器用結構擋住,回 403)。
+     */
+    deleteRoom: function (room, by) {
+      return request(`/api/rooms/${encodeURIComponent(room)}?by=${encodeURIComponent(by)}`,
+                     { method: "DELETE" });
+    },
+
     /** 目前連著線的 agent(派任務的下拉選單用)。
         不是一份註冊名單 —— 現在有誰算誰,
         agent 的視窗一關就從這份清單上消失。 */
