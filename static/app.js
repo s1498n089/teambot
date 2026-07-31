@@ -1099,7 +1099,15 @@ createApp({
         token = this.token;
       }
 
-      const result = await this.api.send(this.room, body, token);
+      // ★ finally 不是保險,是【唯一】保證解鎖的寫法:api.send 內部是 fetch,
+      //   斷網時它會拋例外而不是回 { ok: false } —— 那條路繞過下面每一個 return。
+      //   漏掉的話,一次斷網就讓輸入框永遠鎖死,而畫面上只看得出「這個網頁壞了」。
+      let result;
+      try {
+        result = await this.api.send(this.room, body, token);
+      } finally {
+        this.$refs.composer.unlock();
+      }
 
       if (!result.ok) {
         const detail = result.data.detail || result.data.error || `HTTP ${result.status}`;
@@ -1124,13 +1132,19 @@ createApp({
         token = this.token;
       }
 
-      const result = await this.api.sendTask(payload.target, {
-        room: this.room,
-        text: payload.text,
-        sender: sender,
-        deadlineSeconds: payload.deadlineSeconds,
-        token: token,
-      });
+      // 理由同 send():解鎖走 finally,因為 fetch 拋例外那條路繞過所有 return。
+      let result;
+      try {
+        result = await this.api.sendTask(payload.target, {
+          room: this.room,
+          text: payload.text,
+          sender: sender,
+          deadlineSeconds: payload.deadlineSeconds,
+          token: token,
+        });
+      } finally {
+        this.$refs.composer.unlock();
+      }
 
       if (!result.ok) {
         const error = result.data.error || result.data;

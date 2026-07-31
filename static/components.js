@@ -451,6 +451,18 @@ const ChatComposer = {
   data: function () {
     return {
       draft: "",
+      // 送出中 —— 上一則還沒收到回應之前,不准再送。
+      //
+      // ★ 為什麼需要它:草稿是【送出成功之後】才清空的(失敗要留著讓人重試),
+      //   所以送出到回應之間有一段空窗,輸入框裡的字還在、按鈕也還能按。
+      //   任何在那個空窗裡再觸發一次 fire() 的東西 —— 按住 Enter 的自動重複、
+      //   手指快了一下、輸入法確認 —— 都會把同一句話再送一次。
+      //   2026-07-31 實地發生:allen 按一次,房間收到兩則,時間戳同一秒。
+      //
+      // ★★ 這裡【不另外去擋鍵盤的 repeat 旗標】:那只擋得住鍵盤那一條路,
+      //   而破口是「空窗」不是「鍵盤」。鎖在 fire() 才是共同路徑,
+      //   一道就把整族擋掉(送出鈕、Enter,以及以後任何新的入口)。
+      sending: false,
       mode: "msg",        // "msg" 走聊天、"task" 走 A2A 協定,是兩道不同的門
       target: "",         // 任務要交辦給誰。刻意**不**從訊息文字裡的 @ 自動帶入 ——
                           // 交辦對象是協定欄位、@ 是社交語法,兩件事不該黏在一起
@@ -471,10 +483,15 @@ const ChatComposer = {
       return charCount + "ch";
     },
 
-    /** 現在能不能送出。派任務時還必須先選好對象。 */
+    /** 現在能不能送出。派任務時還必須先選好對象;送出中一律不能。 */
     canFire: function () {
       const hasText = this.draft.trim() !== "";
 
+      // 送出中就讓鈕變灰 —— 這不只是防呆,更是【看得見的回饋】:
+      // 使用者會知道「它在送」,而不是以為沒反應又按一次(那正是這個 bug 的起點)。
+      if (this.sending) {
+        return false;
+      }
       if (!hasText) {
         return false;
       }
@@ -502,8 +519,18 @@ const ChatComposer = {
   },
 
   methods: {
-    /** 按下送出(或按 Enter)。依照目前模式決定要走哪一道門。 */
+    /** 按下送出(或按 Enter)。依照目前模式決定要走哪一道門。
+     *
+     * ★ 兩個入口(送出鈕的 click、輸入框的 Enter)最後都走到這裡,
+     *   所以「送出中不准再送」這道閘門下在【這個函式】,不在那兩個入口各下一次。
+     *   下在入口的版本會通過所有「從那個入口進來」的測試,而漏掉的那條路上沒有人在看。
+     */
     fire: function () {
+      // 上一則還在路上 —— 直接不理。解鎖由上層負責(見 unlock)。
+      if (this.sending) {
+        return;
+      }
+
       const text = this.draft.trim();
 
       if (text === "") {
@@ -511,6 +538,7 @@ const ChatComposer = {
       }
 
       if (!this.isTask) {
+        this.sending = true;
         this.$emit("send", text);
         return;
       }
@@ -525,6 +553,7 @@ const ChatComposer = {
         deadlineSeconds = DEFAULT_DEADLINE_SECONDS;
       }
 
+      this.sending = true;
       this.$emit("send-task", {
         text: text,
         target: this.target,
@@ -535,6 +564,16 @@ const ChatComposer = {
     /** 清空草稿。由上層在「確定送出成功」之後才呼叫 —— 送失敗要留著讓人重試。 */
     clear: function () {
       this.draft = "";
+    },
+
+    /** 解鎖,讓下一則送得出去。
+     *
+     * ★★ 上層必須在 **finally** 裡呼叫它 —— 不論成功、失敗,或是連 fetch 都拋例外。
+     *   只在成功時解鎖的話,一次送失敗就會把輸入框【永遠鎖死】,
+     *   而那比重複送出更糟:重複送出看得見,鎖死看起來只是「這個網頁壞了」。
+     */
+    unlock: function () {
+      this.sending = false;
     },
 
     /** 讓游標回到輸入框。 */
