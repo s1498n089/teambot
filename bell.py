@@ -306,15 +306,56 @@ class BellState:
           這個函式只在「SSE 送來事件、要判斷該不該敲」時被呼叫,
           而事件進得來就代表 hub 活著、API 也就通。hub 掛掉時 SSE 先斷,
           那時根本沒有需要判斷的事。
+
+        ★★ 上面那段當初只想到「**會不會**失敗」,漏了「**會被呼叫幾次**」——
+          它掛在每一則訊息的路上,所以成本不是一次,是「訊息數 × 一次」。
+          2026-07-31 撞了:cursor 是 0 → SSE 從第 1 則開始回放 → 1231 則
+          在 19 秒內湧進來 → 這裡就打了 1231 個請求。修法不是幫這裡加快取,
+          是讓上游不要回放(見 sse_watch)——**沒有回放,這條路本來就是稀疏的。**
         """
-        url = (f"{self.server}/api/rooms/{self.room}/cursor/"
-               f"{urllib.parse.quote(self.name)}")
+        return self._fetch_last_id(f"cursor/{urllib.parse.quote(self.name)}") or 0
+
+    def read_room_last_id(self) -> int | None:
+        """問 hub:這個房現在最新第幾則。**問不到回 None(不是 0)。**
+
+        ★ 跟 read_cursor 差在失敗值,而那個差別是必要的:
+          cursor 讀不到當作「沒讀過」(0)會讓 agent 被吵醒 —— 往安全的方向倒。
+          房間 last_id 讀不到若也當 0,意思卻變成「房間是空的」——**那是往沉默倒**,
+          而且會讓訂閱退回 since_id=0,一次把整本記錄重播一遍。
+          所以這裡誠實回 None,由呼叫方決定用哪個舊值頂上。
+        """
+        return self._fetch_last_id("state")
+
+    def _fetch_last_id(self, path: str) -> int | None:
+        """GET 一個回傳裡帶 `last_id` 的端點,取那個數字;任何一種失敗都回 None。"""
+        url = f"{self.server}/api/rooms/{self.room}/{path}"
         try:
             req = urllib.request.Request(url, headers={"Accept": "application/json"})
             with urllib.request.urlopen(req, timeout=CURSOR_READ_TIMEOUT) as resp:
                 return int(json.loads(resp.read().decode("utf-8"))["last_id"])
         except (OSError, ValueError, KeyError, json.JSONDecodeError):
-            return 0
+            return None
+
+    def sync_room_head(self) -> int:
+        """連線前先對一次房間的進度,回傳「訂閱該從哪一則之後開始」。
+
+        做三件事:問 hub 房間到哪 → 記進 known_last_id → 順手 evaluate 一次。
+
+        ★ 第三件是關鍵:**落後與否在這裡就判斷得出來,不必收任何一則訊息。**
+          以前要等 SSE 把訊息一則則送進來、靠 on_message 才知道房間在哪,
+          於是「知道房間位置」這件事被綁在「收下整段歷史」上面。
+
+        ★ 問不到(hub 剛掛、網路瞬斷)就沿用 known_last_id ——
+          **不是退回 0**。退回 0 會讓訂閱重播整本記錄,正是要修掉的那個行為。
+          沿用舊值最壞是漏掉斷線期間的幾則通知,而那個由 agent 對帳補得回來。
+        """
+        head = self.read_room_last_id()
+        with self.lock:
+            if head is not None:
+                self.known_last_id = max(self.known_last_id, head)
+            since = self.known_last_id
+        self.evaluate()          # ★ 必須在 lock 外 —— evaluate 自己要拿同一把鎖
+        return since
 
     def on_message(self, msg_id: int) -> None:
         """SSE 每收到一則訊息呼叫一次。
@@ -470,9 +511,9 @@ def sse_watch(server: str, room: str, state: BellState, child_alive) -> None:
     ── 逐步流程(下面的程式碼有對應的編號)──
 
         ① 外層迴圈:只要子行程還活著,就一直重複「連線 → 讀 → 斷了再連」
-        ② 組網址,帶上兩個關鍵參數:
-             since_id = 我讀到哪  ← 斷線期間漏掉的,伺服器會從這裡補給我
-             watcher  = 我是誰    ← 讓 hub 知道我在線上(網頁的在場名單靠這個)
+        ② 先問「房間現在到哪」,再組網址,帶上兩個關鍵參數:
+             since_id = 房間現在到哪  ← 【不是】cursor,理由見本段最後
+             watcher  = 我是誰        ← 讓 hub 知道我在線上(網頁的在場名單靠這個)
         ③ 連上去,並把等待時間歸零(因為連得上,代表對方活著)
         ④ ★ 讀訊息的迴圈 —— 它會【卡在這裡等】,不是讀完就結束
         ⑤ 每讀到一行先確認 claude 還在,不在就整個收工(用 return 不是 break,理由見下)
@@ -519,18 +560,36 @@ def sse_watch(server: str, room: str, state: BellState, child_alive) -> None:
         這不是疏漏,是兩邊各自選了最省事的做法。但如果你在改結束邏輯,
         要記得「有一邊根本不看 child_alive」。
 
-    ── 最後,這裡藏著整個專案的鐵則 ──
+    ── 最後,這裡藏著整個專案的鐵則,以及它【不】適用的地方 ──
 
-        重連時帶的是 since_id=**cursor**(我真正讀到哪),
-        不是「我上次連線時看到哪」。所以就算斷線期間漏了一百則,
-        一連上就全部補回來 —— 這就是「通知可以漏,資料不會丟」的 wrapper 版。
+        鐵則本身是:「通知可以漏,資料不會丟」——漏接的訊息靠對帳全部追得回來。
+
+        ★ 但**做對帳的是 agent,不是 bell**。這件事以前搞混過:
+          bell 曾經拿 cursor 當 since_id 去訂閱,想著「斷線期間漏一百則也補得回來」。
+          問題是 bell 補回來之後【什麼都沒做】—— on_message 只取 id,內容整包丟掉。
+          它為了知道「房間到 1231」這一個數字,把 1231 則訊息搬了一遍。
+
+          2026-07-31 這件事炸了:cursor 是 0(新結構還沒人推過),於是
+          「補斷線期間漏的」變成「從第 1 則重播到第 1231 則」,而每一則都會經過
+          evaluate → read_cursor → 一個 HTTP 請求。19 秒 1231 個請求,兩個 bell 一起
+          約 2500 個,log 直接洗版,鈴也一路狂敲。
+
+        所以現在改成:**先問一次「房間現在到哪」(/state,只回一個數字),
+        用那個數字當訂閱起點。** bell 要的本來就只是那個數字 ——
+        拿到就能立刻判斷「這個 agent 落後了沒」,一則訊息都不必收。
+
+        ★ 這樣 cursor 是 0 也無所謂:它只讓 bell 知道「落後 1231 則」然後敲一聲,
+          真正要把那 1231 則追回來的是 agent 自己的對帳,那條路本來就該由它走。
     """
     backoff = 1
     while child_alive():                                            # ①
         # kind=agent 是這條連線的自我宣告:「我後面包的是一個 AI」。
         # hub 的名冊就是這樣長出來的 —— 沒有註冊手續、沒有名單檔案,
         # 連著線就算在,線一斷就不算。人類用瀏覽器連進來時不會帶這個參數。
-        url = (f"{server}/api/rooms/{room}/stream?since_id={state.read_cursor()}"
+        # ★ 先對一次房間進度,再拿它當訂閱起點 —— 這一行有副作用(落後就會敲),
+        #   所以拆出來寫,不塞進下面的 f-string 裡。
+        since_id = state.sync_room_head()
+        url = (f"{server}/api/rooms/{room}/stream?since_id={since_id}"
                f"&watcher={state.name}&kind=agent")                 # ②
         try:
             req = urllib.request.Request(url, headers={"Accept": "text/event-stream"})

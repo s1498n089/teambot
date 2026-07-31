@@ -506,8 +506,113 @@ class TestBellState:
         source = (bell_mod.BASE / "bell.py").read_text(encoding="utf-8")
         assert 'method="PUT"' not in source
         assert "write_cursor" not in source
-        # 唯一碰 cursor 端點的地方必須是讀:整支程式只有一次 /cursor/,而它在 GET 裡
-        assert source.count("/cursor/") == 1
+        # 唯一碰 cursor 端點的地方必須是讀:整支程式只有一次 cursor/,而它在 GET 裡
+        # ★ 這裡比對的是 `cursor/` 而不是 `/cursor/`:端點路徑後來被拆成
+        #   「共用前綴 + 尾段」,前導斜線落在共用那半邊了。少一個字元反而更嚴 ——
+        #   比對變寬鬆,而斷言是「恰好一次」,多出任何一處都會紅。
+        assert source.count("cursor/") == 1
+
+    # ── sync_room_head:訂閱起點取自「房間到哪」,不是「他讀到哪」 ──
+
+    def test_subscribe_starts_at_room_head_not_cursor(self, monkeypatch):
+        """★★ 2026-07-31 的事故:訂閱起點拿 cursor 去帶,把整本記錄重播了一遍。
+
+        當時 cursor 是 0(一房一資料夾剛搬完,還沒有人推過進度),於是
+        `since_id=0` 讓 hub 從第 1 則開始回放 1231 則,而每一則都會經過
+        on_message → evaluate → read_cursor 一個 HTTP 請求 —— 19 秒 1231 個,
+        兩個敲鈴器一起約 2500 個,log 洗版、鈴一路狂敲。
+
+        根子是搞混了誰該補課:**bell 收下訊息之後只取 id,內容整包丟掉**,
+        它為了知道「房間到 1231」這一個數字搬了 1231 則訊息。真正要把那些
+        訊息追回來的是 agent 的對帳,那條路本來就該由 agent 自己走。
+
+        所以起點必須是房間 head —— cursor 是 0 也照樣只訂閱往後的。
+        """
+        rings = []
+        st = self._bare(ring_fn=lambda text: rings.append(text) or True)
+        monkeypatch.setattr(st, "read_room_last_id", lambda: 1231)
+        monkeypatch.setattr(st, "read_cursor", lambda: 0)      # 落後一千多則
+
+        assert st.sync_room_head() == 1231, "訂閱起點必須是房間 head,不是 cursor"
+        assert st.known_last_id == 1231
+        assert len(rings) == 1, "落後就該敲 —— 而且不必先收下任何一則訊息"
+
+    def test_sync_room_head_keeps_old_value_when_hub_unreachable(self, monkeypatch):
+        """★ 問不到房間 head 時沿用舊值,**不能退回 0**。
+
+        這裡跟 read_cursor 的失敗方向【故意相反】,兩個都是往安全倒:
+
+            read_cursor 問不到 → 0    當作沒讀過 → 會被吵醒(吵是無害的)
+            room head   問不到 → 舊值  退回 0 會讓訂閱重播整本記錄(正是要修的)
+
+        沿用舊值最壞是漏掉斷線期間的幾聲通知,而那個由 agent 對帳補得回來。
+        """
+        st = self._bare()
+        st.known_last_id = 900
+        monkeypatch.setattr(st, "read_room_last_id", lambda: None)   # hub 不通
+        monkeypatch.setattr(st, "read_cursor", lambda: 900)
+
+        assert st.sync_room_head() == 900
+        assert st.known_last_id == 900
+
+    def test_read_room_last_id_returns_none_on_failure(self, monkeypatch):
+        """★ 失敗回 None 而不是 0 —— 「讀不到」與「房間是空的」不能混為一談。"""
+        def boom(*_a, **_kw):
+            raise OSError("hub 沒開")
+
+        monkeypatch.setattr(bell_mod.urllib.request, "urlopen", boom)
+        assert self._bare().read_room_last_id() is None
+
+    def test_read_room_last_id_asks_the_state_endpoint(self, monkeypatch):
+        """問的是 /state —— 那支 API 只回一個數字,不含任何訊息內容。"""
+        seen = []
+
+        class Resp(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return False
+
+        def fake_urlopen(req, *_a, **_kw):
+            seen.append(req.full_url)
+            return Resp(b'{"room":"main","last_id":1231,"count":1231}')
+
+        monkeypatch.setattr(bell_mod.urllib.request, "urlopen", fake_urlopen)
+        assert self._bare().read_room_last_id() == 1231
+        assert seen == ["http://test/api/rooms/main/state"]
+
+    def test_sse_subscribes_from_room_head_not_cursor(self, monkeypatch):
+        """★★★ 這個測試盯的是【真的組出來的那條 url】,不是中間那層方法。
+
+        上面幾個測試都在測 sync_room_head 自己,而事故是在 sse_watch 裡發生的 ——
+        只要有人把 `since_id=` 後面換回 `state.read_cursor()`,那幾個測試【全部照樣綠】。
+        所以這裡真的跑一圈迴圈,把 urlopen 攔下來看 url 長什麼樣。
+
+        場景就是 2026-07-31 當天:cursor=0、房間到 1231。
+        """
+        seen, rounds = [], {"n": 0}
+
+        def child_alive():
+            rounds["n"] += 1
+            return rounds["n"] == 1          # 只讓外層迴圈跑一圈
+
+        def fake_urlopen(req, *_a, **_kw):
+            seen.append(req.full_url)
+            raise OSError("測試到此為止 —— 連上之後的事這裡不管")
+
+        st = self._bare()
+        monkeypatch.setattr(st, "read_room_last_id", lambda: 1231)
+        monkeypatch.setattr(st, "read_cursor", lambda: 0)
+        monkeypatch.setattr(bell_mod.urllib.request, "urlopen", fake_urlopen)
+        monkeypatch.setattr(bell_mod.time, "sleep", lambda _s: None)
+        monkeypatch.setattr(bell_mod, "log", lambda *_a, **_kw: None)
+
+        bell_mod.sse_watch("http://test", "main", st, child_alive)
+
+        assert len(seen) == 1, "外層迴圈應該只跑一圈"
+        assert "since_id=1231" in seen[0], f"訂閱起點必須是房間 head:{seen[0]}"
+        assert "since_id=0" not in seen[0], "帶 cursor 去訂閱 = 要 hub 重播整本記錄"
 
     def _make(self, tmp_path, cursor: int):
         """建一個 BellState,並把「他讀到哪」換成測試可以直接改的一個值。
