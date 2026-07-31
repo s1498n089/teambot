@@ -278,6 +278,18 @@ class BellState:
         self.room = room
 
         self.known_last_id = 0
+        # ★ 開機那一刻房間在哪 —— 這條線以下的訊息【一律不敲】。
+        #   為什麼要有這條線:使用者常用 `claude -r` 啟動,那會先跳出一個
+        #   「選哪段聊天紀錄」的選單,而鈴聲是【打字打進輸入框】——
+        #   人還在選單裡的時候敲進去,字會落在選單上,選錯或選不動。
+        #
+        #   更根本的理由是:**開機時的那一聲本來就多餘。** agent 進場本來就要
+        #   自己走一次對帳(read.py --rejoin),鈴只是重複叫它做它反正要做的事。
+        #   所以敲鈴的意義收斂成一句話:**「你睡著的時候有人講話了」** ——
+        #   不是「你落後很多」。落後多少是 agent 自己對帳時該處理的事。
+        #
+        #   初始值 0 讓「還沒對過房間進度」的期間自動安靜(0 <= 0)。
+        self.start_id = 0
         self.rings_this_gap = 0
         self.last_ring_at = 0.0
         self.rang_for_id = 0        # 上次是為了哪一則敲的 —— 分辨「同一批」與「新內容」
@@ -336,10 +348,15 @@ class BellState:
         except (OSError, ValueError, KeyError, json.JSONDecodeError):
             return None
 
-    def sync_room_head(self) -> int:
+    def sync_room_head(self, initial: bool = False) -> int:
         """連線前先對一次房間的進度,回傳「訂閱該從哪一則之後開始」。
 
         做三件事:問 hub 房間到哪 → 記進 known_last_id → 順手 evaluate 一次。
+
+        ★ `initial=True` 只有【開機那一次】會傳,它把 start_id 釘在當下的房間位置,
+          於是這條線以下的訊息全部不敲(理由見 start_id 的註解)。
+          重連時【不能】傳 —— 斷線期間別人講的話必須敲得出來,
+          否則一次網路抖動就等於讓 agent 從此聽不見那段對話。
 
         ★ 第三件是關鍵:**落後與否在這裡就判斷得出來,不必收任何一則訊息。**
           以前要等 SSE 把訊息一則則送進來、靠 on_message 才知道房間在哪,
@@ -353,6 +370,8 @@ class BellState:
         with self.lock:
             if head is not None:
                 self.known_last_id = max(self.known_last_id, head)
+            if initial:
+                self.start_id = self.known_last_id
             since = self.known_last_id
         self.evaluate()          # ★ 必須在 lock 外 —— evaluate 自己要拿同一把鎖
         return since
@@ -373,8 +392,9 @@ class BellState:
         ★ 這個方法【被呼叫得很頻繁】,但真正敲下去的次數很少。
           呼叫它的有兩邊:收到新訊息時(sse_watch)、以及每 5 秒一次(re_ring_loop)。
 
-        會敲下去,得先通過三道閘門 —— 任何一道擋下都直接返回:
+        會敲下去,得先通過四道閘門 —— 任何一道擋下都直接返回:
 
+            0. 這是開機前就有的嗎? 是 → 不敲(那不叫「有人講話」)
             1. 你追上了嗎?    cursor 已經不落後 → 不敲,順便把計數歸零
             2. 敲滿三次了嗎?  已經敲了 MAX_RINGS 次 → 不敲,只印一次警告就閉嘴
             3. 才剛敲過嗎?    距離上次太近 → 不敲
@@ -405,6 +425,17 @@ class BellState:
         **每 5 秒是「檢查」,不是「敲」。**
         """
         with self.lock:
+            # ── 閘門零:開機那一刻就已經在房間裡的訊息,一律不敲 ──
+            #    敲鈴的意義是「你睡著的時候有人講話了」,不是「你落後很多」。
+            #    落後多少由 agent 進場對帳處理(read.py --rejoin),不必鈴來提醒。
+            #
+            #    ★ 它排在最前面是刻意的:開機時連 cursor 都不必問,
+            #      少一個請求,也少一次「hub 還沒好就先被問」的機會。
+            #    ★★ 節拍器每 5 秒也走這裡 —— 光讓「啟動時跳過敲」是不夠的,
+            #      5 秒後它就會替你敲下去。這條線必須擋在 evaluate 裡才擋得住。
+            if self.known_last_id <= self.start_id:
+                return
+
             cursor = self.read_cursor()
 
             # ── 閘門一:追上了就沒事,順便把狀態歸零,下次落後才能重新從第 1 次算起 ──
@@ -582,13 +613,17 @@ def sse_watch(server: str, room: str, state: BellState, child_alive) -> None:
           真正要把那 1231 則追回來的是 agent 自己的對帳,那條路本來就該由它走。
     """
     backoff = 1
+    first_round = True
     while child_alive():                                            # ①
         # kind=agent 是這條連線的自我宣告:「我後面包的是一個 AI」。
         # hub 的名冊就是這樣長出來的 —— 沒有註冊手續、沒有名單檔案,
         # 連著線就算在,線一斷就不算。人類用瀏覽器連進來時不會帶這個參數。
         # ★ 先對一次房間進度,再拿它當訂閱起點 —— 這一行有副作用(落後就會敲),
         #   所以拆出來寫,不塞進下面的 f-string 裡。
-        since_id = state.sync_room_head()
+        # ★★ 只有第一圈傳 initial=True:那一次把「開機時房間在哪」釘下來,
+        #   在那之前的訊息不敲。重連的那幾圈【不傳】—— 斷線期間的發言要敲得出來。
+        since_id = state.sync_room_head(initial=first_round)
+        first_round = False
         url = (f"{server}/api/rooms/{room}/stream?since_id={since_id}"
                f"&watcher={state.name}&kind=agent")                 # ②
         try:

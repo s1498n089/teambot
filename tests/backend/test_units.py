@@ -614,6 +614,93 @@ class TestBellState:
         assert "since_id=1231" in seen[0], f"訂閱起點必須是房間 head:{seen[0]}"
         assert "since_id=0" not in seen[0], "帶 cursor 去訂閱 = 要 hub 重播整本記錄"
 
+    # ── 開機那一聲:不敲。敲鈴的意義是「你睡著時有人講話了」,不是「你落後很多」 ──
+
+    def test_startup_is_silent_even_when_far_behind(self, monkeypatch):
+        """★★ 開機時落後 1234 則也不敲 —— 而且【節拍器那一圈也不敲】。
+
+        使用者常用 `claude -r` 啟動,那會先跳出「選哪段聊天紀錄」的選單。
+        鈴聲是把字打進輸入框的,人還在選單裡的時候敲下去,字會落在選單上。
+
+        ★ 這裡連 evaluate() 都直接叫一次 —— 那是節拍器每 5 秒在做的事。
+          只讓「啟動時跳過敲」是不夠的:5 秒後節拍器就會替你敲下去,
+          所以這條線必須擋在 evaluate 裡面,不能只擋在啟動路徑上。
+        """
+        rings, cursor_asks = [], {"n": 0}
+        st = self._bare(ring_fn=lambda text: rings.append(text) or True)
+        monkeypatch.setattr(st, "read_room_last_id", lambda: 1234)
+
+        def counting_read_cursor():
+            cursor_asks["n"] += 1
+            return 0                      # 落後 1234 則
+        monkeypatch.setattr(st, "read_cursor", counting_read_cursor)
+
+        st.sync_room_head(initial=True)
+        assert rings == [], "開機不該敲"
+        assert cursor_asks["n"] == 0, "開機時連 cursor 都不必問 —— 閘門零排在它前面"
+
+        for _ in range(5):                # 節拍器連跑五圈
+            st.evaluate()
+        assert rings == [], "節拍器也必須安靜,否則 5 秒後照樣敲下去"
+
+    def test_rings_once_someone_actually_speaks(self, monkeypatch):
+        """開機後【有人講話】就要敲 —— 這是安靜的代價不能付過頭的地方。"""
+        rings = []
+        st = self._bare(ring_fn=lambda text: rings.append(text) or True)
+        monkeypatch.setattr(st, "read_room_last_id", lambda: 1234)
+        monkeypatch.setattr(st, "read_cursor", lambda: 0)
+
+        st.sync_room_head(initial=True)
+        assert rings == []
+
+        st.on_message(1235)               # 有人講了一句
+        assert len(rings) == 1, "開機之後的新訊息必須敲得出來"
+
+    def test_reconnect_does_not_move_the_silence_line(self, monkeypatch):
+        """★ 重連【不能】重設那條線 —— 否則斷線期間別人講的話會被永久吃掉。
+
+        一次網路抖動就讓 agent 從此聽不見那段對話,而且沒有任何錯誤訊息 ——
+        這種安靜的失敗比吵鬧的失敗難查得多。
+        """
+        rings = []
+        st = self._bare(ring_fn=lambda text: rings.append(text) or True)
+        monkeypatch.setattr(st, "read_cursor", lambda: 0)
+
+        monkeypatch.setattr(st, "read_room_last_id", lambda: 1234)
+        st.sync_room_head(initial=True)               # 開機:線釘在 1234
+        assert rings == []
+
+        monkeypatch.setattr(st, "read_room_last_id", lambda: 1240)
+        st.sync_room_head()                           # 重連:斷線期間多了 6 則
+        assert len(rings) == 1, "斷線期間的發言必須敲得出來"
+        assert st.start_id == 1234, "那條線不該跟著重連往前移"
+
+    def test_only_the_first_round_arms_the_silence_line(self, monkeypatch):
+        """盯 sse_watch 真的只在第一圈傳 initial=True —— 後面幾圈都不能傳。
+
+        跟上面那個測試的差別:那個測 BellState 自己,這個測【呼叫它的那一方】。
+        兩個都要有,否則把 `initial=first_round` 寫死成 `initial=True` 不會紅。
+        """
+        seen_initial, rounds = [], {"n": 0}
+
+        def child_alive():
+            rounds["n"] += 1
+            return rounds["n"] <= 3          # 讓外層迴圈跑三圈
+
+        st = self._bare()
+        monkeypatch.setattr(st, "sync_room_head",
+                            lambda initial=False: seen_initial.append(initial) or 1234)
+
+        def boom(*_a, **_kw):
+            raise OSError("連不上,直接進重連")
+        monkeypatch.setattr(bell_mod.urllib.request, "urlopen", boom)
+        monkeypatch.setattr(bell_mod.time, "sleep", lambda _s: None)
+        monkeypatch.setattr(bell_mod, "log", lambda *_a, **_kw: None)
+
+        bell_mod.sse_watch("http://test", "main", st, child_alive)
+
+        assert seen_initial == [True, False, False], f"實際:{seen_initial}"
+
     def _make(self, tmp_path, cursor: int):
         """建一個 BellState,並把「他讀到哪」換成測試可以直接改的一個值。
 
