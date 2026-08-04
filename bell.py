@@ -123,7 +123,31 @@ BELL_PREFIX = "[A2A-BELL]"      # 文件教的是「凡見這個前綴一律對�
 # 送出鍵。★ 一定是 \r 不是 \n:實測對真正的 CLI 送 \n,那行字會躺在輸入框裡
 # 不送出,agent 就永遠不會醒 —— 而且畫面上看起來「鈴有敲到」,最難查的那種。
 BELL_SUBMIT = "\r"
-BELL_SUBMIT_GAP = 0.1       # 鈴聲的字與送出鍵之間隔多久(見 guarded_write)
+# 鈴聲的字與送出鍵之間隔多久(見 guarded_write)。
+#
+# ★ 這個數字不是手感,是從 Codex TUI 的原始碼算出來的下限。它有兩個計時器
+#   (codex-rs/tui/src/bottom_pane/paste_burst.rs,2026-08-05 查):
+#
+#       PASTE_BURST_ACTIVE_IDLE_TIMEOUT   60 ms(Windows)  最後一個字之後要靜這麼久才 flush
+#       PASTE_ENTER_SUPPRESS_WINDOW      120 ms           flush 之後 Enter 還【繼續插換行】這麼久
+#
+#   合計 180 ms —— 在那之前送 \r,Codex 會把它當成「貼上內容裡的換行」而不是送出。
+#   原始碼註解的原話:「ensure Enter is treated as a newline *inside the paste*,
+#   not as 'submit the message'」。那是刻意設計(多行貼上時 Enter 本來就該換行),
+#   不是它的 bug —— 所以【不要期待哪天上游會修掉】。
+#
+# ★★ 舊值 0.1 秒就是這樣踩線的:100 ms < 180 ms,理論上每次都該失敗。
+#   實際卻「有時成功有時失敗」,因為還有第三個門檻 ——
+#   字元之間隔超過 8 ms 就根本不算 burst,而 ConPTY 的寫入時序不固定。
+#   **同一段字有時形成 burst、有時沒有**,於是症狀變成間歇性的,
+#   最難查的那種:看起來像運氣,其實是踩在 8 ms 的線上。
+#
+# ★★★ 取 1 秒而不是剛好超過 180 ms:間歇性失敗的成本遠高於這一秒 ——
+#   鈴聲沒送出時 agent 不會醒,而且畫面上看起來「鈴有敲到」。
+#   代價誠實寫在這:敲鈴時持鎖從瞬間變成 1 秒,使用者在那一秒打的字會排隊
+#   (guarded_write 的鎖是為了不讓打字插進「鈴聲」與「Enter」中間)。
+#   鈴不常敲,拿這一秒換「一定叫得醒」划算。
+BELL_SUBMIT_GAP = 1.0
 RE_RING_SECONDS = 90        # 【同一批】敲後多久 cursor 仍未推進就重敲
 PATROL_SECONDS = 5          # 節拍器一圈;也是【有新訊息時】的最短敲鈴間隔
 MAX_RINGS = 3               # 同一段落後最多敲幾次,之後改印警告(不騷擾設計)

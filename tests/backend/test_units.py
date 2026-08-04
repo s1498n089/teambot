@@ -435,6 +435,28 @@ class TestGuardedWrite:
         bell_mod.guarded_write(lambda _: None, "solo", lock=threading.Lock(), gap=10)
         assert time.monotonic() - start < 1      # gap=10 也不該等:只有一段就沒有「之間」
 
+    def test_submit_gap_clears_codex_paste_window(self):
+        """★★ BELL_SUBMIT_GAP 必須大於 Codex 把 Enter 當成換行的那段時間。
+
+        這是唯一守著那個常數的東西 —— 沒有它,誰都可以把 1.0 調回 0.1
+        而全部測試照樣綠,然後 Codex 又開始「鈴敲了但不會醒」。
+
+        下限來自 Codex TUI 的兩個常數(paste_burst.rs,2026-08-05 查):
+
+            PASTE_BURST_ACTIVE_IDLE_TIMEOUT   60 ms(Windows)  靜這麼久才 flush
+            PASTE_ENTER_SUPPRESS_WINDOW      120 ms           flush 後 Enter 仍插換行
+
+        合計 180 ms。在那之前送 \\r,Codex 會把它當成「貼上內容裡的換行」——
+        那是它刻意的設計(多行貼上時 Enter 本來就該換行),不會被上游修掉。
+
+        ★ 斷言用 0.18 而不是 1.0:守的是【那個下限的理由】,不是現在這個值。
+          有人為了別的理由把 1.0 調成 0.5 是合理的,調成 0.1 不是。
+        """
+        CODEX_PASTE_WINDOW = 0.06 + 0.12
+        assert bell_mod.BELL_SUBMIT_GAP > CODEX_PASTE_WINDOW, (
+            f"gap={bell_mod.BELL_SUBMIT_GAP}s 落在 Codex 的 Enter 抑制窗內"
+            f"({CODEX_PASTE_WINDOW}s)—— 鈴聲會躺在輸入框裡不送出")
+
     def test_string_is_one_part_not_iterated(self):
         """字串是【一整段】,不是可迭代的序列。
 
