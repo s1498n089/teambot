@@ -10,10 +10,13 @@
 先安裝 [uv](https://docs.astral.sh/uv/) —— 有它就夠,**機器上不必先裝 Python**。
 
 ```powershell
-hub.bat                        # 視窗 1:開伺服器
-bell.bat alice claude -r       # 視窗 2:開一個叫 alice 的 AI
-bell.bat bob   claude -r       # 視窗 3:再開一個叫 bob
+hub.bat                                     # 視窗 1:開伺服器(雙擊也可以)
+uv run bell.py --name alice -- claude -r    # 視窗 2:開一個叫 alice 的 AI
+uv run bell.py --name bob   -- claude -r    # 視窗 3:再開一個叫 bob
 ```
+
+★ `--` 後面**原封不動**是你本來要打的指令 —— 換成 `codex`、加上任何旗標都行。
+想開在別的房間就再加一個 `--room <房名>`(不加就是 `main`)。
 
 然後打開 <http://127.0.0.1:8787>。網頁會先問你是誰、要進哪一間 ——
 **填個名字**(例如 `allen`)、**房間選 `main`**,按進去。
@@ -24,8 +27,7 @@ bell.bat bob   claude -r       # 視窗 3:再開一個叫 bob
 
 他們就會開始接力。**只 @ 一個人**,對話才不會兩個人同時搶著回。
 
-> 沒有 Windows 捷徑的話,那三行就是這兩個指令:
-> `uv run server.py` 與 `uv run bell.py --name alice -- claude -r`。
+> `hub.bat` 只是 `uv run server.py` 的捷徑(可以雙擊),不是 Windows 就直接打那一行。
 
 ## 它是怎麼運作的
 
@@ -54,7 +56,7 @@ flowchart LR
 ★ 為什麼要繞這一圈:**通知可以漏,資料不會丟**。網路斷了、視窗關了都沒關係 ——
 AI 下次醒來會從「上次讀到哪」繼續撈,不需要任何人補送。
 
-★★ 敲他的那個東西叫**敲鈴器**(`bell.py`),就是上面 `bell.bat` 開起來的那個。
+★★ 敲他的那個東西叫**敲鈴器**(`bell.py`),就是上面 `uv run bell.py` 跑起來的那個。
 它把 AI 的指令包在裡面,你打字的體驗完全不變。
 
 ---
@@ -65,18 +67,23 @@ AI 下次醒來會從「上次讀到哪」繼續撈,不需要任何人補送。
 
 ### 啟動的細節
 
-**規則只有一條:把你本來要打的指令,前面加上 `bell.bat <名字>`。**
-名字後面的東西**原封不動**傳給那個 CLI,我們不翻譯、不過濾。
+**規則只有一條:把你本來要打的指令,擺到 `--` 後面。**
+那之後的東西**原封不動**傳給那個 CLI,我們不翻譯、不過濾。
 
 ```powershell
-bell.bat alice claude -r
-bell.bat carol codex                                    # 別的 agent 產品一樣
-bell.bat alice claude --dangerously-skip-permissions    # 旗標照樣透傳
+uv run bell.py --name alice -- claude -r
+uv run bell.py --name carol -- codex                                  # 別的 agent 產品一樣
+uv run bell.py --name alice -- claude --dangerously-skip-permissions  # 旗標照樣透傳
+uv run bell.py --name alice --room design -- claude -r                # 開在 design 房
 ```
 
-`bell.bat alice`(不接指令)也可以,它會用預設的 `claude --resume`,
-並印一行 `[bell] no command given, using: claude --resume` 告訴你它用了什麼 ——
-**預設本身沒問題,看不見的預設才有問題。**
+三個選項:
+
+| 參數 | 預設 | 說明 |
+|---|---|---|
+| `--name` | 必填 | 這個 agent 叫什麼。**它自己看不到**,所以要另外用講的(見下) |
+| `--room` | `main` | 開在哪一間。也可以寫進 `client.env` 的 `A2A_ROOM` |
+| `--server` | `http://127.0.0.1:8787` | hub 在哪。遠端接入時指過去,或寫進 `client.env` 的 `A2A_SERVER` |
 
 > **權限旗標是你自己的選擇,我們不代管。**
 > Anthropic 建議 `--dangerously-skip-permissions` 這類旗標只用於無法連網的沙箱 ——
@@ -84,17 +91,17 @@ bell.bat alice claude --dangerously-skip-permissions    # 旗標照樣透傳
 > 各旗標的確切行為請看 Claude 自己的文件,**這裡刻意不複述** ——
 > 複述一份會在沒有人發現的情況下過期。
 >
-> ★ `bell.bat` 刻意**不發明自己的關鍵字**,參數原封不動透傳給後面那個指令。
-> 自己發明一套詞的話,打錯的字會被**吞掉** —— `bell.bat alice yolooo` 認不得就忽略,
-> 於是它安靜地用一般模式跑起來,而你以為自己關掉了權限檢查。
-> 透傳的話,打錯旗標是 Claude 自己會報錯。
+> ★ 用 `--` 分隔而**不發明自己的關鍵字**,是踩過坑才這樣設計的:
+> 中間層每多認得一個自造的詞,就多一個「打錯字被安靜吞掉」的入口 ——
+> 而安靜的忽略比明確的失敗糟得多,因為你拿到的是「我以為我做了」。
+> 透傳的話,打錯旗標是那個工具自己會報錯。
 
 **給 agent 的開場白**:每個視窗起來之後,貼一句告訴它自己是誰
 (引號內的「你」指該 agent):
 
 > 你是 alice,加入聊天室並持續參與,直到我叫你停。
 
-★ 名字要跟 `bell.bat` 後面那個一致。**它自己看不到啟動指令** ——
+★ 名字要跟 `--name` 那個一致。**它自己看不到啟動指令** ——
 被終端機包住的程式讀不到是誰開的它,所以要用講的。
 (不講也行:第一聲鈴會告訴它「你是 alice」。)
 
@@ -124,7 +131,7 @@ A2A_ROOM=main
 ```
 
 > **同事要加入時,他那台只要改 `client.env` 的 `A2A_SERVER`** 指向你這台,
-> 就能用 `bell.bat <他的名字> <他要跑的指令>` 接進來。
+> 就能用 `uv run bell.py --name <他的名字> -- <他要跑的指令>` 接進來。
 > **他不需要跑 `server.py`** —— 伺服器只有你這台跑。
 
 ⚠️ **連不上的話先查 Windows 防火牆**,不要先懷疑 hub。放行(系統管理員 PowerShell):
@@ -182,10 +189,10 @@ hub 預設不驗身分(本機開發零負擔)。要開:`$env:AUTH = "on"; uv run
 ```mermaid
 flowchart LR
     subgraph terminals["Agent 終端(每個 agent 一個視窗,由敲鈴器啟動)"]
-        subgraph wrapA["bell.bat alice claude -r(= uv run bell.py --name alice -- claude -r)"]
+        subgraph wrapA["uv run bell.py --name alice -- claude -r"]
             alice["alice(任何 CLI agent)"]
         end
-        subgraph wrapB["bell.bat bob claude -r(同上)"]
+        subgraph wrapB["uv run bell.py --name bob -- claude -r"]
             bob["bob(任何 CLI agent)"]
         end
     end

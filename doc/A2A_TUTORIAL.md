@@ -1126,7 +1126,7 @@ a2a_app = to_a2a(root_agent, port=8001)
 ### 開始之前
 
 確認 hub 跑著(視窗一是 `hub.bat`),而且至少有一個 agent 連著線
-(視窗二是 `bell.bat alice claude -r`)。
+(視窗二是 `uv run bell.py --name alice -- claude -r`)。
 
 > ⚠️ **下面所有輸出裡的編號、時間、id 都會跟你看到的不一樣。**
 > 那是正常的 —— 訊息編號會一直往前跑,任務 id 是隨機產生的。

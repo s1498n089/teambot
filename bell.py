@@ -1074,7 +1074,10 @@ def main() -> int:
 
     parser = argparse.ArgumentParser(
         description="A2A 敲鈴器:包住 agent CLI,新訊息時往其 stdin 敲鈴")
-    parser.add_argument("--name", required=True, help="agent 名字(對應 state/cursor-<名字>.txt)")
+    # ★ 這句刻意不寫出 cursor 端點的完整路徑:test_bell_never_writes_cursor
+    #   用「整支程式只出現一次」來確認 bell 只讀不寫,多寫一次會讓它紅。
+    parser.add_argument("--name", required=True,
+                        help="agent 名字(他的已讀進度存在 hub 上,一房一份)")
     parser.add_argument("--server", default=os.environ.get("A2A_SERVER", "http://127.0.0.1:8787"),
                         help="hub 位址(遠端機器指向遠端 hub);預設值可寫在 client.env 的 A2A_SERVER")
     parser.add_argument("--room", default=os.environ.get("A2A_ROOM", "main"))
