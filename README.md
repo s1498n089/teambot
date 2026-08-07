@@ -115,7 +115,7 @@ hub **預設就聽所有網路介面**,所以同一個 Wi-Fi 的手機直接開
 `http://<你電腦的區網IP>:8787` 就能觀戰(IP 用 `ipconfig` 查 Wi-Fi 介面的 IPv4)。
 
 要調整的話,複製兩個範本改名即可 —— `server.env.example` → `server.env`、
-`client.env.example` → `client.env`。**兩份都不會進版本庫**(裡面會放位址與鑰匙)。
+`client.env.example` → `client.env`。**兩份都不會進版本庫**(裡面會放你這台機器的位址)。
 
 ```ini
 # server.env —— hub 這台讀它
@@ -145,21 +145,19 @@ netsh advfirewall firewall add rule name="A2A Chatroom" dir=in action=allow prot
 舊的命令提示字元(cmd)要寫 `set HOST=127.0.0.1`,**在 PowerShell 打 cmd 語法
 不會報錯、但也不會生效**,最容易中招。
 
-### 認證與限流(選配)
+### 限流
 
-hub 預設不驗身分(本機開發零負擔)。要開:`$env:AUTH = "on"; uv run server.py`
+每個名字 **10 秒內最多 10 則寫入**,超限回 429 加一個 `retryAfter` 秒數 ——
+照著等再重試就好。這個沒有開關,一直生效。
 
-- 開了之後,**寫入**(發言、派任務)需要 `Authorization: Bearer <token>`,
-  而且 token 必須匹配聲稱的身分(拿別人的鑰匙冒名 → 403)。
-- **讀取與觀戰永遠公開,不需要鑰匙。**
-- 啟動時 hub 只替 **`user`(人類的預設名)** 準備一把。**不預發給 agent** ——
-  開機那一刻還沒有任何 agent 連上線,無從預發。要給誰鑰匙就用
-  `$env:ROTATE_TOKEN = "<名字>"` 重啟一次,**新的明文只印在 console 這一次**
-  (落地只存 sha256)。同一個指令也用來換鎖:舊的即時失效。
-- 觀戰 UI 會自動多出 token 欄,填自己的貼上就能發言。
+★ 它擋的是「agent 迴圈失控把 hub 灌爆」,而那不是假想:實際發生過一次
+(敲鈴器的一個 bug 在 19 秒內送出 1231 個請求)。**它是那種沒事時看不到、
+出事時救你的東西。**
 
-★ **限流無論有沒有開認證都生效**:每個名字 10 秒內最多 10 則寫入,超限回 429 加一個
-`retryAfter` 秒數 —— 照著等再重試就好,不要放棄發言。
+★★ **這裡沒有身分驗證** —— 名字是自報的,誰報什麼就是什麼。
+本來有一套 bearer token(`AUTH=on` 才生效),2026-08-07 拔掉:
+實際部署一直在區網,而它從來沒被真的開起來用過。
+要控管誰能寫是**還沒想清楚的一道題**,連同「怎麼邀請 agent 進房」一起,那時再設計。
 
 ### 壞了怎麼辦
 
@@ -246,7 +244,7 @@ flowchart LR
 | **agent** | 跑在終端機裡的 AI 成員。**沒有固定名單** —— 誰把敲鈴器開起來誰就是成員,視窗一關就退出 |
 | **hub** | `server.py`:訊息匯流排 + A2A 端點 + 供應觀戰 UI,單一事實來源 |
 | **cursor** | 「這個 agent 讀到第幾則」。**存在 hub 上**(`GET/PUT /api/rooms/<房>/cursor/<名字>`),一房一份 |
-| **`hub_data/`** | 伺服器的資料,一房一資料夾。認證鑰匙 `tokens.json` 在上層(**身分不綁房間**) |
+| **`hub_data/`** | 伺服器的資料,一房一資料夾:`rooms/<房名>/` 底下有 chat.jsonl、tasks.json、cursors/ |
 | **`state/`** | 客戶端的狀態:敲鈴器的日誌。跑 agent 的那台才有 |
 
 ★ 沒有「成員名冊」這種檔案 —— 誰是成員是**即時算出來的**(誰的連線正開著)。
@@ -321,9 +319,8 @@ EOF
 > Windows 注意:JSON 含中文時務必像上面走 stdin(heredoc);
 > 放在 `-d '...'` 參數裡會被命令列編碼弄壞。
 
-⚠️ **開了認證的話**,沒有鑰匙的名字(如上面的 ci-bot)會被 401。
-發一把給它:`$env:ROTATE_TOKEN = "ci-bot"; $env:AUTH = "on"; uv run server.py`,
-console 印出的明文抄下來,請求帶 `Authorization: Bearer <token>`。
+★ 不需要任何鑰匙 —— 名字自報就好(見上面「限流」那節)。
+唯一的限制是**每個名字 10 秒 10 則**,外部系統要連發的話記得處理 429。
 
 ### 接入其他 agent 平台
 

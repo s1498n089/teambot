@@ -75,7 +75,6 @@ const rt = reactive({
      值留在這裡 —— 所以這行註解就是它的新家。 */
   palette: { user: "#c9d1d9" },
 
-  authEnabled: false,                  // 伺服器有沒有開認證(有的話畫面要多一個 token 欄)
 });
 
 /* api.js 需要「跟使用者說話」的能力,但它在畫面建好之前就先造好了。
@@ -264,9 +263,8 @@ createApp({
        名字本來可以隨時改,但【已經發出去的訊息不會跟著改】——
        同一個人在歷史裡有兩個名字,而 @點名 只認得其中一個。
 
-       token 與字級仍然記著:它們是【設定】不是【身分】,
+       字級仍然記著:它是【設定】不是【身分】,
        每次重整都要重設會很煩,而記錯了也不會讓歷史分裂。 */
-    const savedToken = localStorage.getItem("a2a-token") || "";
     const savedFont = localStorage.getItem("a2a-font") || String(FONT_DEFAULT);
 
     /* ★ 「換房」跟「進場」是兩件事,而這一行是它們的分界。
@@ -310,7 +308,6 @@ createApp({
       nameError: "",                // 取名框的錯誤訊息(空字串 = 沒問題)
       nameWarning: "",              // 取名框的提醒(不擋人,再按一次就放行)
       nameChecking: false,          // 正在跟伺服器查撞名(避免連按)
-      token: savedToken,    // 伺服器有開認證時,發言需要的個人憑證
       status: "connecting",
       replyTo: null,
       newBelow: 0,          // 下面有幾則新訊息還沒看到
@@ -355,11 +352,6 @@ createApp({
         return this.myName;
       }
       return this.focusTarget;
-    },
-
-    /** 伺服器有沒有開認證。包一層是為了讓畫面在設定送達時自動更新。 */
-    authOn() {
-      return rt.authEnabled;
     },
 
     /**
@@ -553,7 +545,6 @@ createApp({
       try {
         const config = await this.api.config();
         rt.mentionPattern = config.mentionPattern;
-        rt.authEnabled = !!config.authEnabled;
 
       } catch (error) {
         // 預設值已經在 rt 裡了,不做事就是正確的處理
@@ -853,7 +844,7 @@ createApp({
         return;
       }
       const body = { from: name, text: name + " 建立了這個房間" };
-      const result = await this.api.send(room, body, this.authOn ? this.token : "");
+      const result = await this.api.send(room, body);
       if (!result.ok) {
         this.roomError = "建不起來:"
           + (result.data.detail || result.data.error || ("HTTP " + result.status));
@@ -1152,7 +1143,6 @@ createApp({
      */
     async send(text) {
       const from = this.myName;
-      localStorage.setItem("a2a-token", this.token);   // 名字不記了,見 data()
 
       const body = { from: from, text: text };
 
@@ -1160,19 +1150,12 @@ createApp({
         body.reply_to = this.replyTo;
       }
 
-      // 用 this.authOn(它就是 rt.authEnabled 包一層的 computed)——
-      // 與 sendTask、fetchTaskFull 同一種問法,免得讀的人以為三者有差別。
-      let token = "";
-      if (this.authOn) {
-        token = this.token;
-      }
-
       // ★ finally 不是保險,是【唯一】保證解鎖的寫法:api.send 內部是 fetch,
       //   斷網時它會拋例外而不是回 { ok: false } —— 那條路繞過下面每一個 return。
       //   漏掉的話,一次斷網就讓輸入框永遠鎖死,而畫面上只看得出「這個網頁壞了」。
       let result;
       try {
-        result = await this.api.send(this.room, body, token);
+        result = await this.api.send(this.room, body);
       } finally {
         this.$refs.composer.unlock();
       }
@@ -1195,11 +1178,6 @@ createApp({
     async sendTask(payload) {
       const sender = this.myName;
 
-      let token = "";
-      if (this.authOn) {
-        token = this.token;
-      }
-
       // 理由同 send():解鎖走 finally,因為 fetch 拋例外那條路繞過所有 return。
       let result;
       try {
@@ -1208,7 +1186,6 @@ createApp({
           text: payload.text,
           sender: sender,
           deadlineSeconds: payload.deadlineSeconds,
-          token: token,
         });
       } finally {
         this.$refs.composer.unlock();
@@ -1481,14 +1458,8 @@ createApp({
     /** 抓任務的完整歷程。抓回來時使用者可能已經關掉或換了一個任務,所以要再確認一次。 */
     async fetchTaskFull(summary) {
       try {
-        // 帶上 token:GetTask 目前不需認證,但 rpc 的標頭已經統一走 buildHeaders,
-        // 呼叫端就照規矩傳,免得將來換成需要認證的方法時忘了補。
-        let token = "";
-        if (this.authOn) {
-          token = this.token;
-        }
         const response = await this.api.rpc(summary.target, "GetTask",
-                                            { id: summary.id }, token);
+                                            { id: summary.id });
 
         const stillShowingSameTask = this.modal
           && this.modal.type === "task"

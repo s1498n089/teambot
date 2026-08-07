@@ -142,8 +142,7 @@
   <button v-if="newBelow" class="newmsg-btn mono" @click="jumpBottom">&gt;&gt; NEW MESSAGES ({{ newBelow }})</button>
 
   <chat-composer ref="composer" :name="name" :room="room" :reply-to="replyTo"
-                 :auth-enabled="authOn" :token="token" :targets="taskTargets"
-                 @update:token="token = $event"
+                 :targets="taskTargets"
                  @send="send" @send-task="sendTask" @cancel-reply="replyTo = null">
   </chat-composer>
 

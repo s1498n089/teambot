@@ -124,6 +124,52 @@ class TestFetchContract:
         assert ahead.json() == {"error": "stale", "last_id": self.TOTAL}
 
 
+class TestWriteGate:
+    """★★★ 三條寫入路徑都必須經過 `check_writer` —— 這條測試守的是**位置**。
+
+    2026-08-07 拔掉 bearer token 認證之後,`check_writer` 變成一個空函式
+    (只有 `return`)。空函式看起來像沒清乾淨的殘骸,而**刪掉它不會有任何症狀**:
+    測試照樣全綠、功能照樣正常,直到有人要把「誰能寫」加回來,
+    才發現得重新把入口一個一個找齊 —— 而**找漏一個仍然不會有症狀**。
+
+    所以這裡不驗行為(它現在沒有行為),驗的是「這三條路還連在同一個點上」。
+    ★ 用攔截而不是讀原始碼:原始碼比對會被改寫格式弄紅,而攔截問的是
+      真正想問的那件事 —— 這個請求到底有沒有經過那道關卡。
+    """
+
+    def _gate_calls(self, client, monkeypatch, fire):
+        seen = []
+        hub = client.app.state.hub
+        original = hub.check_writer
+
+        def spy(name, request):
+            seen.append(name)
+            return original(name, request)
+
+        monkeypatch.setattr(hub, "check_writer", spy)
+        fire()
+        return seen
+
+    def test_posting_goes_through_the_gate(self, client, monkeypatch):
+        seen = self._gate_calls(client, monkeypatch,
+                                lambda: post_msg(client, "gate", "alice", "hi"))
+        assert seen == ["alice"]
+
+    def test_cursor_put_goes_through_the_gate(self, client, monkeypatch):
+        post_msg(client, "gate", "alice", "seed")
+        seen = self._gate_calls(
+            client, monkeypatch,
+            lambda: client.put("/api/rooms/gate/cursor/alice?last_id=1"))
+        assert seen == ["alice"]
+
+    def test_room_delete_goes_through_the_gate(self, client, monkeypatch):
+        post_msg(client, "doomed", "alice", "seed")
+        seen = self._gate_calls(
+            client, monkeypatch,
+            lambda: client.delete("/api/rooms/doomed?by=alice"))
+        assert seen == ["alice"]
+
+
 class TestCursor:
     """cursor 搬到 hub 之後,要補回它在 client 時代【天生就有】的值域保證。
 
@@ -175,27 +221,6 @@ class TestCursor:
         assert client.put("/api/rooms/ghost/cursor/alice?last_id=0").status_code == 422
         assert all(r["name"] != "ghost" for r in client.get("/api/rooms").json()["rooms"])
         assert not (client.app.state.hub.store.rooms_dir / "ghost").exists()
-
-    def test_put_cannot_impersonate_when_auth_is_on(self, make_app, isolated_base):
-        """★ 「我讀到 N 了」是一句聲明,所以 AUTH 開著時不能替別人說。
-
-        走的是跟發言【完全一樣】的那道門(check_writer)——
-        不另開權限,因為兩套遲早分岔,而分岔的那天沒有人會發現。
-        """
-        import server as server_mod
-        data_dir = isolated_base / server_mod.DATA_DIR_NAME
-        data_dir.mkdir(exist_ok=True)
-        bob_token = server_mod.TokenStore(data_dir / "tokens.json").issue("bob")
-
-        with TestClient(make_app(AUTH="on")) as c:
-            c.post("/api/rooms/main/messages", json={"from": "bob", "text": "一則"},
-                   headers={"Authorization": f"Bearer {bob_token}"})
-            # 拿 bob 的鑰匙替 alice 宣告已讀 → 403
-            r = c.put("/api/rooms/main/cursor/alice?last_id=1",
-                      headers={"Authorization": f"Bearer {bob_token}"})
-            assert r.status_code == 403
-            # 完全沒帶鑰匙 → 401
-            assert c.put("/api/rooms/main/cursor/alice?last_id=1").status_code == 401
 
     def test_rewind_is_allowed_on_purpose(self, client):
         """★ 倒退【允許】,而且不需要旗標 —— 這是刻意的,理由是危險不對稱:
@@ -466,48 +491,6 @@ class TestForceRing:
         finally:
             bus.unsubscribe("r1", sub)
 
-
-# ---------- AUTH 矩陣 ----------
-
-class TestAuth:
-    def _token_of(self, base, name):
-        """從 tokens.json 拿不到明文(只存 hash)——改由 TokenStore.issue 重生已知明文。"""
-        import server as server_mod
-        # ★ 路徑要跟伺服器一致:資料檔全部在 hub_data/ 底下。
-        data_dir = base / server_mod.DATA_DIR_NAME
-        data_dir.mkdir(exist_ok=True)
-        return server_mod.TokenStore(data_dir / "tokens.json").issue(name)
-
-    def test_auth_off_is_open(self, client):
-        assert post_msg(client, "t", "anyone", "free speech").status_code == 201
-
-    def test_auth_on_requires_token(self, make_app, isolated_base):
-        with TestClient(make_app(AUTH="on")) as c:
-            assert post_msg(c, "t", "alice", "no key").status_code == 401
-
-    def test_auth_wrong_identity_403_names_owner(self, make_app, isolated_base):
-        bob_token = self._token_of(isolated_base, "bob")
-        with TestClient(make_app(AUTH="on")) as c:
-            r = c.post("/api/rooms/t/messages",
-                       json={"from": "alice", "text": "impersonation"},
-                       headers={"Authorization": f"Bearer {bob_token}"})
-            assert r.status_code == 403
-            assert "bob" in r.json()["detail"]  # 403 要指出鑰匙真正的主人
-
-    def test_auth_valid_token_201(self, make_app, isolated_base):
-        alice_token = self._token_of(isolated_base, "alice")
-        with TestClient(make_app(AUTH="on")) as c:
-            r = c.post("/api/rooms/t/messages",
-                       json={"from": "alice", "text": "with key"},
-                       headers={"Authorization": f"Bearer {alice_token}"})
-            assert r.status_code == 201
-
-    def test_reads_stay_public_under_auth(self, make_app, isolated_base):
-        with TestClient(make_app(AUTH="on")) as c:
-            assert c.get("/api/rooms/t/messages?since_id=0").status_code == 200
-            assert c.get("/api/config").json()["authEnabled"] is True
-
-
 # ---------- SSE 直播 ----------
 
 
@@ -707,33 +690,6 @@ class TestPresence:
             return names
 
         assert asyncio.run(flow())[0] == []
-
-    def test_impersonation_downgraded_under_auth(self, make_app, isolated_base):
-        """AUTH=on 時冒名 watcher 降級為匿名 —— 否則誰都能假裝別人在線。"""
-        app = make_app(AUTH="on")
-        with TestClient(app) as c:
-            async def flow():
-                names = []
-                done = asyncio.Event()
-
-                async def receive():
-                    await done.wait()
-                    return {"type": "http.disconnect"}
-
-                async def send(message):
-                    if message["type"] == "http.response.body":
-                        names.append(c.get("/api/rooms/p/presence").json()["present"])
-                        done.set()
-
-                scope = {"type": "http", "http_version": "1.1", "method": "GET", "scheme": "http",
-                         "path": "/api/rooms/p/stream", "root_path": "",
-                         "query_string": b"since_id=0&watcher=alice", "headers": [],
-                         "client": ("test", 1), "server": ("test", 80)}
-                await asyncio.wait_for(app(scope, receive, send), timeout=5)
-                return names
-
-            assert asyncio.run(flow())[0] == []  # 無 token 冒名 → 不計入
-
 
 class TestAgentKindWiring:
     """「連線宣告自己是 agent」這條線的兩端。

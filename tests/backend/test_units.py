@@ -10,7 +10,7 @@ import pytest
 import a2a as a2a_mod
 import bell as bell_mod
 import server as server_mod
-from server import MentionParser, MessageStore, RateLimiter, TokenStore
+from server import MentionParser, MessageStore, RateLimiter
 
 
 # ---------- MentionParser ----------
@@ -228,51 +228,6 @@ class TestMessageStore:
         with pytest.raises(server_mod.BadRoomError):
             store.room_dir(evil)
 
-
-# ---------- TokenStore ----------
-
-class TestTokenStore:
-    def test_issue_verify_reject(self, tmp_path):
-        ts = TokenStore(tmp_path / "tokens.json")
-        token = ts.issue("alice")
-        assert ts.verify("alice", token)
-        assert not ts.verify("alice", "wrong")
-        assert not ts.verify("bob", token)  # 鑰匙綁名字
-
-    def test_owner_of(self, tmp_path):
-        ts = TokenStore(tmp_path / "tokens.json")
-        token = ts.issue("bob")
-        assert ts.owner_of(token) == "bob"
-        assert ts.owner_of("nope") is None
-
-    def test_rotate_invalidates_old(self, tmp_path):
-        ts = TokenStore(tmp_path / "tokens.json")
-        old = ts.issue("alice")
-        new = ts.issue("alice")  # rotate = 重新 issue
-        assert not ts.verify("alice", old)
-        assert ts.verify("alice", new)
-
-    def test_persist_across_reload(self, tmp_path):
-        p = tmp_path / "tokens.json"
-        token = TokenStore(p).issue("alice")
-        assert TokenStore(p).verify("alice", token)  # 只存 hash 也能驗
-
-    def test_ensure_only_fills_missing(self, tmp_path):
-        p = tmp_path / "tokens.json"
-        ts = TokenStore(p)
-        first = ts.ensure(["a", "b"])
-        assert set(first) == {"a", "b"}
-        again = ts.ensure(["a", "b", "c"])
-        assert set(again) == {"c"}  # 已有的不重發
-
-    def test_bad_file_tolerated(self, tmp_path):
-        p = tmp_path / "tokens.json"
-        p.write_text("not json", encoding="utf-8")
-        ts = TokenStore(p)  # 不炸
-        assert ts.verify("x", "y") is False
-
-
-# ---------- RateLimiter ----------
 
 class TestRateLimiter:
     def test_eleventh_hit_rejected(self):

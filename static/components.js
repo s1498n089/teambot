@@ -445,8 +445,8 @@ const MessageItem = {
    ─────────────────────────────────────────────────────────────────────── */
 
 const ChatComposer = {
-  props: ["name", "room", "replyTo", "authEnabled", "token", "targets"],
-  emits: ["update:token", "send", "send-task", "cancel-reply"],
+  props: ["name", "room", "replyTo", "targets"],
+  emits: ["send", "send-task", "cancel-reply"],
 
   data: function () {
     return {
@@ -630,10 +630,6 @@ const ChatComposer = {
           <button class="mono" :class="{ on: isTask }" @click="mode = 'task'">TASK</button>
         </span>
       </span>
-
-      <input v-if="authEnabled" class="token mono" type="password" :value="token"
-             placeholder="token" title="伺服器已啟用認證:發言需要你的 token"
-             @input="$emit('update:token', $event.target.value)">
 
       <textarea ref="box" v-model="draft" :placeholder="placeholder"
                 @keydown.enter.exact.prevent="fire"

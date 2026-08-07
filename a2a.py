@@ -295,7 +295,7 @@ class A2ALayer:
 
     def __init__(self, ingest, sanitize_sender, base_url: str,
                  live_agents_fn: Callable[..., set[str]],   # 吃可選的房間,見下方註解
-                 auth_enabled: bool = False, rooms_dir=None):
+                 rooms_dir=None):
         self._ingest = ingest
         self._sanitize = sanitize_sender
         self.base_url = base_url.rstrip("/")
@@ -311,7 +311,6 @@ class A2ALayer:
         #   兩個問題不同,答案也不同,而混用會壞掉:名片(Agent Card)不該綁房間,
         #   但「他能不能收到這個房的任務」必須綁房間。
         self.live_agents = live_agents_fn
-        self.auth_enabled = auth_enabled  # 影響 Agent Card 的 securitySchemes 誠實聲明(③)
         # 任務狀態落地,伺服器重開不失憶。★ 跟訊息住同一個房間目錄 ——
         # 刪房間才會是「刪一個目錄」,而不是「去兩個地方各清一次然後祈禱順序對」。
         self.registry = TaskRegistry(rooms_dir)
@@ -330,8 +329,9 @@ class A2ALayer:
     def agent_card(self, name: str) -> dict:
         """spec required 欄位齊備的 Agent Card。
 
-        AUTH 啟用時同步宣告 securitySchemes(誠實聲明做全套,
-        標準 A2A client 讀 Card 就知道要帶 bearer)。
+        ★ **不宣告 securitySchemes** —— 這個 hub 不驗任何身分(認證 2026-08-07 拔掉)。
+          Card 是對外的誠實聲明:沒有要求就不該寫上去,否則標準 A2A client
+          會讀到「要帶 bearer」然後帶一把我們根本不驗的鑰匙來。
         """
         # Agent Card 的內容不再來自寫死的檔案 —— 我們對一個剛連上線的 agent
         # 本來就只知道它的名字。與其編造專長,不如誠實地留白:
@@ -352,9 +352,10 @@ class A2ALayer:
             # A2A spec 允許空陣列;假造一份專長清單才是真正的違規。
             "skills": [],
         }
-        if self.auth_enabled:
-            card["securitySchemes"] = {"bearer": {"type": "http", "scheme": "bearer"}}
-            card["security"] = [{"bearer": []}]
+        # ★ 這裡曾經在 AUTH=on 時補上 securitySchemes / security ——
+        #   那是 A2A spec 要求的「誠實聲明:找我要帶鑰匙」。
+        #   2026-08-07 認證整套拔掉,所以宣告也跟著走:**沒有要求就不該聲明**,
+        #   否則對方會帶著一把我們根本不驗的鑰匙來。
         return card
 
     # ---------- 狀態機核心 ----------

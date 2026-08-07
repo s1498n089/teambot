@@ -13,14 +13,11 @@ store / bus / a2a_layer 都在這裡建構與注入,模組 import 不產生副�
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import hmac
 from contextlib import asynccontextmanager
 import inspect
 import json
 import os
 import re
-import secrets
 import shutil
 import sys
 import tempfile
@@ -179,13 +176,13 @@ class StaleCursorError(ApiError):
     status = 409
 
 
-class UnauthorizedError(ApiError):
-    """未帶或無效的 token(AUTH=on 時)。"""
-    status = 401
-
-
 class ForbiddenError(ApiError):
-    """token 有效但身分不符 —— 拿別人的鑰匙開自己的門。"""
+    """做了一件結構上不允許的事(例如刪掉 main 房)。
+
+    ★ 這個類別旁邊本來還有一個 UnauthorizedError(401),隨 2026-08-07
+      拔掉認證一起刪了 —— 沒有任何地方會拋它,而**零使用點的例外類別是空殼**。
+      要加回認證時再定義一個,那時它的語意才有東西可以對應。
+    """
     status = 403
 
 
@@ -590,61 +587,7 @@ class MessageStore:
         return list(stats.values())
 
 
-# ---------- TokenStore 與 RateLimiter(認證與限流)----------
-
-class TokenStore:
-    """per-agent bearer token。明文只在生成當下出現一次,落地只存 sha256。
-
-    - 比對用 hmac.compare_digest(防時序側信道)
-    - tokens.json 原子落地(temp+rename),gitignore
-    - 「user」也是持鑰者 — 人類不在名冊,但不能被鎖在門外
-    """
-
-    def __init__(self, path: Path):
-        self.path = path
-        self.hashes: dict[str, str] = {}
-        if path.exists():
-            try:
-                self.hashes = json.loads(path.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError) as exc:
-                print(f"[auth] WARN tokens.json 載入失敗:{exc}", file=sys.stderr)
-
-    @staticmethod
-    def _digest(token: str) -> str:
-        return hashlib.sha256(token.encode("utf-8")).hexdigest()
-
-    def _persist(self) -> None:
-        fd, tmp = tempfile.mkstemp(dir=str(self.path.parent), suffix=".tmp")
-        with open(fd, "w", encoding="utf-8") as f:
-            json.dump(self.hashes, f, indent=2)
-        os.replace(tmp, str(self.path))
-
-    def issue(self, name: str) -> str:
-        """生成(或重生)某人的 token,回傳明文 — 呼叫端負責讓使用者看到這唯一一次。"""
-        token = secrets.token_urlsafe(24)
-        self.hashes[name] = self._digest(token)
-        self._persist()
-        return token
-
-    def ensure(self, names: list[str]) -> dict[str, str]:
-        """為還沒有 token 的名字補發;回傳 {名字: 新明文} 供啟動時列印。"""
-        fresh = {}
-        for name in names:
-            if name not in self.hashes:
-                fresh[name] = self.issue(name)
-        return fresh
-
-    def verify(self, name: str, token: str) -> bool:
-        stored = self.hashes.get(name)
-        return bool(stored) and hmac.compare_digest(self._digest(token), stored)
-
-    def owner_of(self, token: str) -> str | None:
-        digest = self._digest(token)
-        for name, stored in self.hashes.items():
-            if hmac.compare_digest(digest, stored):
-                return name
-        return None
-
+# ---------- RateLimiter(寫入限流)----------
 
 class RateLimiter:
     """寫入限流:每個名字 10 秒滑動窗最多 10 則(與 409 重試流程相容)。"""
@@ -872,14 +815,15 @@ class Hub:
         # 沒有它的話,兩個人同時發言會讓樂觀鎖失效 —— 兩邊都以為自己是最新的。
         self.post_lock = asyncio.Lock()
 
-        # ── 認證、限流 ──
+        # ── 限流 ──
         # 名冊是動態的(誰連著線就是誰),所以這裡沒有註冊機制、也沒有邀請碼。
-        # 雲端階段若要控管誰能進房,那是另一道題(認證那道)。
-        self.auth_enabled = os.environ.get("AUTH", "").lower() in ("on", "1", "true")
-        self.token_store = TokenStore(self.data_dir / "tokens.json")
+        #
+        # ★ 這裡曾經還有一套 bearer token 認證(AUTH=on 才生效),2026-08-07 拔掉:
+        #   實際部署一直是區網,而它從來沒被真的開起來用過。
+        #   要控管誰能進房是【還沒想清楚的一道題】,連同「怎麼邀請 agent 進房」
+        #   一起,那時再設計 —— 留著一個沒人用的半套機制只會讓每個新功能
+        #   都要先繞過它。**限流留著**:它不分開關、一直在保護這台機器。
         self.rate_limiter = RateLimiter()
-        if self.auth_enabled:
-            self.issue_startup_tokens()
 
         # ── A2A 協定層 ──
         # 注意這裡傳的是 self.ingest,一個已經綁在這個 Hub 上的方法。
@@ -897,7 +841,6 @@ class Hub:
             # 而這個情境至今沒發生過(通常只有一個房間),逾時機制也已經兜住後果。
             # 哪天真的多房間常態運作,這裡就是要改的第一個地方。
             live_agents_fn=self.bus.live_agents_maybe_room,
-            auth_enabled=self.auth_enabled,
             rooms_dir=self.rooms_dir,
         )
 
@@ -917,23 +860,6 @@ class Hub:
               f"遠端 client 取得的 Agent Card url 會指向對它無效的 {self.base_url};"
               f"建議啟動時設 PUBLIC_HOST=<你的區網IP>(port 會自動接上 {self.port})",
               file=sys.stderr)
-
-    def issue_startup_tokens(self) -> None:
-        """開了認證時,確保名冊上每個人(加上人類 user)都有一把鑰匙。
-
-        新發的鑰匙印在畫面上,而且【只印這一次】—— 檔案裡存的是指紋不是明文,
-        所以沒抄到就只能重發。設 ROTATE_TOKEN=<名字> 可以幫某人重發、舊的作廢。
-        """
-        # ★ 只替人類(user)準備鑰匙。agent 的名冊現在是動態的 ——
-        #   開機這一刻還沒有任何 agent 連上線,無從預發。
-        #   要給某個 agent 鑰匙,用 ROTATE_TOKEN=<名字> 重啟一次即可。
-        fresh = self.token_store.ensure(["user"])
-        for name, token in fresh.items():
-            print(f"[auth] {name} 的 token(僅此一次,請抄下分發):{token}", file=sys.stderr)
-        rotate = os.environ.get("ROTATE_TOKEN", "")
-        if rotate:
-            new_token = self.token_store.issue(rotate)
-            print(f"[auth] {rotate} 的新 token(舊的已失效):{new_token}", file=sys.stderr)
 
     def pick_rooms_dir(self) -> Path:
         """決定房間資料要放哪個根目錄。
@@ -1051,30 +977,20 @@ class Hub:
                 "tasks": dropped_tasks, "subscribers": dropped_subs}
 
     def check_writer(self, name: str, request: Request) -> None:
-        """寫入前的身分檢查。沒開認證就直接放行。
+        """寫入前的身分關卡 —— **目前不檢查任何東西**。
 
-        三種失敗分開講,因為它們的意思完全不同:
-            沒帶鑰匙     → 你需要先拿一把
-            鑰匙是別人的 → 你在冒名(這種最該講清楚)
-            鑰匙不存在   → 這把是假的
+        ★ 這個函式是空的,而它【刻意留著】。它是三條寫入路徑
+          (發言、推 cursor、刪房)共同經過的那一個點,而「誰能寫」這個問題
+          遲早要回答 —— **要加回檢查就加在這裡,不必再去把三個入口找齊一次。**
+
+          2026-08-07 拔掉 bearer token 認證時,收口沒有跟著拔:
+          刪掉它的話,三個呼叫端會各自變成「什麼都不做」,而下一個要加認證的人
+          得重新找齊入口,**找漏一個不會有任何症狀** —— 那種漏洞沒有人會發現。
+
+        ★★ 有一條測試釘著這件事(三個入口都必須經過這裡)。
+          它看起來像沒清乾淨的殘骸,但它是指路牌。**刪它之前先看那條測試。**
         """
-        if not self.auth_enabled:
-            return
-
-        header = request.headers.get("authorization", "")
-        if not header.lower().startswith("bearer "):
-            raise UnauthorizedError({"error": "no_token",
-                                     "detail": "AUTH 已啟用,寫入需 Authorization: Bearer <token>"})
-
-        token = header[7:].strip()
-        if self.token_store.verify(name, token):
-            return
-
-        owner = self.token_store.owner_of(token)
-        if owner:
-            raise ForbiddenError({"error": "wrong_identity",
-                                  "detail": f"這把 token 屬於「{owner}」,不能以「{name}」發言"})
-        raise UnauthorizedError({"error": "bad_token", "detail": "無效的 token"})
+        return
 
     def identify_optional_reader(self, name: str | None, request: Request) -> str | None:
         """認一下「順便報上名字」的人是誰,認不出來就當匿名。
@@ -1090,12 +1006,10 @@ class Hub:
         clean = sanitize_sender(name)
         if clean is None:
             return None
-        if not self.auth_enabled:
-            return clean
-        try:
-            self.check_writer(clean, request)
-        except ApiError:
-            return None      # 冒名者當匿名處理
+        # ★ 認證拔掉之後這裡不再驗任何東西 —— 報什麼名字就算什麼名字。
+        #   `reader=` / `watcher=` 本來就是【開放式】的聲明:驗不過不擋人、
+        #   只是不算數。沒有驗證機制時,自然就是全部算數。
+        return clean
         return clean
 
 
@@ -1156,10 +1070,13 @@ def register_page_routes(app: FastAPI, hub: Hub) -> None:
           所以顏色由前端從名字算(同名同色)—— 少一個要同步的東西,
           而且新成員第一次出現就有顏色,不必等重整。
         """
+        # ★ 這裡曾經有一個 authEnabled,2026-08-07 隨認證一起拿掉 ——
+        #   **不是固定回 false**。留著一個永遠是 false 的欄位,下一個人會以為
+        #   那個功能還在、只是關著,而它其實已經不存在了。
+        #   **「關著的功能」跟「沒有這個功能」對讀 code 的人是完全不同的訊息。**
         return {
             "mentionPattern": MentionParser.JS_SOURCE,
             "a2aVersion": a2a_mod.A2A_PROTOCOL_VERSION,
-            "authEnabled": hub.auth_enabled,   # 前端據此決定要不要顯示 token 欄位
         }
 
 
@@ -1174,9 +1091,9 @@ def register_room_routes(app: FastAPI, hub: Hub) -> None:
     async def delete_room(room: str, request: Request, by: str = ""):
         """刪掉一個房間 —— **全站唯一的破壞性操作**。
 
-        ★ 身分走跟發言【完全一樣】的路:`by` 是自報的名字,`check_writer` 驗它 ——
-          AUTH 開了就不能冒名,沒開就跟發言一樣是信任制。
-          不另開一套權限,因為「另一套」意味著兩處要各自維護正確性,
+        ★ 身分走跟發言【完全一樣】的那道關卡(`check_writer`)——
+          發言是信任制,刪房就是信任制,不另開一套權限:
+          「另一套」意味著兩處要各自維護正確性,
           而它們遲早會分岔(而且分岔的那一天沒有人會發現)。
 
         ★ 名字消毒也共用 sanitize_sender:留痕要誠實,
@@ -1200,13 +1117,13 @@ def register_room_routes(app: FastAPI, hub: Hub) -> None:
     async def put_cursor(room: str, name: str, last_id: int, request: Request):
         """『我讀到第 N 則了』—— 這是一句**聲明**,所以身分要驗。
 
-        ★ 走跟發言【完全一樣】的那道門(check_writer):AUTH 開著時 token 綁名字、
-          不能替別人宣告已讀;AUTH 關著時發言本來就能冒名,cursor 也一樣。
-          **不多不少 —— 不需要為它發明新的保護。**
+        ★ 走跟發言【完全一樣】的那道門(check_writer):
+          發言能不能冒名,cursor 就能不能 —— **不多不少,不為它發明新的保護。**
 
-        ★★ 這個檔案從 client 搬到 server 之後,「只有本人寫得到」從
-          【結構保證】變成了【權限保證】。使用者知道並接受這個變化
-          (測試階段、機器都在他手上),而它在 AUTH 開啟後就會回到同等強度。
+        ★★ 這個檔案從 client 搬到 server 之後,「只有本人寫得到」這件事
+          從【結構保證】掉成了【沒有保證】—— 檔案在自己電腦上時,別人根本寫不到。
+          使用者知道並接受(區網、機器都在他手上),而 check_writer 那道關卡
+          就是留給「哪天需要把它變回保證」用的位置。
 
         ★ 用 query 而不是 JSON body:值只有一個整數,而 query 讓
           read.py 印出來的那行指令短到可以直接複製貼上 —— 那是它主要的使用方式。
@@ -1327,7 +1244,7 @@ def register_room_routes(app: FastAPI, hub: Hub) -> None:
         if sender is None:
             raise BadSenderError({"error": "bad_sender",
                                   "detail": "名字限 1-32 字的中英數與 - _,不含空白與 @"})
-        hub.check_writer(sender, request)    # 認證(只在 AUTH=on 時真的檢查)
+        hub.check_writer(sender, request)    # 身分關卡(目前不檢查,見它的說明)
         hub.rate_limiter.check(sender)       # 限流(永遠啟用)
         msg = await hub.ingest(room, sender, body.text,
                                reply_to=body.reply_to,
@@ -1507,18 +1424,18 @@ def register_a2a_route(app: FastAPI, hub: Hub) -> None:
 
         params = body.get("params") or {}
 
-        # 會寫入的方法要先過認證與限流。
-        # (協定本身把認證交給 HTTP 層處理,所以檢查放在這裡,而不是放進協定層。)
+        # 會寫入的方法要先過身分關卡與限流。
+        # (關卡放在這裡而不是協定層:協定本身把身分交給 HTTP 層處理。)
         #
-        # ⚠️ 已知的縫:CancelTask 會改狀態(把任務轉成 CANCELED),但【不在這份清單裡】。
-        #    也就是說 AUTH=on 時,任何人只要知道一個 task id,不帶 token 就能取消它。
+        # ⚠️ 留一筆給【未來要加認證的人】:CancelTask 會改狀態
+        #    (把任務轉成 CANCELED),但它**不在這份清單裡**。
+        #    現在無所謂 —— check_writer 不檢查任何東西,在不在清單裡都一樣。
+        #    但加回認證的那一天,這就是一個縫:知道 task id 就能取消它。
         #
-        #    現在沒出事,是因為 AUTH 預設關著、而且只在區網跑。★ 但 AUTH=on 上線前必修。
-        #
-        #    為什麼不是現在順手加進清單:CancelTask 的 params 裡【沒有 senderName】,
-        #    extract_sender_name 會 fallback 成 "a2a-client" —— 直接加進去的結果是
-        #    AUTH=on 時所有 cancel 全部被擋。要修得先定「cancel 請求怎麼聲明身分」,
-        #    那是認證那一輪的設計題,不是一行改動。
+        #    而且它不是「順手加進清單」就能修的:CancelTask 的 params 裡
+        #    【沒有 senderName】,extract_sender_name 會 fallback 成 "a2a-client" ——
+        #    直接加進去的結果是所有 cancel 全部被擋。
+        #    要修得先定「cancel 請求怎麼聲明身分」,那是設計題,不是一行改動。
         #
         #    GetTask / ListTasks / SubscribeToTask 不進清單是對的:它們不改狀態。
         #

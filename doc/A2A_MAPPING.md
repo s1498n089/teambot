@@ -26,8 +26,8 @@
 ## Endpoints(掛在同一個 FastAPI app)
 
 - `GET /agents` — agent 目錄(非 spec,方便探索)。回的是**此刻連著線的 agent**,不是歷史名單。
-  - 沒有「加入」這個動作 —— 名冊不是一份要加入的名單。
-    要發 token 用 `ROTATE_TOKEN=<名字>` 重啟 hub,明文只印那一次。
+  - 沒有「加入」這個動作 —— 名冊不是一份要加入的名單,
+    誰的直播連線開著就算誰在。
 - `GET /agents/{name}/.well-known/agent-card.json`(+ `/.well-known/a2a-agent-card` 別名)— Agent Card
 - `POST /agents/{name}/a2a` — JSON-RPC 2.0(方法名為 PascalCase,spec 1.0 §5.3):
   - `SendMessage` — 建 Task、訊息入房間流(帶 task_id、自動把目標 agent 注入 mentions 以觸發喚醒);
@@ -66,13 +66,13 @@
   `tasks.json` 按埠隔離(非預設埠自動用 `tasks-<port>.json`),`chat.jsonl` **所有實例共用** ——
   所以測試實例請用獨立房間名,否則訊息會混進同一條流
 - 只支援 TextPart;無 artifacts
-- 認證:AUTH=on 時寫入需 **綁名字的** bearer token(拿別人的鑰匙冒名 → 403),
-  Agent Card 同步宣告 HTTPAuthSecurityScheme;預設 off(本機開發零負擔)。
-  開機只發給 `user`(人類);agent 的鑰匙不預發 —— 開機那一刻還沒有 agent 連著線,
-  要用時以 `ROTATE_TOKEN=<名字>` 現發
-  - ⚠️ **已知的縫**:認證只掛在 `SendMessage` / `SendStreamingMessage`,
-    而 `CancelTask` 會改狀態卻不在清單裡 —— AUTH=on 時任何人知道 task id 就能取消。
-    **AUTH=on 上線前必修**;修法不是把它加進清單就好(它的 params 沒有 senderName,
+- **認證:沒有**(2026-08-07 拔掉,原本是 AUTH=on 才生效的 bearer token)。
+  寫入不需要鑰匙,名字自報;Agent Card 因此**不宣告** securitySchemes ——
+  沒有要求就不聲明,否則對方會帶一把我們根本不驗的鑰匙來。
+  - ⚠️ **留給未來加回認證的人**:寫入的身分關卡(`server.py` 的 `check_writer`)
+    只掛在 `SendMessage` / `SendStreamingMessage`,而 `CancelTask` 會改狀態
+    卻不在清單裡。現在無所謂(關卡不檢查任何東西),但加回認證那天這就是一個縫。
+    修法不是把它加進清單就好(它的 params 沒有 senderName,
     直接加會讓所有 cancel 被擋),要先定義「cancel 請求怎麼聲明身分」。
     釘子同時釘在 `server.py` 的認證分支旁邊,以及 `doc/A2A_TUTORIAL.md` 第 7 章
     (那裡拿它當「協定不管授權」的實例)。**修好那天,三處要一起改** ——

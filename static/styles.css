@@ -417,12 +417,6 @@ input.name {
   text-align: right; padding: 2px 0; min-width: 3ch; /* ch 自適應寬度由 JS 綁定 */
 }
 input.name:focus { outline: none; border-bottom-color: var(--green); }
-input.token {
-  width: 90px;
-  background: var(--bg); border: 1px solid var(--border); border-radius: 2px;
-  color: var(--amber); font-size: var(--ui-md); padding: 4px 6px;
-}
-input.token:focus { outline: 1px solid var(--amber); }
 textarea {
   /* basis 14ch 是換行門檻:同列剩不到 14 個字寬就整條換行,而非繼續壓縮 */
   flex: 1 1 14ch; min-width: 0; resize: none; height: 56px;

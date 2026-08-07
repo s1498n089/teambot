@@ -4,7 +4,7 @@
    畫面上所有需要「問伺服器」或「告訴伺服器」的事,都從這裡出去:
    拿訊息、送訊息、拿成員名單、派任務……
 
-   為什麼要有這個檔案:如果每個元件各自去發請求,錯誤處理、認證標頭、
+   為什麼要有這個檔案:如果每個元件各自去發請求,錯誤處理、共用標頭、
    逾時規則就會散落在十幾個地方,改一次要改十幾處。集中在這裡之後,
    「跟伺服器溝通」這件事就只有一個入口。
 
@@ -35,20 +35,17 @@ function createApi(notify) {
   /**
    * 組出送給伺服器的標頭。
    *
-   * 抽成函式是因為 send / sendTask / rpc 三邊都要用同一組標頭 ——
-   * 各寫一份的話,漏掉 Authorization 那半段不會有人發現。
+   * 抽成函式是因為 send / sendTask / rpc 三邊都要用同一組標頭。
    *
-   * @param {string} token 登入用的憑證,沒有就傳空的
+   * ★ 它以前還會在有 token 時補上 `Authorization: Bearer <token>` ——
+   *   認證 2026-08-07 整套拔掉了,所以只剩 Content-Type。
+   *   **函式留著**:三邊共用一組標頭這件事沒有變,而下次要加任何共同標頭
+   *   (追蹤 id、版本號、或哪天回來的認證)都還是加在這裡。
+   *
    * @returns {object} 可以直接給 fetch 用的 headers
    */
-  function buildHeaders(token) {
-    const headers = {};
-    headers["Content-Type"] = "application/json";
-
-    if (token) {
-      headers["Authorization"] = `Bearer ${token}`;
-    }
-    return headers;
+  function buildHeaders() {
+    return { "Content-Type": "application/json" };
   }
 
   /**
@@ -111,7 +108,7 @@ function createApi(notify) {
   }
 
   return {
-    /** 開機時拿設定:@某人 的解析規則、以及伺服器有沒有開認證。
+    /** 開機時拿設定:@某人 的解析規則、A2A 協定版本。
         (顏色不在這裡拿 —— 前端從名字自己算,見 util.js 的 colorHexOf。) */
     config: function () {
       return request("/api/config");
@@ -125,8 +122,8 @@ function createApi(notify) {
     /**
      * 刪掉一個房間 —— **全站唯一的破壞性操作**。
      *
-     * `by` 是刪除者的名字,伺服器會記進 log。它走的是跟發言一樣的身分檢查:
-     * AUTH 開了就不能冒名,沒開就跟發言一樣是信任制。
+     * `by` 是刪除者的名字,伺服器會記進 log。它跟發言走同一道身分關卡
+     * (server.py 的 check_writer)—— 那道關現在不檢查任何東西,但位置留著。
      *
      * ★ 這個【不是】quiet:刪不掉的時候使用者一定要知道
      *   —— 例如刪 main(伺服器用結構擋住,回 403)。
@@ -237,13 +234,12 @@ function createApi(notify) {
      *
      * @param {string} room 房間名
      * @param {object} body 要送出的內容
-     * @param {string} token 認證憑證(伺服器有開認證時才需要)
      * @returns {Promise<object>} { ok, status, data }
      */
-    async send(room, body, token) {
+    async send(room, body) {
       const response = await fetch(`/api/rooms/${room}/messages`, {
         method: "POST",
-        headers: buildHeaders(token),
+        headers: buildHeaders(),
         body: JSON.stringify(body),
       });
 
@@ -269,7 +265,6 @@ function createApi(notify) {
       const text = options.text;
       const sender = options.sender;
       const deadlineSeconds = options.deadlineSeconds;
-      const token = options.token;
 
       const message = {
         role: "ROLE_USER",
@@ -294,7 +289,7 @@ function createApi(notify) {
 
       const response = await fetch(`/agents/${target}/a2a`, {
         method: "POST",
-        headers: buildHeaders(token),
+        headers: buildHeaders(),
         body: JSON.stringify(requestBody),
       });
 
@@ -316,18 +311,16 @@ function createApi(notify) {
     /**
      * 直接呼叫 A2A 的其他方法(查任務、取消任務等)。
      *
-     * ★ 標頭走 buildHeaders,所以會帶上 token。它原本手寫 Content-Type、
-     *   沒有 Authorization —— 那讓它在 AUTH=on 時只能打不需要認證的方法。
-     *   現在唯一的呼叫端是 GetTask(讀,不需認證),所以那個缺口一直沒有被踩到,
-     *   但那是「剛好沒事」不是「沒問題」。
+     * ★ 標頭走 buildHeaders,跟 send / sendTask 同一組 —— 它以前自己手寫
+     *   Content-Type,結果漏掉了共用標頭裡的另一半。**共用的東西各寫一份,
+     *   遲早會分岔,而分岔的那一半不會有人發現。**
      *
      * @param {string} agent 對象
      * @param {string} method A2A 方法名,例如 "GetTask"
      * @param {object} params 該方法的參數
-     * @param {string} token 認證憑證,沒開認證時傳空的
      * @returns {Promise<object>}
      */
-    rpc: function (agent, method, params, token) {
+    rpc: function (agent, method, params) {
       const requestBody = {
         jsonrpc: "2.0",
         id: 1,
@@ -337,7 +330,7 @@ function createApi(notify) {
 
       return request(`/agents/${agent}/a2a`, {
         method: "POST",
-        headers: buildHeaders(token),
+        headers: buildHeaders(),
         body: JSON.stringify(requestBody),
       });
     },
