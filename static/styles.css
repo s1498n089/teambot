@@ -210,14 +210,16 @@ main {
 .room-picker { display: flex; flex-direction: column; gap: 8px;
                border-top: 1px solid var(--line); padding-top: 12px; }
 .room-picker-title { color: var(--muted); font-size: var(--ui-sm); letter-spacing: 1px; }
-.room-list { display: flex; flex-direction: column; gap: 2px;
-             max-height: 180px; overflow-y: auto; }
-.room-item { display: flex; align-items: center; justify-content: space-between;
-             padding: 6px 10px; border: 1px solid transparent; border-radius: 2px; }
-.room-item:hover { border-color: var(--line); }
-.room-item.picked { border-color: var(--cyan); color: var(--cyan); }
-.room-pick { flex: 1; cursor: pointer; }
-.room-count { color: var(--muted); font-size: var(--ui-sm); margin-left: 8px; }
+/* ★ 一列:下拉選單 + 刪除鍵。房間再多,這一列的高度都一樣 ——
+     以前是逐間列出的清單,房間一多就撐高對話框、把「開一間」擠出畫面。 */
+.room-list { display: flex; align-items: center; gap: 8px; }
+.room-select { flex: 1; background: var(--bg); color: var(--cyan);
+               border: 1px solid var(--border); border-radius: 2px;
+               font-family: var(--mono); font-size: var(--ui-md); padding: 8px 10px;
+               /* select 的固有寬度 = 最長選項寬,長房名會撐爆整個對話框;
+                  min-width:0 解除 flex 項目的預設不收縮(同 header 那個下拉) */
+               min-width: 0; text-overflow: ellipsis; cursor: pointer; }
+.room-select:focus { outline: none; border-color: var(--cyan); }
 .room-del { color: var(--muted); cursor: pointer; padding: 0 6px; opacity: .35; }
 .room-del:hover { color: var(--red); opacity: 1; }
 /* 上膛了:紅框、實心,看得出這一下是玩真的 */

@@ -80,22 +80,28 @@
         <div class="room-picker">
           <div class="room-picker-title mono">去哪一間?</div>
 
+          <!-- ★ 下拉而不是列表:房間會一直長,列表撐高整個對話框、還會把
+               下面的「開一間」擠出畫面。下拉的高度是固定的,幾間都一樣。
+               (2026-08-07 需求方指定:「房間多的時候我怕有問題」。) -->
           <div class="room-list">
-            <div v-for="r in rooms" :key="r.name"
-                 class="room-item mono"
-                 :class="{ picked: (pendingRoom || room) === r.name }">
-              <span class="room-pick" @click="pickRoom(r.name)">
-                {{ r.name }} <span class="room-count">{{ r.count }} 則</span>
-              </span>
-              <!-- 兩段式:第一下上膛(變成紅色的「確定刪?」),第二下才真的刪。
-                   main 不畫這個鍵 —— 伺服器用結構擋著,畫出來只會讓人按了才發現。 -->
-              <span v-if="r.name !== 'main'" class="room-del"
-                    :class="{ arming: armingDelete === r.name }"
-                    @click="askDeleteRoom(r.name)"
-                    :title="armingDelete === r.name ? '再按一次就真的刪掉' : '刪掉這個房間'">
-                {{ armingDelete === r.name ? '確定刪?' : '✕' }}
-              </span>
-            </div>
+            <select class="room-select mono"
+                    :value="pendingRoom || room"
+                    @change="pickRoom($event.target.value)">
+              <option v-for="r in rooms" :key="r.name" :value="r.name">
+                {{ r.name }} ({{ r.count }} 則)
+              </option>
+            </select>
+
+            <!-- 兩段式:第一下上膛(變成紅色的「確定刪?」),第二下才真的刪。
+                 ★ 刪除鍵改成【只針對現在選中的那一間】—— 下拉選單裡放不進按鈕,
+                   而每一間都畫一個鍵本來就是列表版才有的形狀。
+                 main 不畫這個鍵 —— 伺服器用結構擋著,畫出來只會讓人按了才發現。 -->
+            <span v-if="(pendingRoom || room) !== 'main'" class="room-del"
+                  :class="{ arming: armingDelete === (pendingRoom || room) }"
+                  @click="askDeleteRoom(pendingRoom || room)"
+                  :title="armingDelete === (pendingRoom || room) ? '再按一次就真的刪掉' : '刪掉這個房間'">
+              {{ armingDelete === (pendingRoom || room) ? '確定刪?' : '✕' }}
+            </span>
           </div>
 
           <div class="room-new">
