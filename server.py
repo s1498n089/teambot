@@ -767,6 +767,32 @@ class EventBus:
     def unsubscribe(self, room: str, sub: Subscription) -> None:
         self.subs.get(room, set()).discard(sub)
 
+    def mark_gone(self, room: str, watcher: str) -> int:
+        """某個名字說「我要走了」—— 把他在這個房的連線標成死的。回傳標了幾條。
+
+        ★ 為什麼需要有人「主動說」:在場名單的事實來源是「連線還開著沒有」,
+          而連線死掉這件事**伺服器不會立刻知道** —— 要等 keep-alive 超時
+          (SSE_KEEPALIVE_SECONDS)才發現。那段空窗裡,離開的人還掛在名單上。
+
+          換房會重新載入頁面,於是新頁面查到的是**使用者自己上一秒的鬼影**,
+          而畫面上寫著「這個名字有人正在用」。(2026-08-07 實際踩到。)
+
+        ★★ 標 dead 而不是直接移除,是為了走**現成的收尾路徑**:
+          那些連線的產生器正卡在 await,標記讓它們自己醒來、自己 unsubscribe
+          (跟 drop_room 同一個機制)。不發明第二種結束方式。
+
+        ★★★ 同名的連線可能不只一條(開了兩個分頁),這裡會**全部標掉**。
+          那是可接受的:瀏覽器的 SSE 斷線會自動重連,還活著的分頁幾秒內就會
+          重新出現在名單上。**寧可少算,不要多算** —— 名單多算一個人的代價
+          (擋住真正的本人)比少算一個大得多。
+        """
+        gone = 0
+        for sub in self.subs.get(room, set()):
+            if sub.watcher == watcher and not sub.dead:
+                sub.dead = True
+                gone += 1
+        return gone
+
     def publish(self, room: str, msg: dict) -> None:
         for sub in list(self.subs.get(room, set())):
             try:
@@ -1239,6 +1265,24 @@ def register_room_routes(app: FastAPI, hub: Hub) -> None:
     async def get_presence(room: str):
         """在場名單:誰的直播連線正開著(敲鈴器或瀏覽器都算)。"""
         return {"room": room, "present": sorted(hub.bus.watchers(room))}
+
+    @app.post("/api/rooms/{room}/leave")
+    async def leave_room(room: str, watcher: str = ""):
+        """「我要走了」—— 把這個名字在本房的直播連線立刻標成死的。
+
+        ★ 走 POST 是因為它**改變狀態**,而且瀏覽器的 `navigator.sendBeacon`
+          只會發 POST(那是前端唯一能在頁面卸載時可靠送出請求的方法)。
+
+        ★★ 這裡**不驗身分**,而那是刻意的:
+          最壞情況是有人惡意把別人踢出在場名單,而代價只是那個人的 SSE 斷線 ——
+          瀏覽器會自動重連,幾秒後他就回到名單上了。
+          拿「加一道驗證」去防一個會自我修復的小惡作劇不划算,
+          而且驗證會讓這條路多一個失敗模式(告別訊息本來就常常送不到)。
+
+        ★★★ 名字不存在或本來就沒連線都回 200:
+          告別是**盡力而為**的動作,回報失敗沒有人接得住(頁面已經在關了)。
+        """
+        return {"ok": True, "room": room, "dropped": hub.bus.mark_gone(room, watcher)}
 
     @app.get("/api/rooms/{room}/members")
     async def get_members(room: str):

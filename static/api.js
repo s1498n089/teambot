@@ -159,6 +159,33 @@ function createApi(notify) {
     },
 
     /**
+     * 走之前跟伺服器說一聲:把我這條直播連線從在場名單上拿掉。
+     *
+     * ★ 為什麼需要它:名單的事實來源是「連線還開著沒有」,而伺服器要等
+     *   keep-alive 超時(15 秒)才會發現對方已經走了。那 15 秒裡,離開的人
+     *   還掛在名單上 —— 換房重新載入時,新頁面會查到自己上一秒的鬼影。
+     *
+     * ★★ **一定要用 sendBeacon,不能用 fetch。** 頁面正在卸載時,
+     *   瀏覽器會直接【取消】還沒送完的 fetch,而 sendBeacon 的整個存在理由
+     *   就是「頁面死了也把這個請求送完」。這裡用錯 API 的話,
+     *   平常測起來都對(因為手動呼叫時頁面還活著),只有真的換頁時失效。
+     *
+     * ★★★ 就算用對了也**不保證送得到** —— 當機、拔網路線、手機切背景被系統殺掉,
+     *   都不會有告別訊息。所以這只是「讓鬼變少」,不是「讓鬼消失」:
+     *   取名那邊仍然不能拿在場名單去硬擋人(見 app.js 的 confirmName)。
+     *
+     * 回傳 boolean(瀏覽器有沒有接受這個請求),失敗不需要處理 —— 它是盡力而為的。
+     */
+    leaveRoom: function (room, watcher) {
+      if (!room || !watcher || !navigator.sendBeacon) {
+        return false;
+      }
+      const url = `/api/rooms/${encodeURIComponent(room)}/leave`
+                + `?watcher=${encodeURIComponent(watcher)}`;
+      return navigator.sendBeacon(url);
+    },
+
+    /**
      * 強制敲某個 agent 的鈴 —— 人類的「喂,醒醒」。
      *
      * 為什麼需要這個按鈕:敲鈴器有「連敲三次沒反應就安靜」的不騷擾設計,

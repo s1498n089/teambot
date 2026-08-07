@@ -631,6 +631,59 @@ class TestPresence:
         assert during and "alice" in during[0]   # 連線期間在場
         assert after[0] == []                    # 連線結束即離場
 
+    def test_leave_removes_watcher_immediately(self, client):
+        """★★ 「我要走了」要【立刻】生效,不能等 keep-alive 超時才發現。
+
+        2026-08-07 的 bug:換房會重新載入頁面,而伺服器要等 15 秒才知道
+        上一頁走了 —— 於是新頁面查在場名單,查到**自己上一秒的鬼影**,
+        然後把使用者擋在門外,畫面上寫著「這個名字有人正在用」。
+
+        所以離開的那一方要能主動說一聲(瀏覽器用 navigator.sendBeacon 送)。
+        這條測的就是「說了之後名單當場就對」。
+        """
+        async def flow():
+            seen_before, seen_after = [], []
+            done = asyncio.Event()
+
+            async def receive():
+                await done.wait()
+                return {"type": "http.disconnect"}
+
+            async def send(message):
+                if message["type"] == "http.response.body":
+                    seen_before.append(client.get("/api/rooms/p/presence").json()["present"])
+                    # ★ 連線【還開著】的時候說再見 —— 那正是換頁瞬間的實況
+                    reply = client.post("/api/rooms/p/leave?watcher=alice")
+                    seen_after.append((reply.status_code, reply.json(),
+                                       client.get("/api/rooms/p/presence").json()["present"]))
+                    done.set()
+
+            scope = {"type": "http", "http_version": "1.1", "method": "GET", "scheme": "http",
+                     "path": "/api/rooms/p/stream", "root_path": "",
+                     "query_string": b"since_id=0&watcher=alice", "headers": [],
+                     "client": ("test", 1), "server": ("test", 80)}
+            await asyncio.wait_for(client.app(scope, receive, send), timeout=5)
+            return seen_before, seen_after
+
+        before, after = asyncio.run(flow())
+        assert before and "alice" in before[0], "說再見之前應該在場"
+        status, payload, present = after[0]
+        assert status == 200
+        assert payload["dropped"] == 1
+        assert "alice" not in present, "說完再見,名單上【當場】就不該有他"
+
+    def test_leave_is_forgiving(self, client):
+        """沒連線、名字不存在、名字空白 —— 一律回 200。
+
+        ★ 告別是**盡力而為**的動作:送出它的時候頁面已經在關了,
+          沒有人接得住錯誤。回 4xx 只會在瀏覽器主控台留下嚇人的紅字,
+          而使用者什麼也做不了。
+        """
+        for query in ["?watcher=nobody", "?watcher=", ""]:
+            reply = client.post(f"/api/rooms/p/leave{query}")
+            assert reply.status_code == 200, query
+            assert reply.json()["dropped"] == 0
+
     def test_anonymous_watcher_not_counted(self, client):
         """不報名字的訂閱者(純觀眾)不計入在場名單。"""
         async def flow():

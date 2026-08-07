@@ -269,6 +269,24 @@ createApp({
     const savedToken = localStorage.getItem("a2a-token") || "";
     const savedFont = localStorage.getItem("a2a-font") || String(FONT_DEFAULT);
 
+    /* ★ 「換房」跟「進場」是兩件事,而這一行是它們的分界。
+
+       換房會重新載入頁面(見 goToRoom 的理由),而原本的流程把重載後的那一次
+       當成【全新進場】—— 於是又問一次名字、又查一次撞名,
+       然後查到自己上一秒那條還沒斷乾淨的連線,把自己擋在門外。
+
+       所以換房前留一張條子在 sessionStorage 上,重載後拿到條子的就直接進去。
+
+       ★★ 為什麼是 sessionStorage 而不是網址或 localStorage:
+         sessionStorage  只活在【這一個分頁】,關掉就沒了 —— 跟「換房」的範圍完全一致
+         網址            會被分享、被加書籤,別人點開就繞過取名框了
+         localStorage    跨分頁共用,開新分頁會被誤認成換房
+
+       ★★★ 條子【看一次就撕掉】:重新整理不該再被當成換房,
+         那是真的重新進場(使用者可能想換個名字)。 */
+    const switchingAs = sessionStorage.getItem("a2a-switching-as") || "";
+    sessionStorage.removeItem("a2a-switching-as");
+
     return {
       messages: [],
       members: [],          // 這個房間發言過的人
@@ -277,8 +295,8 @@ createApp({
       presenceSupported: true,  // 舊版伺服器沒有這個功能,遇到 404 就自動關掉
       rooms: [],
       lastId: 0,
-      name: "",                     // 進場前沒有身分 —— modal 填完才有
-      askingName: true,             // ★ 每次進來都問,不看瀏覽器記得什麼
+      name: switchingAs,            // 進場前沒有身分 —— modal 填完才有(換房例外,見上面那張條子)
+      askingName: !switchingAs,     // ★ 每次進來都問,不看瀏覽器記得什麼;只有換房不問
       roomDraft: "",                // 建新房間時輸入的名字
       roomError: "",                // 房間那一區的錯誤訊息
       pendingRoom: "",              // 選好的房間(還沒進場)
@@ -475,6 +493,7 @@ createApp({
     this.unread.markRead(this.lastId);
     this.startTimers();
     this.bindGlobalKeys();
+    this.bindFarewell();
     this.jumpToAnchorIfAny();
   },
 
@@ -567,11 +586,20 @@ createApp({
       }
 
       /* watcher 帶的是【現在】的名字。這也是為什麼改名後必須重建連線 ——
-         這個網址在連上的那一刻就固定了,之後改名它不會自己跟著變。 */
-      const watcher = encodeURIComponent(this.myName);
+         這個網址在連上的那一刻就固定了,之後改名它不會自己跟著變。
+
+         ★ 還沒選好名字時【不報身分】:`myName` 在空白時會回 "user"(那是發言用的
+           預設值),但拿它去報到會讓一個還卡在取名框前面的人出現在在場名單上 ——
+           一個誰都還不是的幽靈,而且下一個想叫 user 的人會被它提醒撞名。
+
+           `stream` 端點本來就支援匿名(不帶 watcher 就不列名),這裡用的正是
+           那個預留的位置:進場前匿名看,選好名字之後 myName 一變就會重建連線
+           (見 watch 的 myName),那時才報到。**不必發明新機制。** */
+      const watcher = this.name.trim() ? encodeURIComponent(this.name.trim()) : "";
+      const watcherParam = watcher ? `&watcher=${watcher}` : "";
 
       this.stream = useStream({
-        url: `/api/rooms/${this.room}/stream?since_id=${this.lastId}&watcher=${watcher}`,
+        url: `/api/rooms/${this.room}/stream?since_id=${this.lastId}${watcherParam}`,
 
         onMessage: function (message) {
           self.handleIncoming(message);
@@ -600,6 +628,24 @@ createApp({
         //   不重載的話,一個剛上線的 agent 要等到你重整頁面才會出現在派任務選單裡。
         self.loadAgents();
       }, PRESENCE_POLL_MS);
+    },
+
+    /** 離開這一頁時跟伺服器說一聲,別讓自己變成在場名單上的鬼影。
+     *
+     * ★ 用 `pagehide` 而不是 `beforeunload`:後者在手機瀏覽器上常常不觸發
+     *   (切到背景被系統回收時就沒了),而 `pagehide` 兩種情況都會發。
+     *
+     * ★★ 它涵蓋的不只是關分頁 —— 重新整理、上一頁、關瀏覽器全都會經過這裡。
+     *   換房那條路另外有一次(見 goToRoom),兩邊都送是刻意的:
+     *   **告別是盡力而為的動作,重複送沒有壞處,漏送才有。**
+     */
+    bindFarewell() {
+      const self = this;
+      window.addEventListener("pagehide", function () {
+        if (self.name) {
+          self.api.leaveRoom(self.room, self.name);
+        }
+      });
     },
 
     /** Esc 鍵:有視窗先關視窗,沒有的話取消「回覆某則」。 */
@@ -725,13 +771,25 @@ createApp({
       this.nameChecking = true;
       try {
         const taken = await this.findNameConflict(name);
-        if (taken === "online") {
-          this.nameError = "「" + name + "」現在有人正在用,換一個吧";
-          return;
-        }
-        if (taken === "history" && !this.nameWarning) {
-          this.nameWarning = "之前有人用過「" + name + "」,訊息會混在一起。"
-                           + "確定的話再按一次「就叫這個」。";
+        // ★ 兩種撞名都【只提醒一次】,再按一次就放行 —— 沒有任何一種是硬擋。
+        //
+        //   在線撞名本來是硬擋的,2026-08-07 改掉,理由是它擋錯人了:
+        //   在場名單來自「直播連線還開著沒有」,而連線死掉最久要 15 秒才被發現。
+        //   換房會重新載入頁面,於是新頁面查到的是【自己上一秒那條還沒斷乾淨的連線】,
+        //   使用者被自己的鬼影擋在門外,而畫面上寫的是「有人正在用」。
+        //
+        //   ★★ 更根本的一句:**在場名單本來就可能過期,拿一個會過期的東西去硬擋人
+        //   是設計錯誤。** 它適合用來提醒,不適合用來判定。
+        //
+        //   降級的代價誠實記著:真的兩個人同時用同一個名字會變得容易一點。
+        //   但那是罕見事件,而「被自己擋住」是每次換房都會遇到的 ——
+        //   拿罕見換高頻,划算。
+        if (taken && !this.nameWarning) {
+          this.nameWarning = taken === "online"
+            ? "「" + name + "」現在好像有人在用(也可能是你自己上一個分頁)。"
+              + "確定的話再按一次「就叫這個」。"
+            : "之前有人用過「" + name + "」,訊息會混在一起。"
+              + "確定的話再按一次「就叫這個」。";
           return;                                // 第一次只提醒,不擋
         }
       } finally {
@@ -761,6 +819,16 @@ createApp({
       if (draft) {
         params.set("name", draft);      // 讓下一頁的取名框預填,見 data()
       }
+      // ★ 已經有身分的話,留一張條子告訴下一頁「這是換房,不是重新進場」——
+      //   下一頁看到條子就直接進去,不再問名字、也不再查撞名(見 data())。
+      //   還沒進場就換房(在 modal 裡點房間)的人沒有身分,那條路照樣要問。
+      if (this.name) {
+        sessionStorage.setItem("a2a-switching-as", this.name);
+      }
+      // ★★ 走之前跟伺服器說一聲,讓它立刻把這條連線從在場名單上拿掉。
+      //   不說的話,那條線最久要 15 秒才被發現已死,而那 15 秒裡它是個「鬼」——
+      //   下一頁會查到它、以為有別人在用這個名字。
+      this.api.leaveRoom(this.room, this.name);
       window.location.search = params.toString();
     },
 
@@ -1300,7 +1368,15 @@ createApp({
     /* ── 偏好設定 ── */
 
     switchRoom(room) {
-      location.href = `?room=${encodeURIComponent(room)}`;
+      // ★ 直接轉給 goToRoom —— 這裡曾經自己寫過一行 location.href,
+      //   於是「換房」有了兩條路:進場視窗裡選房間走 goToRoom,
+      //   頂部下拉選單走這裡。兩條做的是同一件事,卻只有一條會
+      //   留下換房的條子、跟伺服器說再見。
+      //
+      //   2026-08-07 實測時撞到:修好的是 goToRoom,而使用者用的是這條,
+      //   所以「切房不該被自己的鬼擋住」在下拉選單那條路上完全沒生效。
+      //   **同一件事有兩個實作,修好一個不算修好。**
+      this.goToRoom(room);
     },
 
     /**
