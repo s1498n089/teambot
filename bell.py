@@ -314,6 +314,9 @@ class BellState:
         #
         #   初始值 0 讓「還沒對過房間進度」的期間自動安靜(0 <= 0)。
         self.start_id = 0
+        # 上一次問 hub 有沒有問到 —— 只用來決定警告要怎麼寫(見 evaluate 的閘門二)。
+        # 預設 True:還沒問過之前,沒有理由假設 hub 是壞的。
+        self.hub_reachable = True
         self.rings_this_gap = 0
         self.last_ring_at = 0.0
         self.rang_for_id = 0        # 上次是為了哪一則敲的 —— 分辨「同一批」與「新內容」
@@ -349,7 +352,12 @@ class BellState:
           在 19 秒內湧進來 → 這裡就打了 1231 個請求。修法不是幫這裡加快取,
           是讓上游不要回放(見 sse_watch)——**沒有回放,這條路本來就是稀疏的。**
         """
-        return self._fetch_last_id(f"cursor/{urllib.parse.quote(self.name)}") or 0
+        answer = self._fetch_last_id(f"cursor/{urllib.parse.quote(self.name)}")
+        # ★ 順手記下「這次問到了沒」。回 0 這個動作把兩種情況壓成同一個數字
+        #   (真的沒讀過 / 根本問不到),而**警告文案需要分得出來** ——
+        #   hub 掛掉時說「agent 可能卡住」會把人送去查錯的方向(見 evaluate 的閘門二)。
+        self.hub_reachable = answer is not None
+        return answer or 0
 
     def read_room_last_id(self) -> int | None:
         """問 hub:這個房現在最新第幾則。**問不到回 None(不是 0)。**
@@ -490,8 +498,21 @@ class BellState:
                 self.warned = False
             if self.rings_this_gap >= MAX_RINGS:
                 if not self.warned:
+                    # ★ 兩種原因,兩句話。「cursor 沒推進」有兩個可能的成因,
+                    #   而它們要人去查【完全不同的東西】:
+                    #
+                    #       agent 卡住   去看那個視窗在忙什麼
+                    #       hub 連不上   去看伺服器還在不在(agent 可能好好的)
+                    #
+                    #   2026-08-08 實地踩到:使用者重啟 hub 的那兩分鐘裡,
+                    #   這行印的是「agent 可能卡住」—— 而 agent 什麼事都沒有。
+                    #   **警告把人送去查錯的方向,比不警告更貴。**
+                    if self.hub_reachable:
+                        why = "agent 可能卡住,請人類看一眼"
+                    else:
+                        why = "但【hub 連不上】—— 先看伺服器還在不在,agent 可能是好的"
                     log(f"WARN 已敲 {MAX_RINGS} 次仍未見 cursor 推進"
-                        f"(room={self.known_last_id} cursor={cursor})— agent 可能卡住,請人類看一眼")
+                        f"(room={self.known_last_id} cursor={cursor})— {why}")
                     self.warned = True
                 return
 

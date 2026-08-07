@@ -532,6 +532,63 @@ class TestBellState:
         assert st.sync_room_head() == 900
         assert st.known_last_id == 900
 
+    def test_warning_says_hub_is_down_when_it_is(self, monkeypatch, tmp_path):
+        """★ 敲滿三次的那行警告要分得出**兩種完全不同的原因**。
+
+        「cursor 沒推進」有兩個成因,而它們要人去查完全不同的東西:
+
+            agent 卡住   → 去看那個視窗在忙什麼
+            hub 連不上   → 去看伺服器還在不在(agent 可能好好的)
+
+        2026-08-08 實地踩到:使用者重啟 hub 的那兩分鐘,這行印的是
+        「agent 可能卡住」—— 而 agent 什麼事都沒有。
+        **把人送去查錯方向的警告,比不警告更貴。**
+        """
+        lines = []
+        monkeypatch.setattr(bell_mod, "log", lambda text: lines.append(text))
+
+        st = self._bare(ring_fn=lambda text: True)
+        st.known_last_id = 100          # 落後,而且開機線在 0 以下
+        monkeypatch.setattr(st, "read_cursor", lambda: 0)
+
+        def ring_until_warned():
+            for _ in range(MAX := 10):
+                st.last_ring_at = 0     # 解除「才剛敲過」那道閘,讓它每次都敲得下去
+                st.evaluate()
+
+        # ① hub 連得上 → 說 agent 可能卡住
+        st.hub_reachable = True
+        ring_until_warned()
+        warns = [l for l in lines if l.startswith("WARN")]
+        assert warns and "agent 可能卡住" in warns[0], warns
+
+        # ② hub 連不上 → 改口,而且明說 agent 可能是好的
+        lines.clear()
+        st2 = self._bare(ring_fn=lambda text: True)
+        st2.known_last_id = 100
+        monkeypatch.setattr(st2, "read_cursor", lambda: 0)
+        st2.hub_reachable = False
+        for _ in range(10):
+            st2.last_ring_at = 0
+            st2.evaluate()
+        warns = [l for l in lines if l.startswith("WARN")]
+        assert warns and "hub 連不上" in warns[0], warns
+        assert "agent 可能卡住" not in warns[0]
+
+    def test_read_cursor_records_whether_the_hub_answered(self, monkeypatch):
+        """★ `read_cursor` 回 0 時,要記下「是沒讀過還是根本問不到」。
+
+        回 0 這個動作把兩種情況壓成同一個數字(那是刻意的,寧吵勿漏),
+        但**警告文案需要分得出來** —— 所以另外記一個旗標,不改回傳值的契約。
+        """
+        st = self._bare()
+
+        def boom(*_a, **_kw):
+            raise OSError("hub 沒開")
+        monkeypatch.setattr(bell_mod.urllib.request, "urlopen", boom)
+        assert st.read_cursor() == 0
+        assert st.hub_reachable is False, "問不到就要記下來"
+
     def test_read_room_last_id_returns_none_on_failure(self, monkeypatch):
         """★ 失敗回 None 而不是 0 —— 「讀不到」與「房間是空的」不能混為一談。"""
         def boom(*_a, **_kw):
