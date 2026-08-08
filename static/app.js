@@ -289,6 +289,10 @@ createApp({
       members: [],          // 這個房間發言過的人
       agents: [],           // 現在連著線的 agent —— 只有他們能被派任務
       present: [],          // 現在連著線的人(在場的事實來源)
+      /* 這個房間的【成員】名字:有 cursor 的人。跟 present 是兩份資料,不要混 ——
+         成員是持久的(關掉視窗還在),在場是連線(關掉就沒了)。
+         邀請按鈕靠這份判斷「他進來了沒」,理由見 api.js 的 cursors()。 */
+      roomMembers: [],
       rooms: [],
       lastId: 0,
       name: switchingAs,            // 進場前沒有身分 —— modal 填完才有(換房例外,見上面那張條子)
@@ -380,6 +384,28 @@ createApp({
         });
       }
       return targets;
+    },
+
+    /**
+     * 可以邀請進這個房的人 = **在線的 agent** 裡,還不是本房成員的那些。
+     *
+     * 兩份資料相減,而且兩份都各自來:
+     *
+     *     this.agents       GET /agents        誰現在連著線(不分房)
+     *     this.roomMembers  GET .../cursors    誰是這個房的成員
+     *
+     * ★ 不在後端做一個「可邀請的人」端點,是刻意的:那會把兩個獨立的事實
+     *   焊成一個答案,而它們的更新節奏完全不同(在線每幾秒變,成員很少變)。
+     *   相減這件事很便宜,焊死的代價卻要一直付。
+     *
+     * ★★ 只列 agent、不列人類:邀請的意思是「**讓對方的敲鈴器開始盯這個房**」,
+     *   而人類沒有敲鈴器 —— 他要進來,自己開網頁選房就好,不需要別人替他建書籤。
+     */
+    invitableAgents() {
+      const members = this.roomMembers;
+      return this.agents
+        .filter(function (agent) { return members.indexOf(agent.name) === -1; })
+        .map(function (agent) { return agent.name; });
     },
 
     /** 標題列上要顯示哪些人的頭像(最多 6 個)。 */
@@ -1014,6 +1040,21 @@ createApp({
       }
     },
 
+    /** 更新這個房間的成員名單(有 cursor 的人)。
+     *
+     * ★ 它只在【開邀請視窗的那一刻】跟【邀請成功之後】載入,不進定時輪詢:
+     *   成員變動遠比在場變動少(加入一次就一直是),而這份資料只有那個視窗在用。
+     *   為一個平常關著的視窗每 15 秒問一次,是替看不見的東西付錢。
+     */
+    async loadRoomMembers() {
+      try {
+        const data = await this.api.cursors(this.room);
+        this.roomMembers = Object.keys(data.cursors || {});
+      } catch (error) {
+        // api.js 已經記錄了。名單維持上一次的樣子
+      }
+    },
+
     async loadMembers() {
       try {
         const data = await this.api.members(this.room);
@@ -1381,6 +1422,70 @@ createApp({
 
     applyFont() {
       document.documentElement.style.setProperty("--bubble-font", this.bubbleFont + "px");
+    },
+
+    /* ── 邀請 ── */
+
+    /**
+     * 打開邀請視窗。
+     *
+     * ★ 兩份名單都在【開視窗的這一刻】才問:成員名單平常沒人看(見 loadRoomMembers),
+     *   而在線名單雖然有輪詢,但這裡要的是「按下去那一秒還在線」——
+     *   列出一個剛離線的人,按下去會建一個沒有人在用的書籤(無害,但看起來像壞掉)。
+     */
+    async openInvite() {
+      this.modal = { type: "invite", pending: "" };
+      await Promise.all([this.loadRoomMembers(), this.loadAgents()]);
+    },
+
+    /**
+     * 邀請一個 agent 進這個房 —— 兩個動作,而且順序有意義。
+     *
+     *     ① PUT cursor=0   機制:他從此是這個房的成員,他的敲鈴器半分鐘內會接上來
+     *     ② 發一則訊息      紀錄:誰邀了誰,事後查得到
+     *
+     * ★ 順序不能反。反過來的話,訊息說「他被邀請了」而書籤沒建成(①失敗),
+     *   房間裡就留下一句永遠不會成真的話 —— **而訊息只增不改,那句話會一直在那裡。**
+     *
+     * ★★ 成功的定義是【②送出去了】,不是「他真的連上來了」。後者最多要等 30 秒,
+     *   而按鈕不能轉 30 秒。那 30 秒是敲鈴器的工作,畫面不替它擔保 ——
+     *   畫面只負責說「我把書籤放好了」,那句話當下就是真的。
+     *
+     * ★★★ 訊息裡**不 @ 對方**,是刻意的:@ 會讓他一進門就非回話不可。
+     *   邀請只是把人拉進來,要他做事的時候再點名 —— 這跟 AGENTS.md 那句
+     *   「沒人叫 agent 加入時,加入本身就是打擾」是同一個分寸。
+     */
+    async inviteAgent(name) {
+      if (!this.modal || this.modal.pending) {
+        return;                       // 已經有一個在跑了 —— 連按不該送出兩次
+      }
+      this.modal.pending = name;
+
+      try {
+        await this.api.invite(this.room, name);
+      } catch (error) {
+        this.modal.pending = "";
+        this.showToast(`>> 邀請失敗:${error.message || error}`, false);
+        return;
+      }
+
+      const result = await this.api.send(this.room, {
+        from: this.myName,
+        text: `${this.myName} 邀請 ${name} 進來了`
+              + `(${name} 的敲鈴器會在半分鐘內自己接上)`,
+      });
+
+      /* ★ 書籤已經建好了,所以這裡【不回滾】—— 訊息沒送出只是少一筆紀錄,
+         而邀請本身是成立的。把 cursor 刪掉反而會讓一個已經生效的動作消失。 */
+      if (!result.ok) {
+        const detail = result.data.detail || result.data.error || `HTTP ${result.status}`;
+        this.showToast(`>> ${name} 已經邀請進來了,但那則紀錄沒送出:${detail}`, false);
+      } else {
+        this.showToast(`>> 已邀請 ${name} 進 ${this.room}`, true);
+      }
+
+      this.modal.pending = "";
+      await this.loadRoomMembers();   // 名單刷新 → 他從「可邀請」那份消失
     },
 
     /* ── 彈出視窗 ── */

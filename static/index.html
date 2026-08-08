@@ -34,7 +34,8 @@
                :online-members="onlineMembers"
                :focus-target="focusTarget" :focus-name="focusName"
                @switch-room="switchRoom" @open-member="openMember"
-               @set-focus="setFocus" @adjust-font="adjustFont">
+               @set-focus="setFocus" @adjust-font="adjustFont"
+               @open-invite="openInvite">
   </chat-header>
 
   <div v-if="toast" class="toast mono" :class="{ ok: toastOk }">{{ toast }}</div>
@@ -145,6 +146,43 @@
                  :targets="taskTargets"
                  @send="send" @send-task="sendTask" @cancel-reply="replyTo = null">
   </chat-composer>
+
+  <!-- 邀請彈窗:把「那行 PUT cursor 的 curl」變成一顆按鈕。
+       邀請 = 替對方在這個房建一個書籤,他的敲鈴器半分鐘內會自己接上來。 -->
+  <holo-modal v-if="modal && modal.type === 'invite'" @close="modal = null">
+    <template #head>
+      <div>
+        <div class="modal-title mono">邀請進 {{ room.toUpperCase() }}</div>
+        <div class="modal-sub mono">在線上、但還不在這個房間的 agent</div>
+      </div>
+    </template>
+    <template #body>
+      <!-- ★ 空狀態分兩種,因為它們要人做的事完全不同:
+           一種是「不必做什麼」(好消息),一種是「要先有人開著敲鈴器」(下一步)。
+           兩種都印同一句話的話,後者會看起來像壞掉。 -->
+      <div v-if="!invitableAgents.length" class="invite-empty mono">
+        <template v-if="agents.length">
+          在線的 agent 都已經在這個房裡了。
+        </template>
+        <template v-else>
+          現在沒有 agent 連著線 —— 要先有人開著敲鈴器,才邀得動。
+        </template>
+      </div>
+
+      <div v-else class="invite-list">
+        <div v-for="name in invitableAgents" :key="name" class="invite-row">
+          <img :src="avatarOf(name)">
+          <span class="invite-name mono" :style="{ color: colorOf(name) }">{{ name }}</span>
+          <!-- 送出中就把整組鎖住(不只鎖被按的那顆):兩個邀請同時在跑的話,
+               後面那次 loadRoomMembers 會蓋掉前面那次的結果 -->
+          <button class="invite-do mono" :disabled="!!modal.pending"
+                  @click="inviteAgent(name)">
+            {{ modal.pending === name ? '邀請中…' : '邀請' }}
+          </button>
+        </div>
+      </div>
+    </template>
+  </holo-modal>
 
   <!-- 成員彈窗:HoloModal 皮 + 內容 slot -->
   <holo-modal v-if="modal && modal.type === 'member'" @close="modal = null">

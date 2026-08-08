@@ -145,6 +145,23 @@ select.room-switch {
 .online-row img { width: calc(var(--bubble-font) * 1.2); height: calc(var(--bubble-font) * 1.2); cursor: pointer; border: 1px solid var(--border); }
 .online-row img:hover { border-color: var(--green); }
 .online-row img.focused { border-width: 2px; }  /* 當前鏡頭主角:頭像描邊染其色相(inline style) */
+
+/* 邀請入口。骨架跟 .font-ctl button 同一套(透明底、1px 邊),
+   因為它們在 header 上是同一級的小工具,不該長得像兩種東西。
+
+   ★ 只有【顏色】刻意比字級鈕亮半階:字級鈕是**設定**(調完就不管了),
+     這顆是**功能入口**(要被找到才有用)。所以平時用 --text 而不是 --muted,
+     但也不用 --green —— 綠是這個介面裡「動作」的顏色(送出、邀請那顆),
+     入口不該跟真正的行動搶。綠留給 hover:手已經在上面了,那時才是動作。 */
+.invite-btn {
+  background: none; border: 1px solid var(--border); color: var(--text);
+  font-family: var(--mono); font-size: var(--ui-md); line-height: 1;
+  padding: 2px 7px; cursor: pointer; border-radius: 2px;
+}
+.invite-btn:hover {
+  color: var(--green); border-color: var(--green);
+  box-shadow: 0 0 8px rgba(0, 255, 136, 0.4);
+}
 .spacer { flex: 1; }
 .meta { color: var(--muted); font-size: var(--ui-md); letter-spacing: 1px; white-space: nowrap; }
 .task-counter { color: var(--amber); }
@@ -486,6 +503,25 @@ button.send:hover { box-shadow: var(--shadow-neon-cyan); }
 .modal-link { color: var(--cyan); cursor: pointer; font-size: var(--ui-md); letter-spacing: 1px; }
 .modal-link:hover { text-shadow: 0 0 8px var(--cyan); }
 
+/* ── 邀請視窗 ── */
+.invite-list { display: flex; flex-direction: column; gap: 6px; }
+.invite-row {
+  display: flex; align-items: center; gap: 10px;
+  background: rgba(10, 10, 15, 0.5); border: 1px solid var(--border); padding: 8px 10px;
+}
+.invite-row img { width: 24px; height: 24px; border: 1px solid var(--border); }
+.invite-name { flex: 1; font-size: var(--ui-lg); letter-spacing: 1px; }
+.invite-do {
+  background: none; border: 1px solid var(--green); color: var(--green);
+  font-family: var(--mono); font-size: var(--ui-md); letter-spacing: 1px;
+  padding: 5px 12px; cursor: pointer; border-radius: 2px;
+  min-height: 32px;                     /* 觸控目標:手機上這是主要動作 */
+}
+.invite-do:hover:not(:disabled) { background: var(--green); color: var(--bg); }
+/* 送出中把整組鎖住。灰掉但【不隱藏】—— 使用者要看得到自己按了哪一個 */
+.invite-do:disabled { border-color: var(--border); color: var(--muted); cursor: default; }
+.invite-empty { color: var(--muted); font-size: var(--ui-md); line-height: 1.9; }
+
 /* ═══════════ 9. 動畫 ═══════════ */
 @keyframes lampPulse { 50% { opacity: 0.25; } }
 @keyframes jumpPulse {
@@ -508,7 +544,11 @@ button.send:hover { box-shadow: var(--shadow-neon-cyan); }
   .avatar { width: 28px; height: 28px; }
   .bubble { font-size: calc(var(--bubble-font) - 2px); max-width: 85%; } /* 手機放寬,字級隨切換同步縮 2px */
   .meta.zero { display: none; } /* 手機空間緊:TASKS 為 0 才隱藏(桌面常駐) */
-  .online-row { display: none; }
+  /* ★ 手機藏的是【頭像】,不是整列 —— 邀請鈕要留著。
+     原本這裡寫 `.online-row { display: none }`,把一整列收掉;
+     那時候列上只有頭像(純資訊,擠掉不損失功能)。現在列尾多了一個
+     【功能入口】,連帶藏掉的話,手機上就沒有任何地方進得去邀請視窗。 */
+  .online-row img { display: none; }
   button.send { min-height: 44px; }
   textarea { height: 64px; }
 }

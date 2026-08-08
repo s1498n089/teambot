@@ -77,7 +77,7 @@ const STATUS_TEXT = {
 const ChatHeader = {
   props: ["room", "rooms", "status", "activeTasks", "onlineMembers",
           "focusTarget", "focusName"],
-  emits: ["switch-room", "open-member", "set-focus", "adjust-font"],
+  emits: ["switch-room", "open-member", "set-focus", "adjust-font", "open-invite"],
 
   computed: {
     /**
@@ -139,6 +139,13 @@ const ChatHeader = {
            :class="{ focused: isFocusedMember(member.name) }"
            :style="borderStyleFor(member.name)"
            @click="toggleFocus(member.name)">
+
+      <!-- ★ 這顆【永遠顯示】,即使現在沒有人可以邀請。
+           藏起來的話,使用者只有在「剛好有人在線又剛好不在這個房」的那一刻
+           才看得到它 —— 那等於永遠學不到這個功能存在。
+           沒有人可邀時,話由視窗裡的空狀態去說(那是一句好消息,不是錯誤)。 -->
+      <button class="invite-btn mono" title="邀請 agent 進這個房"
+              @click="$emit('open-invite')">+</button>
     </span>
 
     <span class="spacer"></span>
