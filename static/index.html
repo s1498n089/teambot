@@ -30,7 +30,12 @@
 
 <!-- 畫面的骨架:這裡只有結構,長相在 styles.css、行為在那幾支 js -->
 <div id="app" v-cloak>
-  <chat-header :room="room" :rooms="rooms" :status="status" :active-tasks="tasks.active"
+  <!-- ★ 還在選房就【整塊不渲染】header 與 footer(下面那個 chat-composer)。
+       它們講的每一件事都繫在「你在哪個房、你是誰」上,而那時兩個都還沒發生 ——
+       **藏掉的東西不可能說謊**,比逐項判斷該顯示什麼簡單得多。
+       (中間那塊 main 留著,它是空的,而空白本來就是那時候的真相。) -->
+  <chat-header v-if="!askingName"
+               :room="room" :rooms="rooms" :status="status" :active-tasks="tasks.active"
                :online-members="onlineMembers"
                :focus-target="focusTarget" :focus-name="focusName"
                @switch-room="switchRoom" @open-member="openMember"
@@ -86,7 +91,7 @@
                (2026-08-07 需求方指定:「房間多的時候我怕有問題」。) -->
           <div class="room-list">
             <select class="room-select mono"
-                    :value="pendingRoom || room"
+                    :value="roomChoice"
                     @change="pickRoom($event.target.value)">
               <option v-for="r in rooms" :key="r.name" :value="r.name">
                 {{ r.name }} ({{ r.count }} 則)
@@ -97,11 +102,11 @@
                  ★ 刪除鍵改成【只針對現在選中的那一間】—— 下拉選單裡放不進按鈕,
                    而每一間都畫一個鍵本來就是列表版才有的形狀。
                  main 不畫這個鍵 —— 伺服器用結構擋著,畫出來只會讓人按了才發現。 -->
-            <span v-if="(pendingRoom || room) !== 'main'" class="room-del"
-                  :class="{ arming: armingDelete === (pendingRoom || room) }"
-                  @click="askDeleteRoom(pendingRoom || room)"
-                  :title="armingDelete === (pendingRoom || room) ? '再按一次就真的刪掉' : '刪掉這個房間'">
-              {{ armingDelete === (pendingRoom || room) ? '確定刪?' : '✕' }}
+            <span v-if="roomChoice !== 'main'" class="room-del"
+                  :class="{ arming: armingDelete === roomChoice }"
+                  @click="askDeleteRoom(roomChoice)"
+                  :title="armingDelete === roomChoice ? '再按一次就真的刪掉' : '刪掉這個房間'">
+              {{ armingDelete === roomChoice ? '確定刪?' : '✕' }}
             </span>
           </div>
 
@@ -117,7 +122,7 @@
 
         <div class="naming-actions">
           <button class="mono naming-go" @click="confirmName">
-            進 {{ pendingRoom || room }}
+            進 {{ roomChoice }}
           </button>
         </div>
       </div>
@@ -126,7 +131,11 @@
 
   <main ref="list" @scroll="onScroll">
     <div v-if="loadingOlder" class="loading-older mono">── LOADING ──</div>
-    <div v-if="!messages.length" class="empty mono">
+    <!-- ★ 還在問名字的時候不顯示這句。兩個理由,第二個是硬的:
+         ① 它會叫使用者去對一個他【還沒選定】的房間說話
+         ② 「在下方輸入框開場」—— 而那個輸入框此刻**根本不在畫面上**(見上面的 v-if)
+         進場框後面就讓它空著 —— 空白是誠實的:那裡本來就還沒有東西。 -->
+    <div v-if="!messages.length && !askingName" class="empty mono">
       NO MESSAGES.<br>在下方輸入框開場,例如:「@alice 請和 @bob 聊聊今天想 build 什麼」
     </div>
     <template v-for="r in rows" :key="r.key">
@@ -142,7 +151,7 @@
 
   <button v-if="newBelow" class="newmsg-btn mono" @click="jumpBottom">&gt;&gt; NEW MESSAGES ({{ newBelow }})</button>
 
-  <chat-composer ref="composer" :name="name" :room="room" :reply-to="replyTo"
+  <chat-composer v-if="!askingName" ref="composer" :name="name" :room="room" :reply-to="replyTo"
                  :targets="taskTargets"
                  @send="send" @send-task="sendTask" @cancel-reply="replyTo = null">
   </chat-composer>

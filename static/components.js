@@ -122,6 +122,9 @@ const ChatHeader = {
   },
 
   template: `
+  <!-- ★ 這整個 header 在「還沒選房」時【不會被渲染】(見 index.html)。
+       所以底下不必有任何「現在是不是還在選房」的判斷 ——
+       能走到這裡就代表房間與身分都已經定了。 -->
   <header>
     <span class="hdr-title mono">&gt;&gt; ROOM_{{ room.toUpperCase() }}</span>
 

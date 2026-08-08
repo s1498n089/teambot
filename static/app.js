@@ -387,6 +387,35 @@ createApp({
     },
 
     /**
+     * 進場框裡「現在選中的是哪一間」—— **下拉、刪除鍵、進場按鈕共用這一個答案**。
+     *
+     * ★ 以前三處各自寫 `pendingRoom || room`,而 `room` 預設是 main。
+     *   在一個【沒有 main 的 hub】上,那個值對不上任何一個 option,於是:
+     *
+     *       下拉      瀏覽器只好顯示第一個(lab)
+     *       按鈕      照著 room 寫 ——「進 main」
+     *       按下去    進一個不存在的房
+     *
+     *   **畫面顯示 lab、按鈕寫 main**,而兩者都不是使用者選的。
+     *   收成一個 computed 之後,三處不可能再各說各話。
+     *
+     * ★★ fallback 退到清單第一個,不是退回 main:
+     *   「預設值」的意義是「一個合理的起點」,而一個不存在的房間不是起點,是死路。
+     */
+    roomChoice() {
+      if (this.pendingRoom) {
+        return this.pendingRoom;              // 使用者選過了 —— 他說了算
+      }
+      const here = this.room;
+      const listed = this.rooms.some(function (r) { return r.name === here; });
+      if (listed) {
+        return here;
+      }
+      // 清單還沒載回來時也會走到這裡 —— 那時退回 room 是對的(下一輪就有清單了)
+      return this.rooms.length ? this.rooms[0].name : here;
+    },
+
+    /**
      * 可以邀請進這個房的人 = **在線的 agent** 裡,還不是本房成員的那些。
      *
      * 兩份資料相減,而且兩份都各自來:
@@ -470,34 +499,36 @@ createApp({
     },
   },
 
+  /**
+   * 開機只做「殼」的部分 —— **不載任何房間的內容**。
+   *
+   * ★ 以前這裡直接把 main 的訊息撈下來,於是進場框後面永遠躺著一整串對話。
+   *   那讓 main 事實上還是預設房(只是藏在毛玻璃後面),而使用者還沒選房 ——
+   *   **畫面上顯示的東西,不該是使用者還沒做的選擇。**
+   *
+   * ★★ 留在這裡的兩樣是【進場框自己要用的】:
+   *
+   *       loadConfig   顏色與 @ 規則(整個介面的設定,不屬於任何房)
+   *       loadRooms    「去哪一間?」那個下拉的內容 —— 沒有它進場框是空的
+   *
+   *   其餘全部搬進 enterRoom(),見那邊的清單。
+   */
   async mounted() {
     toastBus.show = this.showToast;   // api.js 的通知管道在這裡接上
     this.applyFont();                 // 套用記住的字級
 
-    // 順序有意義:先拿設定(@某人 規則與顏色),再拿訊息,最後平行載入其他資料
     await this.loadConfig();
-    await this.loadFirstPage();
+    await this.loadRooms();
 
-    // 上次離開時已經看完了 → 不用畫未讀線
-    if (this.unread.afterId >= this.lastId) {
-      this.unread.afterId = 0;
-    }
-
-    await Promise.all([
-      this.tasks.load(),
-      this.loadMembers(),
-      this.loadRooms(),
-      this.loadPresence(),
-      this.loadAgents(),
-    ]);
-    this.scrollToBottom();
-
-    this.openStream();
-    this.unread.markRead(this.lastId);
-    this.startTimers();
+    // 綁定不載資料,兩種狀態都要有(Esc 關視窗、離開時的告別)
     this.bindGlobalKeys();
     this.bindFarewell();
-    this.jumpToAnchorIfAny();
+
+    // ★ 還在問名字 = 還沒選房。換房回來的人身上有條子(見 data()),
+    //   askingName 已經是 false,那條路直接進去,不必再按一次。
+    if (!this.askingName) {
+      await this.enterRoom();
+    }
   },
 
   watch: {
@@ -622,6 +653,50 @@ createApp({
      *   隨著 STANDBY 那個狀態一起沒了(2026-08-08)。**狀態消失,伺候它的機制也要跟著走**,
      *   不然會留下一個每分鐘跑一次、算完沒有人看的迴圈。
      */
+    /**
+     * 真的進到一個房間:把它的內容載進來、掛上直播、開始輪詢。
+     *
+     * ★ 這一整段本來全在 mounted 裡 —— 也就是「開頁就跑」。搬出來的時候
+     *   要一個一個確認**誰在搭這班便車**,因為它們沒有一個是自己被呼叫的:
+     *
+     *       loadFirstPage    訊息本體
+     *       unread.afterId   未讀線的位置 —— 它讀 lastId,所以必須排在訊息之後
+     *       tasks / members / presence / agents   側邊那些數字
+     *       scrollToBottom   捲到底(要等訊息畫出來才有意義)
+     *       openStream       直播連線
+     *       markRead         把未讀紅點清掉
+     *       startTimers      每 15 秒重問在場名單
+     *       jumpToAnchorIfAny 網址帶 #<訊息id> 時跳過去
+     *
+     *   漏掉任何一個都不會報錯,只會有一樣東西安靜地不動了 ——
+     *   **拆一個「順便做了很多事」的函式,危險的從來不是它做的那件事。**
+     *
+     * ★★ 兩條路會走到這裡:開頁時身上就有條子(換房回來),
+     *   以及在進場框按下「就叫這個」而房間沒變(見 confirmName)。
+     *   房間有變的話走的是 goToRoom —— 那條路重新載入頁面,由 mounted 接手。
+     */
+    async enterRoom() {
+      await this.loadFirstPage();
+
+      // 上次離開時已經看完了 → 不用畫未讀線
+      if (this.unread.afterId >= this.lastId) {
+        this.unread.afterId = 0;
+      }
+
+      await Promise.all([
+        this.tasks.load(),
+        this.loadMembers(),
+        this.loadPresence(),
+        this.loadAgents(),
+      ]);
+      this.scrollToBottom();
+
+      this.openStream();
+      this.unread.markRead(this.lastId);
+      this.startTimers();
+      this.jumpToAnchorIfAny();
+    },
+
     startTimers() {
       const self = this;
 
@@ -801,11 +876,24 @@ createApp({
 
       this.name = name;
       this.askingName = false;
-      // ★ 名字【不寫進 localStorage】—— 見 data() 的說明。
-      //   選好的房間跟現在的不一樣就換過去(換房要重新掛直播與撈訊息)。
-      if (this.pendingRoom && this.pendingRoom !== this.room) {
-        this.goToRoom(this.pendingRoom);
+      /* ★ 名字【不寫進 localStorage】—— 見 data() 的說明。
+         選好的房間跟現在的不一樣就換過去(換房要重新掛直播與撈訊息)。
+
+         ★★ 這裡看的是 `roomChoice` 而不是 `pendingRoom`:使用者沒動下拉時
+         pendingRoom 是空的,但畫面上顯示的可能是 fallback 選出來的那一間
+         (見 roomChoice)。照 pendingRoom 判斷的話,他會進到【畫面上沒寫的那個房】。 */
+      const target = this.roomChoice;
+      if (target && target !== this.room) {
+        this.goToRoom(target);
+        return;
       }
+
+      /* ★ 房間沒變的那條路,以前【什麼都不用做】—— 因為開頁時就把 main 撈好了,
+         關掉進場框就看得到。現在開頁不撈任何房,所以這裡必須自己把它載進來。
+
+         這一行就是「拆掉便車之後,原本搭車的人得自己走」的那一步:
+         那個空的 else 分支不是沒事做,是它的事**被別人順便做完了**。 */
+      await this.enterRoom();
     },
 
     /**
