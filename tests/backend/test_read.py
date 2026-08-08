@@ -94,8 +94,8 @@ class TestHandsOverThePen:
         http = FakeHTTP([{"messages": [{"id": 9, "from": "bob", "text": "hi"}], "last_id": 9}])
         run(monkeypatch, http, "--name", "alice", "--expect", "8")
         out = capsys.readouterr().out
-        assert "say.py --name alice --expect 9" in out           # 要發言
-        assert "PUT" in out and "cursor/alice?last_id=9" in out  # 不發言
+        assert "say.py --name alice --room main --expect 9" in out  # 要發言
+        assert "PUT" in out and "cursor/alice?last_id=9" in out     # 不發言
 
     def test_cursor_command_carries_the_room(self, workspace, monkeypatch, capsys):
         """★ cursor 一房一份,所以那行指令必須帶著房間 —— 少了它就推錯房。
@@ -107,6 +107,22 @@ class TestHandsOverThePen:
         http = FakeHTTP([{"messages": [{"id": 9, "from": "bob", "text": "hi"}], "last_id": 9}])
         run(monkeypatch, http, "--name", "alice", "--expect", "8", "--room", "lab")
         assert "/api/rooms/lab/cursor/alice?last_id=9" in capsys.readouterr().out
+
+    def test_say_command_carries_the_room_too(self, workspace, monkeypatch, capsys):
+        """★★ 【發言】那行也要帶房間 —— 而它一度沒帶,這是多房之後最貴的一個漏。
+
+        隔壁那條測的是 cursor 那行。兩行印在一起、長得像一對,
+        所以**只有一行帶房名**時特別難看出來:
+
+            不發言   curl ... /api/rooms/lab/cursor/alice     ← 帶了
+            要發言   uv run say.py --name alice --expect 9    ← 沒帶
+
+        貼上去不會報錯,話會發到【預設房】—— agent 在 lab 房讀完、回的話出現在 main,
+        而 lab 房那個等回覆的人只看到沉默。**一行對、一行錯,比兩行都錯更難發現。**
+        """
+        http = FakeHTTP([{"messages": [{"id": 9, "from": "bob", "text": "hi"}], "last_id": 9}])
+        run(monkeypatch, http, "--name", "alice", "--expect", "8", "--room", "lab")
+        assert "say.py --name alice --room lab --expect 9" in capsys.readouterr().out
 
     def test_rejoin_offers_the_init_command(self, workspace, monkeypatch, capsys):
         http = FakeHTTP([{"messages": [{"id": 9, "from": "bob", "text": "hi"}], "last_id": 42},

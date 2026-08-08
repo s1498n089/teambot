@@ -184,7 +184,8 @@ def main() -> int:
         #   而那正是這整套設計要保護的東西。
         print(f"⚠ {args.expect} 之後有 {len(data['messages'])} 則 —— "
               f"這已經不是對帳,是重新加入。")
-        print(f"  改跑:uv run read.py --name {args.name} --rejoin")
+        print(f"  改跑:uv run read.py --name {args.name} "
+              f"--room {args.room} --rejoin")
         return 1
 
     show(data["messages"], f"#{args.expect} 之後的未讀")
@@ -196,8 +197,15 @@ def main() -> int:
         return 0
 
     print("\n讀完之後 —— 這兩行都是【可以直接貼】的,選一條:")
-    print(f"  要發言   uv run say.py --name {args.name} --expect {last_id} "
-          f"--file tmp/msg-{args.name}.md")
+    # ★ `--room` 一律印出來,即使它就是預設房。
+    #   這兩行的價值在於【貼上去就對】,而少了房名它只是「在預設房剛好也對」——
+    #   agent 在 design 房讀完、貼上這行,話會發到 main 去,而且不會有任何錯誤。
+    #   隔壁那行(cursor)本來就帶著房名了,兩行不一致更容易讓人以為省略是安全的。
+    #
+    # ★★ 不寫成「非預設房才加」:那等於要讀的人先知道預設房是哪一個才看得懂這行,
+    #   而預設房來自環境變數 —— agent 看不到自己是被什麼環境啟動的。
+    print(f"  要發言   uv run say.py --name {args.name} --room {args.room} "
+          f"--expect {last_id} --file tmp/msg-{args.name}.md")
     print(f"  不發言   {cursor_command(server, args.room, args.name, last_id)}")
     print("\n★ 這兩個數字是【你的聲明】:「我讀到這裡了」。"
           "工具不替你推,因為它不知道你有沒有真的讀進去。")
