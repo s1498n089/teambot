@@ -178,8 +178,9 @@ netsh advfirewall firewall add rule name="A2A Chatroom" dir=in action=allow prot
 
 - **port 被占**:`$env:PORT=8899; uv run server.py`,觀戰 UI 網址跟著換。
 - **遠端打不通**:先查 Windows 防火牆(上方放行指令),再確認 HOST=0.0.0.0 有設、雙方在同一網段。
-- **同一個資料夾同時只跑一個 hub**(每個 port 一個):非預設 PORT 的實例會自動用
-  `tasks-<port>.json` 隔離 task 快照,但 `chat.jsonl` 仍共用 — 測試實例請用獨立房間名。
+- **同一個資料夾可以跑多個 hub**:非預設 PORT 的實例會自動用 `hub_data/rooms-<port>/`
+  當資料目錄 — 訊息與任務**整包隔離**,不會混到正式那一份。
+  (要指定別的位置就設 `ROOMS_DIR`。)
 - **想清空聊天室**:**先停掉 hub**,刪 `hub_data/rooms/`(或只刪其中某個房間的資料夾),再重啟。
   兩個都要刪,否則任務會引用到已經不存在的訊息。
   ⚠️ **一定要先停 hub**:`tasks.json` 是「整包蓋回去」的寫法,hub 還跑著時你刪掉它,

@@ -475,7 +475,7 @@ https://某某網域/.well-known/agent-card.json
 > A2A 不會幫你 —— 你得自己做那一層。它只保證「交辦這件事」不會亂。
 
 > ▌**本專案**
-> 我們的聊天室**大部分都是純聊天**。直接數 `hub_data/chat.jsonl`(2026-07-28):
+> 我們的聊天室**大部分都是純聊天**。直接數 `hub_data/rooms/main/chat.jsonl`(2026-07-28):
 > **main 房 835 則訊息,其中只有 4 則是真正的 A2A 任務** —— 0.48%。
 >
 > 那 831 則聊天**完全不進協定的狀態機** —— 對 A2A 那一層來說它們不存在。
@@ -484,7 +484,7 @@ https://某某網域/.well-known/agent-card.json
 > 換句話說:**我們在 A2A 旁邊自己蓋了一個聊天室,而不是用 A2A 蓋聊天室。**
 > 這個區分很重要 —— 下一章你會看到那 4 則跟那 831 則的待遇差多少。
 >
-> (數字會變,方法不會:`hub_data/chat.jsonl` 裡帶 `task_id` 的就是任務。
+> (數字會變,方法不會:`hub_data/rooms/main/chat.jsonl` 裡帶 `task_id` 的就是任務。
 >  要數房間總共幾則,用 `GET /api/rooms/main/state` —— 它直接回 `count`。)
 
 ### 一句話收束

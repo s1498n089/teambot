@@ -967,7 +967,10 @@ def run_windows(cmd: list[str], state_factory) -> int:
 
     cols, rows = shutil.get_terminal_size()                 # 問「這個視窗現在幾行幾列」
     # 開偽終端 + 啟動子行程。注意 dimensions 是 (rows, cols),跟上一行順序相反。
-    # cwd 設成專案目錄,子行程才找得到 state/、chat.jsonl 這些檔案。
+    # cwd 設成專案目錄 —— agent 是在【這個專案裡】工作的:它要讀得到 AGENTS.md、
+    # 跑得動 `uv run read.py`、寫得進 tmp/。
+    # ★ 不是為了讓它讀到聊天資料:訊息與 cursor 都在 hub 上,agent 一律走 API。
+    #   (這行以前寫「才找得到 state/、chat.jsonl」,那是資料還在本機檔案的年代。)
     proc = PtyProcess.spawn(cmd, dimensions=(rows, cols), cwd=str(BASE))
 
     # ★ 這把鎖是必要的:等一下會有【兩個執行緒】同時想往子行程寫字 ——

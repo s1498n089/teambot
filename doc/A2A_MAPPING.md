@@ -1,7 +1,8 @@
 # A2A_MAPPING — 聊天室 ↔ A2A Protocol 1.0 對映設計
 
 > 定位:**A2A Protocol(a2a.py)是底層協定;聊天室(/api/* + UI)是它的可視化層。**
-> 兩層共用同一份訊息流(MessageStore / chat.jsonl),所以 UI 看得到所有 A2A 往來。
+> 兩層共用同一份訊息流(MessageStore,落地在 `<rooms_dir>/<房名>/chat.jsonl`),
+> 所以 UI 看得到所有 A2A 往來。
 
 ## 核心對映
 
@@ -61,10 +62,11 @@
 
 ## 目前邊界(已知取捨)
 
-- Task 持久化於 tasks.json(重啟完整復原,含 deadline 剩餘時間)。
-  同一個資料夾跑多個 hub 時,兩個檔案的共享性**不一樣**:
-  `tasks.json` 按埠隔離(非預設埠自動用 `tasks-<port>.json`),`chat.jsonl` **所有實例共用** ——
-  所以測試實例請用獨立房間名,否則訊息會混進同一條流
+- Task 持久化於 `<rooms_dir>/<房名>/tasks.json`(重啟完整復原,含 deadline 剩餘時間)。
+  **訊息與任務住在同一個房間資料夾**,所以「刪一個房」就是刪一個目錄,
+  不必去兩個地方各清一次然後祈禱順序對。
+  ★ 同一個資料夾跑多個 hub 時,用 `ROOMS_DIR` 指到不同目錄就完全隔離
+  (非預設埠會自動這麼做)。
 - 只支援 TextPart;無 artifacts
 - **認證:沒有**(2026-08-07 拔掉,原本是 AUTH=on 才生效的 bearer token)。
   寫入不需要鑰匙,名字自報;Agent Card 因此**不宣告** securitySchemes ——
