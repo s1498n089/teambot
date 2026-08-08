@@ -1030,6 +1030,24 @@ createApp({
      * @param {object} message 新訊息
      */
     handleIncoming(message) {
+      /* ★★★ 直播這條線上有【兩種東西】,而它們的差別是「有沒有 id」:
+
+             訊息   有 id  —— 要進畫面、要推進續傳游標
+             訊號   沒有 id —— 例如強制敲鈴、在場名單變動,只是通知,不是內容
+
+         這一行以前不存在,而少了它會出事:下面那個 `message.id <= this.lastId`
+         在 id 是 undefined 時算出 **false**(JS 的 NaN 比較永遠是 false),
+         於是訊號被當成訊息一路往下走 —— `this.lastId` 被寫成 undefined,
+         畫面多一則空泡泡,而**下次斷線重連時 since_id 也是 undefined**,
+         伺服器就把整個房間重播一遍。
+
+         ★ 那個 bug 一直都在(強制敲鈴就會觸發),只是要「按了敲鈴、又剛好斷線重連」
+           兩件事疊起來才看得出來,所以躲了很久。 */
+      if (message.id === undefined) {
+        this.handleSignal(message);
+        return;
+      }
+
       // 剛連線時伺服器會補送一段,可能跟已經有的重疊 —— 舊的直接丟掉
       if (message.id <= this.lastId) {
         return;
@@ -1042,6 +1060,20 @@ createApp({
       this.bumpMemberActivity(message);
       this.refreshTasksIfRelevant(message);
       this.settleViewport(wasNearBottom);
+    },
+
+    /** 處理直播上的【訊號】(沒有 id 的那種)。
+     *
+     * ★ 不認得的型別**安靜忽略**,而那是刻意的:伺服器將來會加新的訊號,
+     *   而使用者的分頁可能開著舊版的這個檔案 —— **舊前端遇到新訊號時,
+     *   正確的行為是什麼都不做**,不是壞掉、也不是在 console 洗版。
+     */
+    handleSignal(signal) {
+      if (signal.type === "presence") {
+        this.present = signal.present;
+        return;
+      }
+      // ring 之類的訊號不歸畫面管(那是敲鈴器在聽的),其餘一律忽略
     },
 
     appendMessage(message) {

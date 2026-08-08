@@ -473,13 +473,18 @@ class TestForceRing:
         assert body["online"] is False        # 沒有敲鈴器連著線
 
     def test_ring_event_reaches_the_room_stream(self, client):
-        """事件要真的流進房間的直播 —— 敲鈴器就是靠那條線收到的。"""
+        """事件要真的流進房間的直播 —— 敲鈴器就是靠那條線收到的。
+
+        ★ 這條測試不能假設「佇列裡只有我要找的那一則」:訂閱的當下 hub 會先廣播
+          一則 presence(2026-08-08 加的),所以要**在佇列裡找**,不是拿第一則。
+          寫成「第 N 則是什麼」的測試,會在每次新增一種訊號時無辜地紅。
+        """
         bus = client.app.state.hub.bus
         sub = bus.subscribe("r1", watcher="alice", is_agent=True)
         try:
             client.post("/api/rooms/r1/ring/alice")
-            assert sub.queue.qsize() == 1
-            assert sub.queue.get_nowait() == {"type": "ring", "target": "alice"}
+            events = [sub.queue.get_nowait() for _ in range(sub.queue.qsize())]
+            assert {"type": "ring", "target": "alice"} in events
         finally:
             bus.unsubscribe("r1", sub)
 
@@ -558,14 +563,19 @@ class TestSSE:
                 bus.publish("ringroom", {"type": "ring", "target": "alice"})
 
             pending = asyncio.ensure_future(ring_soon())
+            # ★ 要兩幀:掛上去的當下會先來一則 presence(2026-08-08 起),ring 是第二則。
+            #   寫死 n_frames=1 的話會在 ring 到達之前就斷線,而那不是 ring 壞了。
             got = await collect_sse_frames(
-                client.app, "/api/rooms/ringroom/stream", [], n_frames=1)
+                client.app, "/api/rooms/ringroom/stream", [], n_frames=2)
             await pending
             return got
 
         frames = asyncio.run(drive())
-        assert '"ring"' in frames[0] and '"alice"' in frames[0]
-        assert "id:" not in frames[0]          # 沒有 id 就不寫那一行(續傳點不受影響)
+        # ★ 不假設它是第幾幀 —— 訊號的種類會隨時間增加
+        ring_frames = [f for f in frames if '"ring"' in f]
+        assert ring_frames and '"alice"' in ring_frames[0]
+        # 沒有 id 就不寫那一行(續傳點不受影響)—— 每一幀訊號都要成立
+        assert all("id:" not in frame for frame in frames)
 
     def test_slow_subscriber_marked_dead(self, make_app):
         """backpressure:佇列灌滿後再 publish,訂閱者被標記淘汰(單元式驗證)。"""
@@ -613,6 +623,58 @@ class TestPresence:
         during, after = asyncio.run(flow())
         assert during and "alice" in during[0]   # 連線期間在場
         assert after[0] == []                    # 連線結束即離場
+
+    def test_presence_is_pushed_not_only_polled(self, client):
+        """★★ 有人進出時,hub 要【主動廣播】在場名單 —— 不能只等別人來問。
+
+        2026-08-08 之前,在場名單只有一條路徑:前端每 15 秒問一次。
+        於是「誰上線了」最久要等 15 秒才看得到,而 **hub 在那一刻就知道了** ——
+        知道的那一方沒有把話傳出去。
+
+        ★ 這條測的是「有沒有推」,不是「多快」:推出去之後對方收不收得到
+          是另一件事(斷線就漏了),所以前端那個輪詢仍然要留著當保底。
+        """
+        bus = client.app.state.hub.bus
+        watcher = bus.subscribe("pr", watcher="watching-eye")
+        try:
+            # ★★ 順帶釘住一件反直覺的事:**你會收到自己上線那一則**。
+            #   直覺會說「我連上的那一瞬間,我還沒開始聽,所以聽不到自己」——
+            #   但這裡的訂閱是【先建佇列、再廣播】,而佇列會緩衝:
+            #   等串流開始讀的時候,那一則還在裡面等著。
+            #   所以「進場之後要自己再問一次」那個補丁**不需要**。
+            mine = [watcher.queue.get_nowait() for _ in range(watcher.queue.qsize())]
+            assert any(e.get("type") == "presence" and "watching-eye" in e["present"]
+                       for e in mine), "自己上線的那一則,自己也要收得到"
+
+            joiner = bus.subscribe("pr", watcher="newcomer")
+            events = [watcher.queue.get_nowait() for _ in range(watcher.queue.qsize())]
+            presence = [e for e in events if e.get("type") == "presence"]
+            assert presence, "有人進來,在場的人要【立刻】收到通知"
+            assert "newcomer" in presence[-1]["present"]
+
+            bus.unsubscribe("pr", joiner)
+            events = [watcher.queue.get_nowait() for _ in range(watcher.queue.qsize())]
+            presence = [e for e in events if e.get("type") == "presence"]
+            assert presence, "有人離開也要"
+            assert "newcomer" not in presence[-1]["present"]
+        finally:
+            bus.unsubscribe("pr", watcher)
+
+    def test_presence_event_carries_no_id(self, client):
+        """★ presence 事件**不能有 id** —— id 是訊息的續傳游標。
+
+        給訊號一個 id 會讓瀏覽器的 Last-Event-ID 跳到一個不是訊息的位置,
+        斷線重連時就從錯的地方續傳。前端也靠「有沒有 id」分辨訊息與訊號。
+        """
+        bus = client.app.state.hub.bus
+        sub = bus.subscribe("pr2", watcher="someone")
+        try:
+            events = [sub.queue.get_nowait() for _ in range(sub.queue.qsize())]
+            presence = [e for e in events if e.get("type") == "presence"]
+            assert presence
+            assert all("id" not in event for event in presence)
+        finally:
+            bus.unsubscribe("pr2", sub)
 
     def test_leave_removes_watcher_immediately(self, client):
         """★★ 「我要走了」要【立刻】生效,不能等 keep-alive 超時才發現。

@@ -646,6 +646,7 @@ class EventBus:
         """
         sub = Subscription(watcher=watcher, is_agent=is_agent)
         self.subs.setdefault(room, set()).add(sub)
+        self.publish_presence(room)
         return sub
 
     def watchers(self, room: str) -> set[str]:
@@ -709,6 +710,7 @@ class EventBus:
 
     def unsubscribe(self, room: str, sub: Subscription) -> None:
         self.subs.get(room, set()).discard(sub)
+        self.publish_presence(room)
 
     def mark_gone(self, room: str, watcher: str) -> int:
         """某個名字說「我要走了」—— 把他在這個房的連線標成死的。回傳標了幾條。
@@ -734,7 +736,26 @@ class EventBus:
             if sub.watcher == watcher and not sub.dead:
                 sub.dead = True
                 gone += 1
+        if gone:
+            self.publish_presence(room)
         return gone
+
+    def publish_presence(self, room: str) -> None:
+        """把「這個房現在誰在」廣播出去。
+
+        ★ 為什麼需要它:在場名單以前**只能用問的**(前端每 15 秒問一次),
+          所以有人進出之後,畫面最久要等 15 秒才知道。而 hub 在那一刻就知道了 ——
+          **知道的那一方沒有把話傳出去**,那是 2026-08-08 才補上的一條線。
+
+        ★★ 這則事件【沒有 id】,而那是刻意的:id 是訊息的續傳游標,
+          給訊號一個 id 會讓瀏覽器的 Last-Event-ID 跳掉。
+          前端那邊靠「有沒有 id」分辨訊息與訊號(見 app.js 的 handleIncoming)。
+
+        ★★★ 廣播出去【不代表對方一定收得到】(斷線的那幾秒就漏了),
+          所以前端那個 15 秒的輪詢**照樣留著當保底** ——
+          同一條老規矩:通知可以漏,資料不會丟。
+        """
+        self.publish(room, {"type": "presence", "present": sorted(self.watchers(room))})
 
     def publish(self, room: str, msg: dict) -> None:
         for sub in list(self.subs.get(room, set())):
