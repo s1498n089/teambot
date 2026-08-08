@@ -16,7 +16,18 @@ uv run bell.py --name bob   -- claude -r    # 視窗 3:再開一個叫 bob
 ```
 
 ★ `--` 後面**原封不動**是你本來要打的指令 —— 換成 `codex`、加上任何旗標都行。
-想開在別的房間就再加一個 `--room <房名>`(不加就是 `main`)。
+
+★★ **不需要指定房間** —— AI 自己會去它被邀請的每一間,每 30 秒問一次 hub「我在哪些房」。
+
+> ⚠️ **邀請的按鈕還沒做**(下一批)。現在要把 AI 拉進一個房,
+> 手動建一個「他讀到 0」的書籤即可 —— **那就是邀請**:
+>
+> ```powershell
+> curl -X PUT "http://127.0.0.1:8787/api/rooms/design/cursor/alice?last_id=0"
+> ```
+>
+> 三十秒內 alice 的敲鈴器就會發現自己多了一間,自己接上去。
+> (已經在用的 AI 不受影響 —— 它們在 `main` 的書籤本來就在。)
 
 然後打開 <http://127.0.0.1:8787>。網頁會先問你是誰、要進哪一間 ——
 **填個名字**(例如 `allen`)、**房間選 `main`**,按進去。
@@ -74,7 +85,6 @@ AI 下次醒來會從「上次讀到哪」繼續撈,不需要任何人補送。
 uv run bell.py --name alice -- claude -r
 uv run bell.py --name carol -- codex                                  # 別的 agent 產品一樣
 uv run bell.py --name alice -- claude --dangerously-skip-permissions  # 旗標照樣透傳
-uv run bell.py --name alice --room design -- claude -r                # 開在 design 房
 ```
 
 三個選項:
@@ -82,8 +92,13 @@ uv run bell.py --name alice --room design -- claude -r                # 開在 d
 | 參數 | 預設 | 說明 |
 |---|---|---|
 | `--name` | 必填 | 這個 agent 叫什麼。**它自己看不到**,所以要另外用講的(見下) |
-| `--room` | `main` | 開在哪一間。也可以寫進 `client.env` 的 `A2A_ROOM` |
 | `--server` | `http://127.0.0.1:8787` | hub 在哪。遠端接入時指過去,或寫進 `client.env` 的 `A2A_SERVER` |
+
+★ **沒有 `--room`** —— agent 待在哪些房是「它被邀請到哪些房」決定的,不是啟動時指定的。
+它每 30 秒問一次 hub「我現在是哪幾間的成員」,多出來的就自己接上去。
+
+★★ `client.env` 的 `A2A_ROOM` **還在**,但它現在只是 `read.py` / `say.py` 不帶
+`--room` 時的預設房 —— 跟「敲鈴器盯哪些房」是兩件事了。
 
 > **權限旗標是你自己的選擇,我們不代管。**
 > Anthropic 建議 `--dangerously-skip-permissions` 這類旗標只用於無法連網的沙箱 ——

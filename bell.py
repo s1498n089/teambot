@@ -153,16 +153,31 @@ PATROL_SECONDS = 5          # 節拍器一圈;也是【有新訊息時】的最�
 MAX_RINGS = 3               # 同一段落後最多敲幾次,之後改印警告(不騷擾設計)
 SSE_READ_TIMEOUT = 60       # server 每 15 秒有 keep-alive,60 秒沒動靜視為死連線
 CURSOR_READ_TIMEOUT = 5     # 問 hub「他讀到哪」的等待上限 —— 問不到就當作 0(見 read_cursor)
+# 多久問一次「我現在是哪些房的成員」。
+#
+# ★ 這個數字就是**「被邀請」到「發現自己被邀請」之間的最長距離**。
+#   30 秒是拿「多快發現」換「多常打擾 hub」的取捨:被拉進一個新房不是急事
+#   (那個房通常正要開始討論),而每 30 秒一個很輕的 GET,幾個 agent 也不痛。
+#
+# ★★ 為什麼不做成推播讓它變即時:**敲鈴器還不知道那個房存在,
+#   所以它沒有任何連線可以接收那個房的通知。** 這不是偷懶,是結構決定的 ——
+#   詳見 Bell.sync_rooms_forever。
+ROOM_SYNC_SECONDS = 30
 RECONNECT_MAX_BACKOFF = 30
 
 
-def bell_line(name: str, room_last_id: int) -> str:
-    """一般鈴聲:房間往前了。
+def bell_line(name: str, room: str, room_last_id: int) -> str:
+    """一般鈴聲:某個房間往前了。
 
     ★ 為什麼帶名字:**那是 agent 唯一查得到自己是誰的地方。**
       敲鈴器用偽終端把 agent 包起來,被包住的行程看不見自己是被誰、用什麼名字啟動的
       (`--name` 只在敲鈴器自己的 argv 裡)。名字錯了,agent 會去讀別人的進度、
       用別人的身分發言。而鈴聲每次重講一次,對話被壓縮之後也救得回來。
+
+    ★★ 為什麼帶房名:**agent 可以同時待在好幾個房**(2026-08-08 起)。
+      以前它一輩子只有一個房,所以「房間到 #N」不必說是哪一個;
+      現在不說的話,它會拿著一個號碼不知道要去哪裡對帳 ——
+      **通知裡少了「在哪」,收到的人就得猜。**
 
     ★ 為什麼是「房間到 #N」而不是「cursor updated」:**後者是假話。**
       敲鈴器【只讀 cursor,永遠不寫】(見檔頭的鐵則)——
@@ -173,10 +188,10 @@ def bell_line(name: str, room_last_id: int) -> str:
       但 agent 拿自己的 cursor 去對帳,會拿到 ≥ 這個數字的全部。
       它講的是「房間在哪」,不是「你讀到哪」—— 不可能被誤讀成已經追平。
     """
-    return f"{BELL_PREFIX} 房間到 #{room_last_id}(你是 {name})"
+    return f"{BELL_PREFIX} {room} 到 #{room_last_id}(你是 {name})"
 
 
-def force_bell_line(name: str) -> str:
+def force_bell_line(name: str, room: str) -> str:
     """人類按下的強制敲鈴 —— 刻意跟一般鈴聲說不一樣的話。
 
     ★ 為什麼不能共用同一句:**強制敲鈴最常見的情況是「對帳為空」。**
@@ -188,7 +203,7 @@ def force_bell_line(name: str) -> str:
       **文字不同,agent 才知道這一下是人按的**,
       而 AGENTS.md 對這一種另有規定:就算對帳是空的也要回一句。
     """
-    return f"{BELL_PREFIX} 使用者強制敲鈴(你是 {name})"
+    return f"{BELL_PREFIX} {room} 使用者強制敲鈴(你是 {name})"
 
 
 LOG_PATH: Path | None = None  # main() 依 --name 指定;None 時退回 stderr(僅啟動失敗前)
@@ -287,6 +302,14 @@ class BellState:
     ★ 這裡永遠只讀 cursor,不寫。寫是 agent 自己的事。
       理由:能寫就能偽造「你已經讀過了」,等於自己銷毀叫醒你的證據。
       (這個「一邊寫、另一邊讀、彼此不協調」的結構,來歷見 doc/TUTORIAL.md 第 3 章)
+
+    ★★ 這個類別印出去的每一行 log 都以 `[房名]` 開頭。**多房之前那是多餘的**——
+      一個行程只盯一個房,前綴每行都一樣,等於雜訊。多房之後它是【必要的】:
+      三個房的叮咚與警告全寫進同一個 `state/bell-<名字>.log`,沒有房名就分不出
+      是哪個房在敲。而「哪個房」正是出事時第一個要問的問題。
+
+      同時這裡把 `room=123` 這個標籤改寫成「房間到 123」—— 它一直指的是
+      **房間的 last_id、不是房名**,單房時看得懂,多房時會直接把人讀錯。
     """
 
     def __init__(self, ring_fn, name: str, server: str, room: str):
@@ -473,7 +496,7 @@ class BellState:
             # ── 閘門一:追上了就沒事,順便把狀態歸零,下次落後才能重新從第 1 次算起 ──
             if self.known_last_id <= cursor:
                 if self.rings_this_gap:
-                    log(f"cursor 已追上(={cursor}),鈴聲歸位")
+                    log(f"[{self.room}] cursor 已追上(={cursor}),鈴聲歸位")
                 self.rings_this_gap = 0
                 self.warned = False
                 self.rang_for_id = self.known_last_id
@@ -511,8 +534,8 @@ class BellState:
                         why = "agent 可能卡住,請人類看一眼"
                     else:
                         why = "但【hub 連不上】—— 先看伺服器還在不在,agent 可能是好的"
-                    log(f"WARN 已敲 {MAX_RINGS} 次仍未見 cursor 推進"
-                        f"(room={self.known_last_id} cursor={cursor})— {why}")
+                    log(f"[{self.room}] WARN 已敲 {MAX_RINGS} 次仍未見 cursor 推進"
+                        f"(房間到 {self.known_last_id},cursor={cursor})— {why}")
                     self.warned = True
                 return
 
@@ -528,16 +551,17 @@ class BellState:
                 return
 
             # ── 三道都過了,真的敲下去 ──
-            delivered = self.ring_fn(bell_line(self.name, self.known_last_id))
+            delivered = self.ring_fn(bell_line(self.name, self.room, self.known_last_id))
             self.rang_for_id = self.known_last_id
             # ★ 送不進去也照樣計數。這樣子行程已經死掉時,才不會變成無限重敲狂刷紀錄檔。
             self.rings_this_gap += 1
             self.last_ring_at = now
             if delivered is False:  # 只認明確的 False;回 None 的 ring_fn 視為沒回報
-                log(f"WARN 鈴聲沒送進子行程 #{self.rings_this_gap}"
-                    f"(room={self.known_last_id} cursor={cursor})— pty 可能已關,靠重敲兜底")
+                log(f"[{self.room}] WARN 鈴聲沒送進子行程 #{self.rings_this_gap}"
+                    f"(房間到 {self.known_last_id},cursor={cursor})— pty 可能已關,靠重敲兜底")
             else:
-                log(f"叮咚 #{self.rings_this_gap}(room={self.known_last_id} cursor={cursor})")
+                log(f"[{self.room}] 叮咚 #{self.rings_this_gap}"
+                    f"(房間到 {self.known_last_id},cursor={cursor})")
 
 
     def force_ring(self) -> None:
@@ -557,8 +581,135 @@ class BellState:
             self.warned = False
             self.last_ring_at = time.monotonic()
             self.rang_for_id = self.known_last_id
-            delivered = self.ring_fn(force_bell_line(self.name))
-        log(f"叮咚(強制,人類要求){'' if delivered is not False else ' —— WARN 沒送進子行程'}")
+            delivered = self.ring_fn(force_bell_line(self.name, self.room))
+        log(f"[{self.room}] 叮咚(強制,人類要求)"
+            f"{'' if delivered is not False else ' —— WARN 沒送進子行程'}")
+
+
+class Bell:
+    """把「一個 agent 同時待在好幾個房」收在一個地方。
+
+    ═══════════ 為什麼需要這一層 ═══════════
+
+    `BellState` 的每一個欄位(`known_last_id` / `rings_this_gap` / `start_id` /
+    `warned`…)都是**一個房間各一份**的,而且它們之間的關係也是一房一份。
+    所以多房的做法不是「把每個欄位攤平成 dict」——那只是把「一房一份」
+    從物件層次搬到欄位層次,還順便讓所有既有測試失效。
+
+    **一個房一個 BellState 實例,決策層一行都不用改。** 這一層只做三件
+    「跨房才需要」的事:
+
+        誰在哪些房   定期問 hub,多出來的房就掛一條新的直播上去
+        報到         開一條【沒有房間的連線】,讓自己在一個房都沒有時也看得見
+        節拍器       **一條管全部** —— 不是每房一條
+
+    ★ 最後那個是刻意的:節拍器只是「每 5 秒回頭想一次」,而想的內容
+      (該不該敲)本來就是每個房各自判斷。開 N 條迴圈做同一件事,
+      只是把「遍歷」這個動作換成「執行緒」,而執行緒貴得多。
+
+    ★★ 敲鈴的鎖不在這裡 —— 它在 `ring_fn` 底下(`guarded_write` 的那把)。
+      所以幾個房同時想敲也不會交錯:**共用的資源在哪裡,鎖就在哪裡。**
+    """
+
+    def __init__(self, ring_fn, name: str, server: str):
+        self.ring_fn = ring_fn
+        self.name = name
+        self.server = server
+        # 房名 → 那個房的決策層。★ 只增不減:離開房間這件事目前不存在
+        #   (房間安靜下來自然就不會敲你,不需要一個「退出」動作)。
+        self.states: dict[str, BellState] = {}
+
+    def my_rooms(self) -> list[str]:
+        """問 hub:我是哪些房的成員。**問不到就回空的。**
+
+        ★ 回空的意思是「這一輪不新增房間」,不是「把已經在盯的房丟掉」——
+          `states` 只增不減,所以網路抖一下不會讓 agent 突然聾掉。
+        """
+        url = f"{self.server}/api/cursors/{urllib.parse.quote(self.name)}"
+        try:
+            req = urllib.request.Request(url, headers={"Accept": "application/json"})
+            with urllib.request.urlopen(req, timeout=CURSOR_READ_TIMEOUT) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                return [str(room) for room in data.get("rooms", [])]
+        except (OSError, ValueError, KeyError, json.JSONDecodeError):
+            return []
+
+    def join(self, room: str, child_alive) -> None:
+        """開始盯一個房:建它的決策層,掛一條直播上去。"""
+        if room in self.states:
+            return
+        state = BellState(self.ring_fn, self.name, self.server, room)
+        self.states[room] = state
+        log(f"開始盯 {room}")
+        threading.Thread(target=sse_watch,
+                         args=(self.server, room, state, child_alive),
+                         daemon=True).start()
+
+    def patrol(self, child_alive) -> None:
+        """節拍器:每 5 秒讓每個房各自想一次「該不該敲」。
+
+        ★ 一條執行緒管全部房 —— 見類別說明。
+        """
+        while child_alive():
+            time.sleep(PATROL_SECONDS)
+            for state in list(self.states.values()):
+                state.evaluate()
+
+    def sync_rooms_forever(self, child_alive) -> None:
+        """定期問「我在哪些房」,多出來的就掛上去。
+
+        ★★ **為什麼是輪詢而不是推播** —— 這條要記牢,它是結構決定的不是取捨:
+          被邀請進一個新房的時候,**敲鈴器還不知道那個房存在**,
+          所以它沒有任何連線可以接收那個房的通知。要推播就得另外開一條
+          「跟房間無關」的通道,而那條通道斷線期間漏掉的邀請,
+          最後還是得靠這個輪詢補回來 —— **保底那層無論如何都要有。**
+
+        ★ 所以延遲是「被邀請」到「發現」之間最多 ROOM_SYNC_SECONDS。
+          哪天要加速,是在這條旁邊多一條路,不是把它換掉。
+        """
+        while child_alive():
+            for room in self.my_rooms():
+                self.join(room, child_alive)
+            time.sleep(ROOM_SYNC_SECONDS)
+
+    def run(self, child_alive) -> None:
+        """把三件事跑起來:報到、節拍器、房間同步。"""
+        threading.Thread(target=lobby_watch,
+                         args=(self.server, self.name, child_alive),
+                         daemon=True).start()
+        threading.Thread(target=self.patrol, args=(child_alive,), daemon=True).start()
+        self.sync_rooms_forever(child_alive)
+
+
+def lobby_watch(server: str, name: str, child_alive) -> None:
+    """報到:掛一條【沒有房間的連線】,只為了讓自己出現在「誰在線上」。
+
+    ★ 為什麼需要:這個系統裡「在線」的事實來源是**連線開著沒有**,
+      而連線一直是綁在房間上的。一個房都還沒有的 agent 開不出任何連線,
+      於是**誰也看不到它** —— 而看不到就邀不到,新成員永遠進不來。
+
+    ★★ 它不收任何東西(伺服器那端只送 keep-alive)。這裡讀它只是為了
+      「連線還開著」這個事實本身 —— 讀到什麼完全不重要。
+
+    ★★★ 斷線就退避重連,跟房間的直播同一套:報到斷了等於從名單上消失,
+      而那會讓別人以為這個 agent 關掉了。
+    """
+    backoff = 1
+    while child_alive():
+        url = (f"{server}/api/lobby/stream"
+               f"?watcher={urllib.parse.quote(name)}&kind=agent")
+        try:
+            req = urllib.request.Request(url, headers={"Accept": "text/event-stream"})
+            with urllib.request.urlopen(req, timeout=SSE_READ_TIMEOUT) as resp:
+                log("已在大廳報到")
+                backoff = 1
+                for _ in resp:                 # 內容不重要,連著就是目的
+                    if not child_alive():
+                        return
+        except OSError as exc:
+            log(f"大廳連線斷了({exc}),{backoff}s 後重連")
+            time.sleep(backoff)
+            backoff = min(backoff * 2, RECONNECT_MAX_BACKOFF)
 
 
 def sse_watch(server: str, room: str, state: BellState, child_alive) -> None:
@@ -834,7 +985,7 @@ def run_windows(cmd: list[str], state_factory) -> int:
 
     # 到這裡才建 BellState,因為現在才有 safe_write 可以交給它。
     # (為什麼不能在 main() 就建好,見 main() 裡 state_factory 的說明)
-    state: BellState = state_factory(safe_write)
+    bell: Bell = state_factory(safe_write)
 
     def alive() -> bool:
         """子行程還活著嗎?下面每個迴圈都靠它決定要不要繼續。"""
@@ -914,30 +1065,25 @@ def run_windows(cmd: list[str], state_factory) -> int:
                 except (EOFError, OSError):
                     return  # 同 guarded_write:子行程剛走,調整視窗已無意義
 
-    def watch_room() -> None:
-        """背景執行緒:盯著 hub 的直播,有新訊息就敲鈴。"""
-        sse_watch(state.server, state.room, state, alive)
+    def watch_rooms() -> None:
+        """背景執行緒:報到、盯所有房的直播、節拍器 —— 全都在 Bell 裡面。"""
+        bell.run(alive)
 
-    def keep_ringing() -> None:
-        """背景執行緒:敲了沒反應就再敲(節拍器)。"""
-        re_ring_loop(state, alive)
-
-    # ══ 第四件事:把五個幫浦跑起來 ══
+    # ══ 第四件事:把四個幫浦跑起來 ══
     #
     # ★ 這幾行是整個函式的骨架,其他都是準備工作:
     #     pump_input   你打的字   → 子行程
     #     watch_resize 視窗大小變 → 子行程
-    #     watch_room   hub 有新訊息 → 敲鈴
-    #     keep_ringing 敲了沒反應 → 再敲
+    #     watch_rooms  hub 有新訊息 → 敲鈴(它自己再開幾條:大廳、每個房、節拍器)
     #     pump_output  子行程畫面 → 你的螢幕     ← 這個留在主執行緒
     #
     # 為什麼 pump_output 不也開一條執行緒?因為主執行緒總得有事做,
     # 而「子行程畫面沒東西了」正好就是「該收工了」——用它當結束訊號最自然。
     #
     # daemon=True 的意思是「主人走了就跟著走」:主執行緒一結束,
-    # 這四條背景執行緒會自動消失,不必一個個去叫它們停。
+    # 這些背景執行緒會自動消失,不必一個個去叫它們停。
     try:
-        for fn in (pump_input, watch_resize, watch_room, keep_ringing):
+        for fn in (pump_input, watch_resize, watch_rooms):
             threading.Thread(target=fn, daemon=True).start()
         pump_output()  # 主執行緒守輸出;子行程退出即結束
         return proc.exitstatus or 0
@@ -1035,18 +1181,13 @@ def run_posix(cmd: list[str], state_factory) -> int:
         return True
 
     # 到這裡才建 BellState,因為現在才有 ring 可以交給它。
-    state: BellState = state_factory(ring)
+    bell: Bell = state_factory(ring)
 
-    def watch_room() -> None:
-        """背景執行緒:盯著 hub 的直播,有新訊息就敲鈴。"""
-        sse_watch(state.server, state.room, state, alive)
+    def watch_rooms() -> None:
+        """背景執行緒:報到、盯所有房的直播、節拍器 —— 全都在 Bell 裡面。"""
+        bell.run(alive)
 
-    def keep_ringing() -> None:
-        """背景執行緒:敲了沒反應就再敲(節拍器)。"""
-        re_ring_loop(state, alive)
-
-    threading.Thread(target=watch_room, daemon=True).start()
-    threading.Thread(target=keep_ringing, daemon=True).start()
+    threading.Thread(target=watch_rooms, daemon=True).start()
 
     # ══ 第三件事:借用終端機,跑主迴圈,最後還回去 ══
 
@@ -1101,7 +1242,6 @@ def main() -> int:
                         help="agent 名字(他的已讀進度存在 hub 上,一房一份)")
     parser.add_argument("--server", default=os.environ.get("A2A_SERVER", "http://127.0.0.1:8787"),
                         help="hub 位址(遠端機器指向遠端 hub);預設值可寫在 client.env 的 A2A_SERVER")
-    parser.add_argument("--room", default=os.environ.get("A2A_ROOM", "main"))
     parser.add_argument("cmd", nargs=argparse.REMAINDER,
                         help="-- 之後接要包的指令,如:-- claude --resume")
     args = parser.parse_args()
@@ -1117,7 +1257,13 @@ def main() -> int:
     #   第二條路上,agent 會安靜地落回 127.0.0.1 去連【自己這台】——
     #   而遠端接入時那裡根本沒有 hub。所以在這裡補齊,兩條路合而為一。
     os.environ["A2A_SERVER"] = args.server
-    os.environ["A2A_ROOM"] = args.room
+    # ★ 這裡曾經還有一行 `os.environ["A2A_ROOM"] = args.room`,隨 `--room` 一起走了
+    #   (2026-08-08 多房)。**但 `A2A_ROOM` 這個變數本身還活著** ——
+    #   它是 read.py / say.py 不帶 `--room` 時的預設房,由 client.env 提供。
+    #
+    #   兩件事分開了:**敲鈴器盯哪些房**由「我在哪些房有 cursor」決定(會變、會長),
+    #   而**agent 的工具預設對哪個房說話**是一個設定值。
+    #   以前它們共用一個參數,所以看起來像同一件事。
 
     cmd = args.cmd[1:] if args.cmd and args.cmd[0] == "--" else args.cmd
     if not cmd:
@@ -1153,21 +1299,21 @@ def main() -> int:
 
         為什麼不在這裡直接建好就好?因為有個雞生蛋的環:
 
-            BellState 要能敲鈴  → 需要「往子行程寫字」的能力
+            Bell 要能敲鈴       → 需要「往子行程寫字」的能力
             那個能力            → 要先有子行程才存在
             子行程              → 在 run_windows / run_posix 裡面才誕生
-            而 run_*            → 又需要 BellState
+            而 run_*            → 又需要 Bell
 
         在 main() 這個時間點,子行程根本還沒開,所以建不出來。
         解法是把建構往後延:main 只交食譜,平台層開好子行程、湊齊材料後
-        才呼叫這個函式,拿到一個綁定了「這個平台的寫入方式」的 BellState。
+        才呼叫這個函式,拿到一個綁定了「這個平台的寫入方式」的 Bell。
 
         這個技巧叫【延遲建構】,傳進來的 write_fn 叫【依賴注入】。
         它是「工廠函式」(一個回傳新物件的函式),但**不是** GoF 的工廠模式 ——
-        那個模式的重點是靠多型決定要建立哪個類別,這裡永遠只建 BellState 一種。
+        那個模式的重點是靠多型決定要建立哪個類別,這裡永遠只建 Bell 一種。
 
         兩個平台傳進來的東西其實不一樣(Windows 傳吃字串的、POSIX 傳要轉 bytes 的),
-        而 BellState 完全不知道這件事 —— 那個「不知道」就是分層要換來的東西。
+        而 Bell 完全不知道這件事 —— 那個「不知道」就是分層要換來的東西。
         """
         def ring_the_bell(text: str) -> bool:
             """真正的「敲鈴」動作:把決策層給的那行字 + 送出鍵寫進子行程。
@@ -1184,12 +1330,11 @@ def main() -> int:
             #   兜底還是重敲機制(90 秒後再敲一次),代價是輸入框裡會多一行殘留。
             return write_fn(text, BELL_SUBMIT)
 
-        return BellState(ring_the_bell,
-                         name=args.name,
-                         server=args.server.rstrip("/"),
-                         room=args.room)
+        return Bell(ring_the_bell,
+                    name=args.name,
+                    server=args.server.rstrip("/"))
 
-    log(f"啟動:name={args.name} server={args.server} room={args.room} cmd={' '.join(cmd)}")
+    log(f"啟動:name={args.name} server={args.server} cmd={' '.join(cmd)}")
     # 為什麼是 "nt" 不是 "windows"?os.name 只有 'posix' 與 'nt' 兩個值(官方原話),
     # 它問的是「系統 API 是哪一家的」,不是商品名。nt 來自 Windows NT ——
     # 1993 年那條跟 DOS 分家的核心血脈,今天的 Win10/11 都是它的後代

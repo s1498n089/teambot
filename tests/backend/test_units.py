@@ -292,14 +292,17 @@ class TestSpecConstants:
         assert bell_mod.BELL_SUBMIT == chr(13)  # ConPTY 送出鍵,換行符會讓鈴聲躺在輸入框
 
     def test_bell_line_carries_name_and_room(self):
-        """一般鈴聲要帶名字與房間位置,而且前綴不能動。
+        """一般鈴聲要帶名字、**房名**與房間位置,而且前綴不能動。
 
         名字:agent 沒有別的地方查得到自己是誰(pty 包住的行程看不見 argv)。
+        房名:agent 可以同時待在好幾個房(2026-08-08 起)——
+              **不說是哪一間,它拿著號碼不知道去哪對帳。**
         房間位置:給盯著畫面的人看的進度;對 agent 是【下限】,過時無害。
         前綴:文件教「凡見 [A2A-BELL] 一律對帳」,前綴變了那句話就失效。
         """
-        line = bell_mod.bell_line("alice", 955)
+        line = bell_mod.bell_line("alice", "design", 955)
         assert "alice" in line and "955" in line
+        assert "design" in line, "多房之後,鈴聲不說房名等於沒說完"
         assert line.startswith(bell_mod.BELL_PREFIX)
 
     def test_force_bell_line_says_something_different(self):
@@ -309,9 +312,10 @@ class TestSpecConstants:
           而 AGENTS.md 教「撈到空的不用回報」—— 兩種鈴長得一樣的話,
           agent 會醒來、看一眼、安靜回去睡,而按按鈕的人正是為了打破那個安靜。
         """
-        forced = bell_mod.force_bell_line("alice")
+        forced = bell_mod.force_bell_line("alice", "design")
         assert forced.startswith(bell_mod.BELL_PREFIX) and "alice" in forced
-        assert forced != bell_mod.bell_line("alice", 955)
+        assert "design" in forced, "強制鈴也要說是哪個房 —— 理由同一般鈴"
+        assert forced != bell_mod.bell_line("alice", "design", 955)
         assert "強制" in forced
 
     def test_term_restore_contract(self):
@@ -421,6 +425,137 @@ class TestGuardedWrite:
         got = []
         bell_mod.guarded_write(got.append, "hi", lock=threading.Lock())
         assert got == ["hi"]                     # 不是 ["h", "i"]
+
+
+# ---------- Bell(跨房協調層)----------
+
+class TestBell:
+    """一個 agent 同時待在好幾個房 —— 這一層只做「跨房才需要」的事。
+
+    ★ 決策層(BellState)一房一個實例,**一行都沒改** ——
+      所以下面那整組 TestBellState 原封不動繼續有效。
+      多房如果做成「把每個欄位攤平成 dict」,那組測試會全部失效,
+      而那正是「一房一份」從物件層次掉到欄位層次的代價。
+    """
+
+    def _bell(self, ring_fn=lambda text: True):
+        return bell_mod.Bell(ring_fn, name="alice", server="http://test")
+
+    def test_my_rooms_asks_the_cursor_endpoint(self, monkeypatch):
+        """問的是 `/api/cursors/<名字>` —— 「有 cursor 檔就是那個房的成員」。"""
+        seen = []
+
+        class Resp(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return False
+
+        def fake_urlopen(req, *_a, **_kw):
+            seen.append(req.full_url)
+            return Resp(b'{"name":"alice","rooms":["main","design"]}')
+
+        monkeypatch.setattr(bell_mod.urllib.request, "urlopen", fake_urlopen)
+        assert self._bell().my_rooms() == ["main", "design"]
+        assert seen == ["http://test/api/cursors/alice"]
+
+    def test_rooms_are_never_dropped_when_the_hub_goes_quiet(self, monkeypatch):
+        """★★★ 已經在盯的房**只增不減**。
+
+        hub 重啟或網路抖一下時 `my_rooms()` 會回空的 —— 如果那時清掉 states,
+        agent 會**安靜地從所有房間消失**,而且沒有任何錯誤訊息。
+        **寧可多盯一個不存在的房,也不要少盯一個真的房。**
+        """
+        bell = self._bell()
+        monkeypatch.setattr(bell_mod.threading, "Thread",
+                            lambda **kw: type("T", (), {"start": lambda s: None})())
+
+        bell.join("main", lambda: False)
+        assert set(bell.states) == {"main"}
+
+        def boom(*_a, **_kw):
+            raise OSError("hub 沒開")
+        monkeypatch.setattr(bell_mod.urllib.request, "urlopen", boom)
+
+        assert bell.my_rooms() == [], "問不到就回空的"
+        for room in bell.my_rooms():
+            bell.join(room, lambda: False)
+        assert set(bell.states) == {"main"}, "查不到不代表要把已經在盯的房丟掉"
+
+    def test_join_is_idempotent(self, monkeypatch):
+        """同一個房每 30 秒被回報一次,不能每次都掛一條新的直播。"""
+        started = []
+        monkeypatch.setattr(bell_mod.threading, "Thread",
+                            lambda **kw: type("T", (), {"start": lambda s: started.append(kw)})())
+        monkeypatch.setattr(bell_mod, "log", lambda *_a, **_kw: None)
+
+        bell = self._bell()
+        for _ in range(5):
+            bell.join("main", lambda: False)
+        assert len(started) == 1, "重複加入同一個房只能開一條直播"
+        assert len(bell.states) == 1
+
+    def test_each_room_keeps_its_own_state(self, monkeypatch):
+        """★ 兩個房的狀態不能互相汙染 —— 這是整個設計的地基。"""
+        monkeypatch.setattr(bell_mod.threading, "Thread",
+                            lambda **kw: type("T", (), {"start": lambda s: None})())
+        monkeypatch.setattr(bell_mod, "log", lambda *_a, **_kw: None)
+
+        bell = self._bell()
+        bell.join("a", lambda: False)
+        bell.join("b", lambda: False)
+        bell.states["a"].known_last_id = 100
+        assert bell.states["b"].known_last_id == 0, "另一個房不該跟著動"
+
+    def test_patrol_evaluates_every_room(self, monkeypatch):
+        """★ 一條節拍器管全部房 —— 不是每房一條。
+
+        節拍器做的是「每 5 秒回頭想一次」,而想的內容本來就是每房各自判斷。
+        開 N 條迴圈做同一件事,只是把「遍歷」換成「執行緒」,而執行緒貴得多。
+        """
+        bell = self._bell()
+        ticked = []
+        for room in ("main", "design", "ops"):
+            state = bell_mod.BellState(lambda t: True, "alice", "http://test", room)
+            state.evaluate = lambda r=room: ticked.append(r)
+            bell.states[room] = state
+
+        rounds = {"n": 0}
+
+        def alive():
+            rounds["n"] += 1
+            return rounds["n"] <= 1
+        monkeypatch.setattr(bell_mod.time, "sleep", lambda _s: None)
+
+        bell.patrol(alive)
+        assert sorted(ticked) == ["design", "main", "ops"], "每個房都要被想到"
+
+    def test_lobby_watch_reports_in_as_an_agent(self, monkeypatch):
+        """★★ 大廳連線要帶 `kind=agent` —— 那是「我是 AI,可以被派任務」的自報。
+
+        不帶的話它照樣算在線,**但不會出現在「可以邀請的 agent」清單裡** ——
+        而那正是這條連線存在的唯一理由。
+        """
+        seen, rounds = [], {"n": 0}
+
+        def alive():
+            rounds["n"] += 1
+            return rounds["n"] == 1
+
+        def fake_urlopen(req, *_a, **_kw):
+            seen.append(req.full_url)
+            raise OSError("測試到此為止")
+
+        monkeypatch.setattr(bell_mod.urllib.request, "urlopen", fake_urlopen)
+        monkeypatch.setattr(bell_mod.time, "sleep", lambda _s: None)
+        monkeypatch.setattr(bell_mod, "log", lambda *_a, **_kw: None)
+
+        bell_mod.lobby_watch("http://test", "alice", alive)
+        assert len(seen) == 1
+        assert seen[0].startswith("http://test/api/lobby/stream")
+        assert "watcher=alice" in seen[0]
+        assert "kind=agent" in seen[0], "不自報是 agent 就不會進「可以邀請」的名單"
 
 
 # ---------- BellState ----------
@@ -559,7 +694,7 @@ class TestBellState:
         # ① hub 連得上 → 說 agent 可能卡住
         st.hub_reachable = True
         ring_until_warned()
-        warns = [l for l in lines if l.startswith("WARN")]
+        warns = [l for l in lines if "WARN" in l]   # 前面還有 `[房名] ` 前綴
         assert warns and "agent 可能卡住" in warns[0], warns
 
         # ② hub 連不上 → 改口,而且明說 agent 可能是好的
@@ -571,9 +706,38 @@ class TestBellState:
         for _ in range(10):
             st2.last_ring_at = 0
             st2.evaluate()
-        warns = [l for l in lines if l.startswith("WARN")]
+        warns = [l for l in lines if "WARN" in l]   # 前面還有 `[房名] ` 前綴
         assert warns and "hub 連不上" in warns[0], warns
         assert "agent 可能卡住" not in warns[0]
+
+    def test_every_log_line_says_which_room_it_is_about(self, monkeypatch):
+        """★ 多房之後,log 的每一行都要指得出【是哪個房】。
+
+        三個房的叮咚與警告全寫進同一個 `state/bell-<名字>.log`。少了房名,
+        「有敲、cursor 卻不動」這個最重要的徵狀就查不下去 —— 因為不知道要去看哪個房。
+
+        ★★ 單房時這個前綴看起來是多餘的(每行都一樣),所以它【很容易被順手拿掉】。
+          這個測試就是為了擋那一手而存在的。
+        """
+        lines = []
+        monkeypatch.setattr(bell_mod, "log", lambda text: lines.append(text))
+
+        st = bell_mod.BellState(lambda text: True, name="x",
+                                server="http://test", room="design")
+        st.known_last_id = 100
+        monkeypatch.setattr(st, "read_cursor", lambda: 0)
+
+        for _ in range(10):          # 敲到滿額,把叮咚與 WARN 兩種行都逼出來
+            st.last_ring_at = 0
+            st.evaluate()
+        st.force_ring()              # 強制敲那一行也算
+        monkeypatch.setattr(st, "read_cursor", lambda: 100)
+        st.rings_this_gap = 1        # 讓「已追上」那行印得出來
+        st.evaluate()
+
+        assert lines, "這個情境本來就該印出東西,沒印代表測試自己壞了"
+        missing = [l for l in lines if not l.startswith("[design]")]
+        assert not missing, f"這些行認不出自己屬於哪個房:{missing}"
 
     def test_read_cursor_records_whether_the_hub_answered(self, monkeypatch):
         """★ `read_cursor` 回 0 時,要記下「是沒讀過還是根本問不到」。
