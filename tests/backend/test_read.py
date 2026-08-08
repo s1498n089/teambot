@@ -36,9 +36,9 @@ class FakeHTTP:
 
 
 @pytest.fixture
-def workspace(tmp_path, monkeypatch):
-    (tmp_path / "state").mkdir()
-    monkeypatch.setattr(read_mod, "BASE", tmp_path)
+def workspace(tmp_path):
+    """一塊乾淨的暫存地。理由與 test_say.py 的同名 fixture 相同:
+    `BASE` 與 `state/` 都是 cursor 還在本地檔案時代的東西,已隨那次搬遷失效。"""
     return tmp_path
 
 

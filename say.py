@@ -75,8 +75,6 @@ import urllib.request
 sys.stdout.reconfigure(encoding="utf-8")
 sys.stderr.reconfigure(encoding="utf-8")
 
-BASE = pathlib.Path(__file__).resolve().parent
-
 # 未讀超過這個數字,就不是「發言前對帳」了,是「重新加入」。
 #
 # ★ 這個數字不是憑感覺挑的 —— 它跟 AGENTS.md 加入流程的 `tail=50` 對齊:

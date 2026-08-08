@@ -60,10 +60,17 @@ def http_409():
 
 
 @pytest.fixture
-def workspace(tmp_path, monkeypatch):
-    """把 say.py 的 BASE 指到 tmp,cursor 檔就落在隔離目錄裡。"""
-    (tmp_path / "state").mkdir()
-    monkeypatch.setattr(say_mod, "BASE", tmp_path)
+def workspace(tmp_path):
+    """一個乾淨的暫存工作目錄。
+
+    ★ 它以前做兩件事:建 `state/` 目錄、把 `say.py` 的 `BASE` 指過來 ——
+      那是 **cursor 還是本地檔案**的時代,測試得確保它落在隔離目錄裡。
+      cursor 搬到 hub 之後兩件事都沒有意義了(這支工具不再碰檔案系統),
+      而 `BASE` 本身也在同一次清理裡刪掉了。
+
+    ★★ 名字留著、內容清空,是因為它還有一個作用:**讓測試簽名說出意圖**。
+      要它的測試在宣告「我需要一塊乾淨的地」,即使現在那塊地上什麼都不必先擺。
+    """
     return tmp_path
 
 

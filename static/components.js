@@ -604,10 +604,20 @@ const ChatComposer = {
       <label>TO
         <!-- 沒有 AI 在線時選單是空的 —— 那不是壞掉,是這個房間現在只有人類。
              與其給一個點不出東西的空選單,不如直接說明白。 -->
+        <!-- ★ ○ 的那些【列出來但選不了】,而不是過濾掉,也不是讓人踩:
+             ●  在線,而且掛在這個房 —— 派得動
+             ○  在線,但【不在這個房】 —— 伺服器會擋(agent not in room)
+
+             過濾掉的話,同一個人在【邀請視窗】看得到、在這裡卻消失,
+             兩個選單對同一個人各說各話;讓人選得下去的話,那一次嘗試必定紅字。
+             列出 + disabled + 說出下一步,講的才是事實:
+             **他在,但現在不行,而這是變成可以的方法。** -->
         <select v-model="target" :disabled="!targets.length">
           <option value="">{{ targets.length ? "選一位…" : "目前沒有 AI 在線" }}</option>
-          <option v-for="t in targets" :key="t.name" :value="t.name">
-            {{ t.name }} {{ t.present ? "●" : "○" }}
+          <option v-for="t in targets" :key="t.name" :value="t.name"
+                  :disabled="!t.present"
+                  :title="t.present ? '' : '在線,但不在這個房 —— 先用上面的 + 邀請他進來'">
+            {{ t.name }} {{ t.present ? "●" : "○ 不在這個房" }}
           </option>
         </select>
       </label>

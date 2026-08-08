@@ -37,7 +37,18 @@ const computed = Vue.computed;
     hasMore 的比較對象必須跟著那一次實際要的則數走。) */
 const PAGE = 50;
 const GROUP_WINDOW_MS = 300000;        // 5 分鐘內同一個人連續發言,就不重複顯示名字
-const PRESENCE_POLL_MS = 15000;        // 多久更新一次在線名單(很輕,只拿名字)
+/* 多久重問一次在線名單(很輕,只拿名字)。
+ *
+ * ★ 這是【保底層】,不是主要機制:presence 改成推播之後(hub 在有人進出時
+ *   往房間的直播丟一個 presence 訊號),名單平常是即時更新的。
+ *
+ *   留著輪詢是因為**推播會漏**:斷線重連的那幾秒、backpressure 把連線標成死的、
+ *   hub 重啟 —— 這些期間發生的進出沒有人會補送。輪詢讓名單自己長回正確。
+ *
+ * ★★ 跟敲鈴器那 30 秒的重問是同款地位:**通知可以漏,資料不會丟。**
+ *   看到「都推播了還輪詢什麼」就順手刪掉的話,斷線期間的名單會永遠停在錯的樣子。
+ */
+const PRESENCE_POLL_MS = 15000;
 const TOAST_MS = 3500;                 // 提示訊息顯示多久
 const FLASH_MS = 2000;                 // 跳到某則訊息時,那則閃爍多久
 const API_FAIL_TOAST_THRESHOLD = 3;    // 連續失敗幾次才跳出來吵使用者
@@ -292,7 +303,7 @@ createApp({
       /* 這個房間的【成員】名字:有 cursor 的人。跟 present 是兩份資料,不要混 ——
          成員是持久的(關掉視窗還在),在場是連線(關掉就沒了)。
          邀請按鈕靠這份判斷「他進來了沒」,理由見 api.js 的 cursors()。 */
-      roomMembers: [],
+      roomRoster: [],
       rooms: [],
       lastId: 0,
       name: switchingAs,            // 進場前沒有身分 —— modal 填完才有(換房例外,見上面那張條子)
@@ -369,16 +380,19 @@ createApp({
 
       for (const agent of this.agents) {
         targets.push({
-          /* ★ present 目前【恆為 true】,而那不是 bug,是名冊動態化的必然:
-             this.agents 來自 GET /agents,而伺服器那邊回的就是「此刻連著線的 agent」——
-             所以能出現在這份清單裡的,必然也在 present 裡。
+          /* ★ 這一行曾經【恆為 true】,而註解寫著「留著是為了將來某天」——
+             那一天到了(2026-08-08,多房)。現在它真的會是 false:
 
-             名冊還寫死在程式裡的時候這個判斷有意義(名單上的人可以是離線的),
-             動態化之後就沒有離線的成員了 —— 因為離線就不在名單上。
+                 this.agents   GET /agents(不分房)—— 全部連著線的 agent
+                 this.present  這個房的在場名單
 
-             留著不刪的理由:它是「畫面顯示的在線狀態」與「伺服器認定的在線」
-             之間的接縫。哪天名冊改成含歷史成員(例如做「最近合作過的 agent」),
-             ○ 就會重新出現,而這一行不必改。 */
+             一個掛在別的房(或只連著大廳)的 agent 會出現在前者、不在後者。
+             那正是伺服器擋下來的情況(`agent not in room`),所以 ○ 是誠實的:
+             **他活著,但收不到這個房的訊息。**
+
+             ★★ 後端把這兩個問題刻意分成 live_agents(room) 與 all_live_agents(),
+             而前端只拿了後者 —— 一份資料同時服務「誰可以邀請」與「誰可以派任務」。
+             這一行就是把它們重新分開的地方,別把它化簡掉。 */
           name: agent.name,
           present: this.present.includes(agent.name),
         });
@@ -421,7 +435,7 @@ createApp({
      * 兩份資料相減,而且兩份都各自來:
      *
      *     this.agents       GET /agents        誰現在連著線(不分房)
-     *     this.roomMembers  GET .../cursors    誰是這個房的成員
+     *     this.roomRoster  GET .../cursors    誰是這個房的成員
      *
      * ★ 不在後端做一個「可邀請的人」端點,是刻意的:那會把兩個獨立的事實
      *   焊成一個答案,而它們的更新節奏完全不同(在線每幾秒變,成員很少變)。
@@ -431,7 +445,7 @@ createApp({
      *   而人類沒有敲鈴器 —— 他要進來,自己開網頁選房就好,不需要別人替他建書籤。
      */
     invitableAgents() {
-      const members = this.roomMembers;
+      const members = this.roomRoster;
       return this.agents
         .filter(function (agent) { return members.indexOf(agent.name) === -1; })
         .map(function (agent) { return agent.name; });
@@ -1134,10 +1148,10 @@ createApp({
      *   成員變動遠比在場變動少(加入一次就一直是),而這份資料只有那個視窗在用。
      *   為一個平常關著的視窗每 15 秒問一次,是替看不見的東西付錢。
      */
-    async loadRoomMembers() {
+    async loadRoomRoster() {
       try {
         const data = await this.api.cursors(this.room);
-        this.roomMembers = Object.keys(data.cursors || {});
+        this.roomRoster = Object.keys(data.cursors || {});
       } catch (error) {
         // api.js 已經記錄了。名單維持上一次的樣子
       }
@@ -1517,13 +1531,13 @@ createApp({
     /**
      * 打開邀請視窗。
      *
-     * ★ 兩份名單都在【開視窗的這一刻】才問:成員名單平常沒人看(見 loadRoomMembers),
+     * ★ 兩份名單都在【開視窗的這一刻】才問:成員名單平常沒人看(見 loadRoomRoster),
      *   而在線名單雖然有輪詢,但這裡要的是「按下去那一秒還在線」——
      *   列出一個剛離線的人,按下去會建一個沒有人在用的書籤(無害,但看起來像壞掉)。
      */
     async openInvite() {
       this.modal = { type: "invite", pending: "" };
-      await Promise.all([this.loadRoomMembers(), this.loadAgents()]);
+      await Promise.all([this.loadRoomRoster(), this.loadAgents()]);
     },
 
     /**
@@ -1573,7 +1587,7 @@ createApp({
       }
 
       this.modal.pending = "";
-      await this.loadRoomMembers();   // 名單刷新 → 他從「可邀請」那份消失
+      await this.loadRoomRoster();   // 名單刷新 → 他從「可邀請」那份消失
     },
 
     /* ── 彈出視窗 ── */

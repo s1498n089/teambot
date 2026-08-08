@@ -183,7 +183,7 @@
           <img :src="avatarOf(name)">
           <span class="invite-name mono" :style="{ color: colorOf(name) }">{{ name }}</span>
           <!-- 送出中就把整組鎖住(不只鎖被按的那顆):兩個邀請同時在跑的話,
-               後面那次 loadRoomMembers 會蓋掉前面那次的結果 -->
+               後面那次 loadRoomRoster 會蓋掉前面那次的結果 -->
           <button class="invite-do mono" :disabled="!!modal.pending"
                   @click="inviteAgent(name)">
             {{ modal.pending === name ? '邀請中…' : '邀請' }}

@@ -39,15 +39,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import pathlib
 import sys
 import urllib.parse
 import urllib.request
 
 sys.stdout.reconfigure(encoding="utf-8")
 sys.stderr.reconfigure(encoding="utf-8")
-
-BASE = pathlib.Path(__file__).resolve().parent
 
 # 加入流程要看最近幾則。
 #

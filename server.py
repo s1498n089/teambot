@@ -899,13 +899,18 @@ class Hub:
             ingest=self.ingest,
             sanitize_sender=sanitize_sender,
             base_url=self.base_url,
-            # 不分房間:agent 的身分不屬於某個房間,任務也可以在任何房間派給它。
+            # 傳的是「房間可帶可不帶」的那一支 —— 由協定層自己決定何時要帶:
             #
-            # 誠實標一個取捨:一個只掛在 A 房的 agent,理論上可以被派 B 房的任務,
-            # 而它根本收不到那個房間的訊息 —— 結果會是逾時失敗。
-            # 我們選擇不擋,因為擋的話要把「目標房間」一路傳進協定層,
-            # 而這個情境至今沒發生過(通常只有一個房間),逾時機制也已經兜住後果。
-            # 哪天真的多房間常態運作,這裡就是要改的第一個地方。
+            #     Agent Card   不帶  agent 的身分不屬於任何房間
+            #     派任務       帶    「他收不收得到【這個房】的訊息」
+            #
+            # ★ 這裡曾經寫著一張紙條:「一個只掛在 A 房的 agent 可以被派 B 房的任務,
+            #   我們選擇不擋……哪天真的多房間常態運作,這裡就是要改的第一個地方。」
+            #   **那一天到了,而且已經改完** —— a2a.py 的 SendMessage 會當場擋下來
+            #   (錯誤 `agent not in room`,跟 `agent not online` 分開講,
+            #   因為兩者要人去做的事不同)。
+            #
+            #   紙條兌現了就要撕:留著的話,下一個人會以為這裡還沒有防護。
             live_agents_fn=self.bus.live_agents_maybe_room,
             rooms_dir=self.rooms_dir,
         )
