@@ -124,6 +124,98 @@ class TestFetchContract:
         assert ahead.json() == {"error": "stale", "last_id": self.TOTAL}
 
 
+class TestMultiRoomFoundations:
+    """多房的三塊地基:我在哪些房、誰在線上(不分房)、還沒有房也要看得見。
+
+    ★ 這三個回答的是同一個場景的三個角度:**要邀請一個 agent 進房,
+      得先看得到它** —— 而它可能一個房都還沒有。
+    """
+
+    def test_rooms_of_lists_only_rooms_i_belong_to(self, client):
+        """「有 cursor 檔」就是「在那個房」—— 反過來問 cursors_in 的同一件事。"""
+        post_msg(client, "alpha", "someone", "seed")
+        post_msg(client, "beta", "someone", "seed")
+        post_msg(client, "gamma", "someone", "seed")
+        client.put("/api/rooms/alpha/cursor/alice?last_id=0")
+        client.put("/api/rooms/gamma/cursor/alice?last_id=0")
+
+        got = client.get("/api/cursors/alice").json()
+        assert got["rooms"] == ["alpha", "gamma"], "只列出他有 cursor 的那些"
+        assert client.get("/api/cursors/nobody").json()["rooms"] == []
+
+    def test_invitation_is_just_a_cursor(self, client):
+        """★★ 「邀請」在資料上就是**替他建一個 cursor=0** —— 沒有別的機制。
+
+        而 `0` 是誠實的:它說「他一則都沒讀」。
+        **不能寫成當下的房間 head** —— 那等於替他宣告「你已經讀完之前所有對話」,
+        而跳不跳過舊帳是他自己該做的決定(見 AGENTS.md 的加入流程)。
+        """
+        post_msg(client, "design", "allen", "開個房討論")
+        assert client.get("/api/cursors/bob").json()["rooms"] == []
+
+        client.put("/api/rooms/design/cursor/bob?last_id=0")      # ← 這就是邀請
+        assert client.get("/api/cursors/bob").json()["rooms"] == ["design"]
+        assert client.get("/api/rooms/design/cursor/bob").json()["last_id"] == 0
+
+    def test_agents_listing_without_room_covers_everyone(self, client):
+        """`GET /agents` 不帶 room = 全部在線的 agent(不管他在哪一間)。
+
+        ★ 以前它預設 `main`,那在「一個 agent 只能待一個房」的時代是對的。
+          多房之後,要邀請的對象可能在別的房、甚至一個房都沒有 ——
+          **看不到就邀不到。**
+        """
+        bus = client.app.state.hub.bus
+        in_design = bus.subscribe("design", watcher="designer", is_agent=True)
+        try:
+            # ★ 不斷言「清單是空的」—— fixture 本來就讓 alice/bob 在 main 上線。
+            #   要問的是【designer 這個只待在 design 的人,兩種查法看不看得到】。
+            in_main = [a["name"] for a in client.get("/agents?room=main").json()["agents"]]
+            assert "designer" not in in_main, "他不在 main,問 main 就不該看到他"
+
+            everywhere = [a["name"] for a in client.get("/agents").json()["agents"]]
+            assert "designer" in everywhere, "不帶 room 就要看得到別房的人"
+        finally:
+            bus.unsubscribe("design", in_design)
+
+    def test_lobby_connection_makes_a_roomless_agent_visible(self, client):
+        """★★★ 一個房都沒有的 agent,靠大廳連線讓自己被看見。
+
+        沒有這條的話它開不出任何連線 —— 而看不見就邀不到,新成員永遠進不來。
+        """
+        bus = client.app.state.hub.bus
+        assert "newbie" not in [a["name"] for a in client.get("/agents").json()["agents"]]
+
+        lobby = bus.subscribe(server_mod.LOBBY_CHANNEL, watcher="newbie", is_agent=True,
+                              announce=False)
+        try:
+            names = [a["name"] for a in client.get("/agents").json()["agents"]]
+            assert "newbie" in names, "只掛在大廳也要看得見"
+            # 但它【不是】任何房間的成員 —— 兩個問題,兩份資料
+            assert client.get("/api/cursors/newbie").json()["rooms"] == []
+        finally:
+            bus.unsubscribe(server_mod.LOBBY_CHANNEL, lobby, announce=False)
+
+    def test_lobby_is_not_a_room(self, client):
+        """大廳不能被當成房間:建不出來、不進房間清單。
+
+        ★ 它的名字帶一個句點,而 `sanitize_room` 的白名單不收句點 ——
+          所以**不必替它保留任何字眼**,有人想開一間叫 `lobby` 的房完全沒問題。
+        """
+        assert server_mod.sanitize_room(server_mod.LOBBY_CHANNEL) is None
+
+        bus = client.app.state.hub.bus
+        lobby = bus.subscribe(server_mod.LOBBY_CHANNEL, watcher="ghost", announce=False)
+        try:
+            rooms = [r["name"] for r in client.get("/api/rooms").json()["rooms"]]
+            assert server_mod.LOBBY_CHANNEL not in rooms
+            # 使用者自己開一間叫 lobby 的房,不受影響
+            post_msg(client, "lobby", "allen", "這是一間真的房")
+            rooms = [r["name"] for r in client.get("/api/rooms").json()["rooms"]]
+            assert "lobby" in rooms
+        finally:
+            bus.unsubscribe(server_mod.LOBBY_CHANNEL, lobby, announce=False)
+
+
 class TestWriteGate:
     """★★★ 三條寫入路徑都必須經過 `check_writer` —— 這條測試守的是**位置**。
 

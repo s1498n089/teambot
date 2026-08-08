@@ -76,6 +76,20 @@ DEFAULT_ROOM = "main"
 SENDER_RE = re.compile(r"^[\w一-鿿-]{1,32}$")   # 名字白名單:擋空白與 @,防 parse 怪象
 
 SSE_KEEPALIVE_SECONDS = 15
+# 大廳連線掛在 bus 上的內部頻道名。
+#
+# ★ 名字裡那個 `.` 讓它**不可能跟真的房間撞名**:sanitize_room 的白名單
+#   只收中英文、數字、`-`、`_`,句點是擋掉的,所以使用者永遠建不出這個名字。
+#   於是不必替它保留任何字眼 —— 有人想開一間叫 `lobby` 的房完全沒問題。
+#
+#   (第一版用的是一個【看不見的控制字元】開頭。那確實也擋得住,但它會讓這個檔案含有 null byte,
+#    而 **Python 直接拒絕載入含 null byte 的原始碼** —— 當場炸掉。
+#    看得見的字元比看不見的把戲安全。)
+#
+# ★★ 為什麼掛在 bus 上而不是另做一套:「誰在線上」的事實來源
+#   就是「誰的連線開著」,而 bus 已經是那個來源。大廳連線只是**沒有房間的連線**,
+#   `live_agents_maybe_room(None)` 遍歷所有頻道時自然涵蓋它 —— 零特例。
+LOBBY_CHANNEL = "lobby.internal"
 SUBSCRIBER_QUEUE_MAXSIZE = 256                   # 慢客戶端的 backpressure 界線
 
 
@@ -369,6 +383,35 @@ class MessageStore:
                     result[entry.stem] = 0
         return result
 
+    def rooms_of(self, name: str) -> list[str]:
+        """這個名字是【哪些房】的成員 —— 反過來問 cursors_in 的那個問題。
+
+        ★ 判準跟 cursors_in 一模一樣:**有 cursor 檔就是在那個房**。
+          所以「邀請某人進房」只要替他建一個 `cursor=0` 的檔案 ——
+          不需要名冊、不需要邀請紀錄表,而**建檔這個動作本身就是加入**。
+
+        ★★ 為什麼是「成員」而不是「在線」:兩個問題不能用同一份資料回答。
+
+              rooms_of / cursors_in  他【屬於】哪些房      ← 檔案,關掉視窗也還在
+              bus.watchers           他【現在】連著哪些房  ← 連線,關掉就沒了
+
+          邀請清單要的是「在線但還不是這個房的成員」,那是兩份資料相減。
+
+        ★★★ 掃的是記憶體裡的房間清單(從訊息推導),不是掃目錄:
+          沒有訊息的房間不存在,而 cursor 檔一定是在某個已經存在的房裡建的。
+        """
+        clean = sanitize_sender(name)
+        if clean is None:
+            return []
+        found = []
+        for room in sorted(self.rooms):
+            try:
+                if self.cursor_path(room, clean).exists():
+                    found.append(room)
+            except BadRoomError:
+                continue      # 房名不合法的目錄不該存在,但掃描不該因此中斷
+        return found
+
     def _index(self, msg: dict) -> None:
         """load 與 append 共用的索引維護 — 三個結構同步只在這裡發生。
 
@@ -637,7 +680,7 @@ class EventBus:
         self.subs: dict[str, set[Subscription]] = {}
 
     def subscribe(self, room: str, watcher: str | None = None,
-                  is_agent: bool = False) -> Subscription:
+                  is_agent: bool = False, announce: bool = True) -> Subscription:
         """掛一條新的直播連線。
 
         is_agent 由連線方自己宣告(敲鈴器會說「我包的是 agent」,瀏覽器不會說)。
@@ -646,7 +689,8 @@ class EventBus:
         """
         sub = Subscription(watcher=watcher, is_agent=is_agent)
         self.subs.setdefault(room, set()).add(sub)
-        self.publish_presence(room)
+        if announce:
+            self.publish_presence(room)
         return sub
 
     def watchers(self, room: str) -> set[str]:
@@ -708,9 +752,10 @@ class EventBus:
                 live.add(sub.watcher)
         return live
 
-    def unsubscribe(self, room: str, sub: Subscription) -> None:
+    def unsubscribe(self, room: str, sub: Subscription, announce: bool = True) -> None:
         self.subs.get(room, set()).discard(sub)
-        self.publish_presence(room)
+        if announce:
+            self.publish_presence(room)
 
     def mark_gone(self, room: str, watcher: str) -> int:
         """某個名字說「我要走了」—— 把他在這個房的連線標成死的。回傳標了幾條。
@@ -1189,6 +1234,30 @@ def register_room_routes(app: FastAPI, hub: Hub) -> None:
         hub.store.write_cursor(room, who, last_id)
         return {"ok": True, "room": room, "name": who, "last_id": last_id}
 
+    @app.get("/api/cursors/{name}")
+    async def cursors_of(name: str):
+        """這個名字是哪些房的成員(有 cursor 檔就是成員)。
+
+        ★ 敲鈴器靠它決定「我要盯哪些房」—— 它每隔一段時間問一次,
+          多出來的房就掛一條新的直播上去。**「被邀請」在這裡看起來就是
+          「這個清單多了一個名字」**,不需要另外一種通知。
+
+        ★★ 為什麼是輪詢而不是推播:**敲鈴器還不知道那個房存在,
+          所以它沒有任何連線可以接收那個房的通知。** 這不是偷懶的取捨,
+          是結構決定的 —— 要推播就得另外開一條「跟房間無關」的通道,
+          而那條通道斷線時漏掉的邀請,最後還是得靠這個輪詢補回來。
+
+        ★★★ 路徑跟 `/api/rooms/<房>/cursors` **刻意對稱** —— 它們是同一份資料的兩個方向:
+
+              /api/rooms/<房>/cursors   這個房裡有誰
+              /api/cursors/<名字>       這個人在哪些房
+
+          第一版寫成 `/api/agents/<名字>/rooms`,而那個路徑會跟協定層的
+          `/agents/<名字>/...`(Agent Card 那一族)看起來像同一家人 ——
+          **它們分屬兩層,長得像會讓人以為改一邊另一邊會跟著動。**
+        """
+        return {"name": name, "rooms": hub.store.rooms_of(name)}
+
     @app.get("/api/rooms/{room}/cursors")
     async def get_cursors(room: str):
         """這個房裡誰讀到哪。
@@ -1302,6 +1371,44 @@ def register_room_routes(app: FastAPI, hub: Hub) -> None:
 def register_stream_route(app: FastAPI, hub: Hub) -> None:
     """觀戰直播。獨立一組,因為它是唯一一個「連線會一直開著」的端點。"""
 
+    @app.get("/api/lobby/stream")
+    async def lobby_stream(request: Request, watcher: str | None = None,
+                           kind: str = "human"):
+        """**報到用的連線** —— 只證明「我在線上」,不送任何內容。
+
+        ★ 為什麼需要它:在這個系統裡「誰在線上」的事實來源是【誰的連線開著】,
+          而連線一直是綁在房間上的。多房之後出現一個缺口:
+          **一個房都還沒有的 agent 開不出任何連線,於是誰也看不到它** ——
+          而「看不到」就等於「沒辦法邀請它進房」,新成員永遠進不來。
+
+        ★★ 它**不在 `/api/rooms/` 底下**,那是刻意的:大廳是【連線的概念,
+          不是房間的概念】。放進 rooms 的命名空間就得替它保留一個房名、
+          在房間清單裡排除它、在刪房邏輯裡跳過它 —— 三處特例,
+          全都是在補「它長得像房間但不是房間」這件事。**不放進去就不必補。**
+
+        ★★★ 它只送 keep-alive,連 queue 都不讀 —— 所以訂閱時
+          `announce=False`(不廣播 presence)。否則廣播會塞進一個沒有人讀的佇列,
+          滿了之後這條連線會被 backpressure 標成死的,而它明明還活著。
+        """
+        who = hub.identify_optional_reader(watcher, request)
+        subscription = hub.bus.subscribe(LOBBY_CHANNEL, watcher=who,
+                                         is_agent=(kind == "agent"), announce=False)
+
+        async def event_stream():
+            try:
+                yield "retry: 2000\n\n"
+                while True:
+                    await asyncio.sleep(SSE_KEEPALIVE_SECONDS)
+                    if subscription.dead:
+                        break
+                    yield ": keep-alive\n\n"
+            finally:
+                hub.bus.unsubscribe(LOBBY_CHANNEL, subscription, announce=False)
+
+        return StreamingResponse(event_stream(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache",
+                                          "X-Accel-Buffering": "no"})
+
     @app.get("/api/rooms/{room}/stream")
     async def stream(room: str, request: Request, since_id: int = 0,
                      watcher: str | None = None, kind: str = "human"):
@@ -1379,15 +1486,20 @@ def register_agent_routes(app: FastAPI, hub: Hub) -> None:
     """成員名冊:列出現在有誰在線、查看某個 agent 的名片。"""
 
     @app.get("/agents")
-    async def agents_index(room: str = "main"):
+    async def agents_index(room: str | None = None):
         """現在可以接任務的 agent —— 也就是【此刻連著線且自稱 agent】的那些。
 
         ★ 這裡回答的是「現在能派給誰」,不是「歷史上有誰」。
           一個 agent 關掉視窗就會從這裡消失,重開又回來 —— 這正是我們要的:
           派任務給一個沒在跑的 agent,結果只會是逾時失敗,不如一開始就不讓你選。
+
+        ★★ `room` 現在【可以不帶】,而不帶的意思是「**全部在線的 agent**」。
+          以前它預設 `main`,那在 agent 只能待一個房的時代是對的;
+          多房之後,「邀請他進來」的前提是**先看得到他**,而他可能一個房都沒有。
+          (2026-08-08:預設從 main 改成 None。)
         """
         listing = []
-        for name in sorted(hub.bus.live_agents(room)):
+        for name in sorted(hub.bus.live_agents_maybe_room(room)):
             listing.append({"name": name,
                             "card": f"/agents/{name}/.well-known/agent-card.json"})
         return {"agents": listing}
