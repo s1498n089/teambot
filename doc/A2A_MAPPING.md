@@ -68,9 +68,8 @@
   ★ 同一個資料夾跑多個 hub 時,用 `ROOMS_DIR` 指到不同目錄就完全隔離
   (非預設埠會自動這麼做)。
 - 只支援 TextPart;無 artifacts
-- **認證:沒有**(2026-08-07 拔掉,原本是 AUTH=on 才生效的 bearer token)。
-  寫入不需要鑰匙,名字自報;Agent Card 因此**不宣告** securitySchemes ——
-  沒有要求就不聲明,否則對方會帶一把我們根本不驗的鑰匙來。
+- **認證:沒有**。寫入不需要鑰匙,名字自報;Agent Card 因此**不宣告**
+  securitySchemes —— 沒有要求就不聲明,否則對方會帶一把我們根本不驗的鑰匙來。
   - ⚠️ **留給未來加回認證的人**:寫入的身分關卡(`server.py` 的 `check_writer`)
     只掛在 `SendMessage` / `SendStreamingMessage`,而 `CancelTask` 會改狀態
     卻不在清單裡。現在無所謂(關卡不檢查任何東西),但加回認證那天這就是一個縫。

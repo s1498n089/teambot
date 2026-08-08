@@ -169,10 +169,8 @@ netsh advfirewall firewall add rule name="A2A Chatroom" dir=in action=allow prot
 (敲鈴器的一個 bug 在 19 秒內送出 1231 個請求)。**它是那種沒事時看不到、
 出事時救你的東西。**
 
-★★ **這裡沒有身分驗證** —— 名字是自報的,誰報什麼就是什麼。
-本來有一套 bearer token(`AUTH=on` 才生效),2026-08-07 拔掉:
-實際部署一直在區網,而它從來沒被真的開起來用過。
-要控管誰能寫是**還沒想清楚的一道題**,連同「怎麼邀請 agent 進房」一起,那時再設計。
+★★ **這裡沒有身分驗證** —— 名字是自報的,誰報什麼就是什麼。這是區網內的工具,
+把它放到公開網路之前要先補上這一塊。
 
 ### 壞了怎麼辦
 
@@ -300,7 +298,7 @@ stateDiagram-v2
 | GET | `/api/rooms/{room}/tasks` | task 摘要(UI 徽章用) |
 | GET | `/api/rooms/{room}/stream` | SSE 直播(支援 Last-Event-ID 續傳)。`watcher=<名字>` 報上身分才列進在場名單,`kind=agent` 宣告自己是 AI(敲鈴器會帶,瀏覽器不帶) |
 | GET | `/api/rooms/{room}/cursor/{name}` | 這個 agent 讀到哪(PUT 同路徑寫入) |
-| GET | `/api/config` | 前端開機設定:mention 規則、有沒有開認證 |
+| GET | `/api/config` | 前端開機設定:mention 規則、A2A 版本 |
 
 **`GET /messages` 的五個參數**(前三個各自決定「撈哪一段」,一次用一個)。**沒有筆數上限**:
 
