@@ -474,8 +474,7 @@ button.send:hover { box-shadow: var(--shadow-neon-cyan); }
 /* presence 三態:亮綠=在場且活躍、半透明綠=在場但安靜(同屬「連線正常」家族)、灰=無連線 */
 /* ⚠️ 同上:這三條的名字由 index.html 的 :class="presenceOf(...) + '-dot'" 拼出來,
       grep 找不到,不要當死碼刪掉。 */
-.active-dot { color: var(--green); }
-.standby-dot { color: var(--green); opacity: 0.45; }
+.online-dot { color: var(--green); }
 .offline-dot { color: var(--muted); }
 .tl-item { display: flex; gap: 10px; font-size: var(--ui-md); align-items: baseline; }
 .tl-state { flex: none; letter-spacing: 1px; font-size: var(--ui-md); }

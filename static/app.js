@@ -37,7 +37,6 @@ const computed = Vue.computed;
     hasMore 的比較對象必須跟著那一次實際要的則數走。) */
 const PAGE = 50;
 const GROUP_WINDOW_MS = 300000;        // 5 分鐘內同一個人連續發言,就不重複顯示名字
-const ACTIVE_WINDOW_MS = 600000;       // 10 分鐘內講過話 → 算「活躍」,否則算「待命」
 const PRESENCE_POLL_MS = 15000;        // 多久更新一次在線名單(很輕,只拿名字)
 const TOAST_MS = 3500;                 // 提示訊息顯示多久
 const FLASH_MS = 2000;                 // 跳到某則訊息時,那則閃爍多久
@@ -290,7 +289,6 @@ createApp({
       members: [],          // 這個房間發言過的人
       agents: [],           // 現在連著線的 agent —— 只有他們能被派任務
       present: [],          // 現在連著線的人(在場的事實來源)
-      presenceSupported: true,  // 舊版伺服器沒有這個功能,遇到 404 就自動關掉
       rooms: [],
       lastId: 0,
       name: switchingAs,            // 進場前沒有身分 —— modal 填完才有(換房例外,見上面那張條子)
@@ -318,7 +316,6 @@ createApp({
       modal: null,          // 目前開著的視窗:{ type: "member" | "task", ... }
       focusTarget: FOCUS_ME,
       bubbleFont: parseInt(savedFont, 10),  // 基準字級,整個介面依此等比縮放
-      nowTick: Date.now(),  // 每分鐘更新一次,用來重算「誰還活躍」
     };
 
     /* ★ 約定:「把手」類的東西【不進 data】—— 直接掛在 this 上就好。
@@ -387,18 +384,6 @@ createApp({
 
     /** 標題列上要顯示哪些人的頭像(最多 6 個)。 */
     onlineMembers() {
-      // 伺服器不支援在線名單時的退路:回到「最近講過話 = 在線」的舊判斷
-      if (!this.presenceSupported) {
-        const recentlyActive = [];
-
-        for (const member of this.members) {
-          if (this.presenceOf(member) === "active") {
-            recentlyActive.push(member);
-          }
-        }
-        return recentlyActive.slice(0, AVATAR_SLOTS);
-      }
-
       const result = [];
 
       for (const name of this.present) {
@@ -605,13 +590,14 @@ createApp({
       this.stream.connect();
     },
 
-    /** 兩個定時器:一個讓「活躍/待命」會隨時間變化,一個更新在線名單。 */
+    /** 定時更新在線名單。
+     *
+     * ★ 這裡曾經還有一個每分鐘的定時器,專門重算「誰還算活躍」——
+     *   隨著 STANDBY 那個狀態一起沒了(2026-08-08)。**狀態消失,伺候它的機制也要跟著走**,
+     *   不然會留下一個每分鐘跑一次、算完沒有人看的迴圈。
+     */
     startTimers() {
       const self = this;
-
-      setInterval(function () {
-        self.nowTick = Date.now();
-      }, 60000);
 
       setInterval(function () {
         self.loadPresence();
@@ -955,83 +941,58 @@ createApp({
     },
 
     /**
-     * 某個人現在算什麼狀態,三種:
-     *   active  在線而且最近講過話
-     *   standby 在線但安靜(agent 待命中就是這樣)
-     *   offline 沒有連線
+     * 某個人現在在不在:`"online"` 或 `"offline"`。
      *
-     * 「在線」看的是有沒有連線(瀏覽器開著,或 agent 的 bell 掛著),
-     * **不是**用「最近有沒有發言」去猜 —— 安靜待命的 agent 也還在。
+     * 「在線」看的是**有沒有連線**(瀏覽器開著,或 agent 的 bell 掛著),
+     * 不是用「最近有沒有發言」去猜 —— 安靜待命的 agent 也還在。
+     *
+     * ★ 這裡曾經有第三種狀態 `standby`(在線、但十分鐘內沒講話),
+     *   2026-08-08 拿掉。它分辨的是「最近有沒有講話」,而**那不影響任何決定**:
+     *   要派任務給誰、要不要敲他,看的都是「連線在不在」。
+     *   一個安靜十一分鐘的 agent 跟安靜九分鐘的,對使用者是同一件事。
+     *
+     * ★★ 而它有代價:畫面上多一種狀態,讀的人得先想「STANDBY 是壞了嗎」——
+     *   **一個不影響決定的區分,只會讓人多問一個問題。**
      *
      * @param {object|string} member 成員資料或單純一個名字
-     * @returns {string} "active" | "standby" | "offline"
+     * @returns {string} "online" | "offline"
      */
     presenceOf(member) {
       let name = member;
-      let lastSeenAt = 0;
 
       if (typeof member === "object") {
         name = member.name;
-
-        if (member.lastSeen) {
-          lastSeenAt = new Date(member.lastSeen).getTime();
-        }
       }
 
-      const spokeRecently = (this.nowTick - lastSeenAt) < ACTIVE_WINDOW_MS;
-
-      // 伺服器不支援在線名單 → 退回舊語意:只分「最近講過話」與「沒有」
-      if (!this.presenceSupported) {
-        if (spokeRecently) {
-          return "active";
-        }
-        return "offline";
+      if (this.present.includes(name)) {
+        return "online";
       }
-
-      if (!this.present.includes(name)) {
-        return "offline";
-      }
-
-      if (spokeRecently) {
-        return "active";
-      }
-      return "standby";
+      return "offline";
     },
 
     /** 狀態 → 顯示的字。 */
     presenceLabel(member) {
-      const state = this.presenceOf(member);
-
-      if (state === "active") {
-        return "● ACTIVE";
-      }
-      if (state === "standby") {
-        return "◐ STANDBY";
+      if (this.presenceOf(member) === "online") {
+        return "● ONLINE";
       }
       return "○ OFFLINE";
     },
 
     /* ── 資料載入 ── */
 
-    /**
-     * 更新在線名單。
-     * 如果伺服器比前端舊、根本沒有這個功能(404),就永久關掉這個輪詢 ——
-     * 每 15 秒去敲一個不存在的門只會洗版 console。
+    /** 更新在線名單。
+     *
+     * ★ 這裡曾經有一段「伺服器太舊沒有這個端點(404)就永久關掉輪詢」的降級,
+     *   它降到的地方是「改用發言時間推測誰在線」—— 也就是 STANDBY 那套。
+     *   那套 2026-08-08 拿掉之後,這個降級**沒有地方可以降**,一併移除。
+     *   查不到就維持上一次的名單,下一輪再試。
      */
     async loadPresence() {
-      if (!this.presenceSupported) {
-        return;
-      }
-
       try {
         const data = await this.api.presence(this.room);
         this.present = data.present;
       } catch (error) {
-        if (error && error.status === 404) {
-          this.presenceSupported = false;
-          this.present = [];
-          console.warn("[presence] 伺服器尚未支援在線名單,改用發言時間推測");
-        }
+        // api.js 已經記錄過了。名單維持上一次的樣子,下一輪會再問一次
       }
     },
 
