@@ -168,7 +168,11 @@ def main() -> int:
     if not path.exists():
         print(f"✗ 找不到檔案:{path}", file=sys.stderr)
         return 1
-    text = path.read_text(encoding="utf-8")
+    # ★ `newline=""` 讀進來的是**原樣的位元組**。少了它,Python 會把 CRLF 轉成 LF,
+    #   於是「拿下來 → 一個字都沒改 → 送回去」會產生一份指紋不同的新版本。
+    #   (輸出那側早就修了,讀取這側漏掉 —— **同一個坑有兩個方向,修一邊等於沒修**。)
+    with path.open(encoding="utf-8", newline="") as handle:
+        text = handle.read()
 
     ok, answer = put_rule(server, args.room, args.name, text, read_stamp(args.room, args.name))
     if ok:

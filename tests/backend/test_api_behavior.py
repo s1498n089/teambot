@@ -990,3 +990,30 @@ class TestRoomRule:
 
         client.delete("/api/rooms/doomed2?by=allen")
         assert client.get("/api/rooms/doomed2/rule").json()["text"] == ""
+
+    def test_換行原樣進出_不長出空行(self, client):
+        """★★★ 實地炸過:986 行的判準來回一次變成雙倍行距(每行後多一個空行)。
+
+        成因是**兩側各有一次隱形的換行轉換**:寫檔時 Windows 的文字模式把 `\n`
+        變成 `\r\n`(而內容本來就帶 `\r\n`),讀檔時又把 `\r\n` 收斂成 `\n`。
+        每一次都「很合理」,合起來就是內容被改寫。
+
+        ★ 對樂觀鎖的後果更嚴重:寫進去的與讀出來的不是同一串位元組 →
+          指紋對不上 → agent 拿下來、一個字沒改、送回去也會被當成新版本。
+        """
+        post_msg(client, "crlf", "someone", "開房")
+        original = "第一行\r\n第二行\r\n\r\n第四行\r\n"
+
+        put = client.put("/api/rooms/crlf/rule?by=alice",
+                         json={"text": original, "expect_revision": ""})
+        assert put.status_code == 200
+
+        got = client.get("/api/rooms/crlf/rule").json()
+        assert got["text"] == original, "拿出來的要跟放進去的【一模一樣】"
+        assert got["revision"] == put.json()["revision"], "指紋也要一致"
+
+        # 再送一次同樣的內容:指紋不該變(否則每次來回都長一個假版本)
+        again = client.put("/api/rooms/crlf/rule?by=alice",
+                           json={"text": original, "expect_revision": got["revision"]})
+        assert again.json()["revision"] == got["revision"], \
+            "同樣的內容 = 同樣的版本,來回幾次都一樣"

@@ -360,11 +360,18 @@ class MessageStore:
         return hashlib.sha256(text.encode("utf-8")).hexdigest()[:12] if text else ""
 
     def read_rule(self, room: str) -> tuple[str, str]:
-        """回 (內容, 版本指紋)。沒有房規時回 ("", "") —— 那不是錯誤,是「還沒有」。"""
+        """回 (內容, 版本指紋)。沒有房規時回 ("", "") —— 那不是錯誤,是「還沒有」。
+
+        ★ `newline=""` 讀原樣:預設會把 `\\r\\n` 悄悄轉成 `\\n`,而那會讓
+          「寫進去的」與「讀出來的」不是同一串位元組 —— 指紋因此對不上,
+          於是 agent 拿下來、一個字沒改、送回去,也會被當成新版本。
+          **這條路上任何一次隱形的換行轉換,都會讓樂觀鎖失去意義。**
+        """
         path = self.rule_path(room)
         if not path.exists():
             return "", ""
-        text = path.read_text(encoding="utf-8")
+        with path.open(encoding="utf-8", newline="") as handle:
+            text = handle.read()
         return text, self.rule_revision(text)
 
     def write_rule(self, room: str, text: str) -> str:
@@ -375,8 +382,13 @@ class MessageStore:
         """
         path = self.rule_path(room)
         path.parent.mkdir(parents=True, exist_ok=True)
+        # ★ `newline=""` 不可省:Windows 的文字模式會把 `\n` 寫成 `\r\n`,
+        #   而傳進來的內容【本來就可能帶 \r\n】—— 於是每一行都被多加一次換行,
+        #   檔案裡長出一堆空行。實地發生過:986 行的判準來回一次變成雙倍行距。
+        #   讀取那側(read_text)也要對應,見 read_rule。
         tmp = tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False,
-                                          dir=str(path.parent), suffix=".tmp")
+                                          dir=str(path.parent), suffix=".tmp",
+                                          newline="")
         try:
             tmp.write(text)
             tmp.flush()
