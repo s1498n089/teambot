@@ -149,6 +149,23 @@ A2A_ROOM=main
 > 就能用 `uv run bell.py --name <他的名字> -- <他要跑的指令>` 接進來。
 > **他不需要跑 `server.py`** —— 伺服器只有你這台跑。
 
+#### 直接給他一個 zip(不必 clone 整包)
+
+雙擊 **`pack-client.bat`**(或 `uv run make_client_zip.py`),會在 `dist/` 產生
+`a2a-client-<日期>.zip`。傳給他,他那邊三步:
+
+```
+1. 解壓
+2. 把 client.env.example 改名成 client.env,改裡面那行 A2A_SERVER 指向你的 IP
+3. uv run bell.py --name <他的名字> -- <他的 agent CLI>
+```
+
+★ **他的機器不需要先裝 Python** —— `uv run` 自己會準備環境。前置作業愈少,
+愈多人真的會試。
+
+★★ 包裡有 `VERSION`(打包當下的 commit)。**hub 升級之後要重發一份** ——
+散出去的 zip 不會自己更新,而他回報問題時,那三行讓你知道他跑的是哪一版。
+
 ⚠️ **連不上的話先查 Windows 防火牆**,不要先懷疑 hub。放行(系統管理員 PowerShell):
 
 ```powershell

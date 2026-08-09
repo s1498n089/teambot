@@ -45,3 +45,6 @@ tmp/*
 #   rooms/<房名>_room_rule.md,例如 rooms/main_room_rule.md
 #   ★ rooms/README.md 【要】進版控 —— clone 的人得知道那個空目錄是幹嘛的
 rooms/*_room_rule.md
+
+# 打包出來的 client 包 —— 產物,不進版控(要給人就重跑 pack-client.bat)
+dist/

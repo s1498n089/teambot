@@ -72,6 +72,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from envfile import load_env_file
+
 sys.stdout.reconfigure(encoding="utf-8")
 sys.stderr.reconfigure(encoding="utf-8")
 
@@ -147,6 +149,12 @@ def show(messages: list[dict], name: str, server: str, room: str) -> None:
 
 
 def main() -> int:
+    # ★ 讀「這支程式旁邊」的 client.env。**環境變數優先**,所以 agent 跑在敲鈴器
+    #   底下時行為完全不變(bell 已經把設定填進環境了);變的是【手動跑這支工具】
+    #   的情況 —— 以前它會連到預設位址,而使用者改了設定檔卻沒有任何反應。
+    #   那種錯是無聲的:話送去錯的 hub,不會報錯。
+    load_env_file(pathlib.Path(__file__).resolve().parent / "client.env")
+
     parser = argparse.ArgumentParser(description="發言器:對帳、呈現、送出,收成一個動作")
     parser.add_argument("--name", required=True, help="發言者")
     parser.add_argument("--expect", type=int, required=True,

@@ -139,12 +139,19 @@ class TestFetching:
         直到有人問「為什麼我派出去的 task 全部 FAILED」。
 
         把 GET 收進工具,等於把這個回條的存亡集中到一行 code,所以要釘住它。
+
+        ★★ 釘的是**撈訊息**的那些請求,不是「所有請求」。
+          `--rejoin` 還會問一次房規,而那條不帶 reader 是對的:
+          回條的語意是「我讀到這些訊息了」,拿判準不涉及任何訊息 ——
+          帶上去只會讓 hub 收到一句不成立的聲明。
         """
         http = FakeHTTP([{"messages": [], "last_id": 9},
-                         {"messages": [], "last_id": 9}])
+                         {"messages": [], "last_id": 9},
+                         {"text": "", "revision": ""}])
         run(monkeypatch, http, "--name", "alice", "--rejoin")
-        assert len(http.urls) == 2
-        assert all("reader=alice" in url for url in http.urls)
+        fetched = [u for u in http.urls if "/messages" in u]
+        assert len(fetched) == 2
+        assert all("reader=alice" in url for url in fetched)
 
     def test_rejoin_does_both_steps(self, workspace, monkeypatch):
         """加入流程是兩步,第二步是安全網:可以跳過歷史,但不能漏掉找你的人。"""
@@ -231,3 +238,53 @@ class TestArgs:
         http = FakeHTTP([])
         with pytest.raises(SystemExit):
             run(monkeypatch, http, "--name", "alice")
+
+
+# ---------- 房規:把「這個房有規矩」放進必經路徑 ----------
+
+class TestRoomRule:
+    """★ 為什麼房規要由工具主動提:**放在必經路徑上的規則才會被執行。**
+
+    以前 `AGENTS.md` 寫「檔案存在就先讀一遍」,而遠端接進來的 agent
+    那台機器上永遠沒有那個檔案 —— 他跳過、不出聲,
+    **一直活在沒有房規的世界裡,而沒有人發現。**
+    """
+
+    def test_rejoin_會告訴你這個房有判準(self, workspace, monkeypatch, capsys):
+        http = FakeHTTP([{"messages": [], "last_id": 9},
+                         {"messages": [], "last_id": 9},
+                         {"text": "第一條\n第二條\n第三條", "revision": "abc123"}])
+        run(monkeypatch, http, "--name", "alice", "--rejoin")
+        out = capsys.readouterr().out
+        assert "3 行" in out, "要說有多長 —— 那決定 agent 要不要現在讀"
+        assert "rule.py" in out and "--get" in out, "而且要指向拿全文的那支工具"
+        assert "第一條" not in out, "★ 提示不該把全文帶進來 —— 上千行會洗掉 context"
+
+    def test_沒有判準時說清楚那不是壞掉(self, workspace, monkeypatch, capsys):
+        """空的房規是**正常狀態**,不是錯誤 —— 措辭要讓人讀得出來這是哪一種。"""
+        http = FakeHTTP([{"messages": [], "last_id": 9},
+                         {"messages": [], "last_id": 9},
+                         {"text": "", "revision": ""}])
+        run(monkeypatch, http, "--name", "alice", "--rejoin")
+        assert "還沒有判準" in capsys.readouterr().out
+
+    def test_hub_還沒升級時不當機(self, workspace, monkeypatch, capsys):
+        """★ 舊 hub 沒有這個端點 → 404。而「沒有判準」跟「問不到判準」
+        對呼叫端要做的事一樣:照常進行,**不要把 agent 卡在門口**。
+
+        這條在交接期特別重要:hub 還沒重啟、而 agent 已經是新版的那段時間,
+        每一次 `--rejoin` 都會問一次房規並得到 404。
+        """
+        real = FakeHTTP([{"messages": [], "last_id": 9},
+                         {"messages": [], "last_id": 9}])
+
+        def flaky(url, *args, **kwargs):
+            if "/rule" in url:
+                raise OSError("404 Not Found")
+            return real(url, *args, **kwargs)
+
+        monkeypatch.setattr(read_mod.urllib.request, "urlopen", flaky)
+        monkeypatch.setattr(read_mod.rule_mod.urllib.request, "urlopen", flaky)
+        monkeypatch.setattr(read_mod.sys, "argv",
+                            ["read.py", "--name", "alice", "--rejoin"])
+        assert read_mod.main() == 0, "拿不到房規不該讓整個加入流程失敗"

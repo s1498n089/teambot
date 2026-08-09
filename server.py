@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
+import hashlib
 import inspect
 import json
 import os
@@ -327,6 +328,63 @@ class MessageStore:
 
     def chat_path(self, room: str) -> Path:
         return self.room_dir(room) / "chat.jsonl"
+
+    def rule_path(self, room: str) -> Path:
+        """這個房自己攢出來的判準(room_rule)。
+
+        ★ 它跟訊息、cursor、任務住在同一個資料夾,理由不是「順手」,是**它屬於房間**:
+
+              屬於這台機器   設定、log、草稿 —— 換一台就該不一樣
+              屬於這個房間   訊息、cursor、任務、判準 —— 換一台該看到同一份
+
+          房規以前放在「跑 agent 的那台電腦」上,而那是歷史意外
+          (那時候一個房間只有一台機器)。放在這裡之後,遠端接進來的 agent
+          也讀得到 —— 而在此之前,**他們一直活在沒有房規的世界裡,沒有人發現**。
+
+        ★★ 副作用是好的:刪房 = 刪一個目錄,判準跟著走,不會留下孤兒;
+          備份房間資料 = 順便備份了判準,不必記第二件事。
+        """
+        return self.room_dir(room) / "rule.md"
+
+    @staticmethod
+    def rule_revision(text: str) -> str:
+        """房規內容的版本指紋 —— 給樂觀鎖用。
+
+        ★ 用內容的 hash,不用遞增的計數器:計數器要另外存一份、要跟內容同步,
+          而**內容自己就知道自己是哪一版**。少一份狀態,就少一種不同步。
+
+        ★★ 空房規(還沒有這個檔案)的指紋是空字串,不是 hash("") ——
+          這樣 `PUT` 帶 `expect_revision=""` 就是誠實的一句話:
+          「我認為這個房現在還沒有判準。」
+        """
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()[:12] if text else ""
+
+    def read_rule(self, room: str) -> tuple[str, str]:
+        """回 (內容, 版本指紋)。沒有房規時回 ("", "") —— 那不是錯誤,是「還沒有」。"""
+        path = self.rule_path(room)
+        if not path.exists():
+            return "", ""
+        text = path.read_text(encoding="utf-8")
+        return text, self.rule_revision(text)
+
+    def write_rule(self, room: str, text: str) -> str:
+        """覆寫房規,回新的版本指紋。**呼叫端負責先驗 expect_revision**。
+
+        ★ 用 tempfile + replace 落地(跟訊息同一招):寫到一半斷電時,
+          舊的那份仍然完整 —— 半個檔案的判準比沒有判準更糟。
+        """
+        path = self.rule_path(room)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False,
+                                          dir=str(path.parent), suffix=".tmp")
+        try:
+            tmp.write(text)
+            tmp.flush()
+            os.fsync(tmp.fileno())
+        finally:
+            tmp.close()
+        os.replace(tmp.name, path)
+        return self.rule_revision(text)
 
     def cursor_path(self, room: str, name: str) -> Path:
         """某個人在某個房讀到哪。**一房一份**,所以換房不會蓋掉別房的進度。
@@ -815,6 +873,21 @@ class EventBus:
 # 注意:必須定義在模組層級 — 本檔用了 `from __future__ import annotations`(PEP 563),
 # FastAPI 以字串解析端點註解,函式內的區域類別會解析不到(重構時踩過的雷)。
 
+class PutRule(BaseModel):
+    """改寫這個房的判準。
+
+    ★ `expect_revision` 是**聲明**,不是選項:「我是根據這一版改的」。
+      房規跟訊息不一樣 —— 訊息只增不改,兩個人同時發最壞是順序不如預期;
+      判準會**改寫既有內容**,兩個人同時改就是一個人的那條無聲消失
+      (寫的人看到 200、讀的人看到一份完整的文件,沒有任何一方會發現)。
+      所以這裡擋,而訊息那邊不擋。
+
+    ★★ 空字串是合法的期望值,意思是「我認為這個房還沒有判準」。
+    """
+    text: str = Field(max_length=400_000)
+    expect_revision: str = Field(default="", max_length=64)
+
+
 class PostMessage(BaseModel):
     sender: str = Field(alias="from", min_length=1, max_length=64)
     text: str = Field(min_length=1, max_length=8000)
@@ -1272,6 +1345,50 @@ def register_room_routes(app: FastAPI, hub: Hub) -> None:
           跟「建房 = 在裡面說第一句話」是同一招,零新狀態。
         """
         return {"room": room, "cursors": hub.store.cursors_in(room)}
+
+    @app.get("/api/rooms/{room}/rule")
+    async def get_rule(room: str):
+        """這個房自己攢出來的判準。**沒有的話回空的,不是 404。**
+
+        ★ 為什麼「還沒有判準」不算錯誤:新開的房本來就沒有,而那是正常狀態。
+          回 404 的話,呼叫端得寫一段「這個錯誤其實不是錯誤」的處理 ——
+          而那正是「不存在被當成例外」開始長歪的地方。
+          空內容 + 空指紋是一個**有意義的答案**:這個房還沒有規矩。
+        """
+        text, revision = hub.store.read_rule(room)
+        return {"room": room, "text": text, "revision": revision}
+
+    @app.put("/api/rooms/{room}/rule")
+    async def put_rule(room: str, body: PutRule, request: Request, by: str = ""):
+        """改寫這個房的判準 —— 走跟發言完全一樣的那道門。
+
+        ★ 不為房規發明新的保護:發言能不能冒名,房規就能不能,**不多不少**。
+          (`check_writer` 目前是空的,那是留給「哪天要控管誰能寫」的位置。)
+
+        ★★ `expect_revision` 對不上就 409,而且**不夾帶目前的內容** ——
+          跟發言撞車時同一個形狀:內容只有一條取得路徑(上面那個 GET)。
+          順便夾一份等於開第二條路,而兩條路要各自維護正確性。
+
+          409 之後該做的事也一樣:**重新拿、重新讀、重新決定**。
+          房規尤其如此 —— 對方剛加的那條,可能正好讓你想寫的這條變得沒必要。
+        """
+        who = sanitize_sender(by)
+        if who is None:
+            raise BadSenderError({"error": "bad_sender",
+                                  "detail": f"名字不合法:{by!r}(要帶 ?by=<你的名字>)"})
+        hub.check_writer(who, request)
+
+        if room not in hub.store.rooms:
+            # 跟 PUT cursor 同一條:不要讓打錯的房名長出一間幽靈房
+            raise BadRoomError({"error": "no_such_room",
+                                "detail": f"房間 {room!r} 不存在(要先在裡面說一句話)"})
+
+        _, current = hub.store.read_rule(room)
+        if body.expect_revision != current:
+            raise StaleCursorError({"error": "stale_rule", "revision": current})
+
+        revision = hub.store.write_rule(room, body.text)
+        return {"ok": True, "room": room, "revision": revision, "by": who}
 
     @app.get("/api/rooms/{room}/presence")
     async def get_presence(room: str):

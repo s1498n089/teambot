@@ -39,9 +39,16 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import pathlib
 import sys
 import urllib.parse
 import urllib.request
+
+from envfile import load_env_file
+
+# ★ 「怎麼跟 hub 拿房規」只留一份實作,在 rule.py ——
+#   這裡只是在加入流程裡提醒它存在,不該再寫一次同樣的請求。
+import rule as rule_mod
 
 sys.stdout.reconfigure(encoding="utf-8")
 sys.stderr.reconfigure(encoding="utf-8")
@@ -101,6 +108,30 @@ def show(messages: list[dict], title: str) -> None:
     print("\n──────────────")
 
 
+def rule_hint(server: str, room: str, name: str) -> None:
+    """加入流程裡的一步:告訴 agent「這個房有規矩,而且在哪裡拿」。
+
+    ★ 為什麼不直接印全文:房規會長到上千行,印進來會洗掉 agent 的 context ——
+      而那正是這整套設計要保護的東西(跟點名掃描不全印是同一個理由)。
+
+    ★★ 為什麼由這支工具主動提:**放在必經路徑上的規則才會被執行。**
+      以前 `AGENTS.md` 寫的是「檔案存在就先讀一遍」,而遠端接進來的 agent
+      那台機器上永遠沒有那個檔案 —— 於是他跳過、不出聲,
+      **一直活在沒有房規的世界裡,而沒有人發現。**
+
+    ★★★ 讀跟寫都在 `rule.py` 那支,這裡只負責「提醒它存在」——
+      房規不是訊息,不該由讀信器來呈現。
+    """
+    rule = rule_mod.get_rule(server, room)
+    if not rule["text"]:
+        print(f"── {room} 這個房還沒有判準 ──")
+        return
+    lines = rule["text"].count("\n") + 1
+    print(f"── ★ {room} 有自己的判準({lines} 行)—— 開口前先讀一遍 ──")
+    print(f"     uv run rule.py --name {name} --room {room} --get")
+    print("──────────────")
+
+
 def show_called(messages: list[dict], name: str, server: str, room: str) -> None:
     """點名掃描的結果 —— 這條路【可以】截斷,理由見 CALLED_TAIL 旁邊那段。
 
@@ -141,6 +172,12 @@ def cursor_command(server: str, room: str, name: str, last_id: int) -> str:
 
 
 def main() -> int:
+    # ★ 讀「這支程式旁邊」的 client.env。**環境變數優先**,所以 agent 跑在敲鈴器
+    #   底下時行為完全不變(bell 已經把設定填進環境了);變的是【手動跑這支工具】
+    #   的情況 —— 以前它會連到預設位址,而使用者改了設定檔卻沒有任何反應。
+    #   那種錯是無聲的:話送去錯的 hub,不會報錯。
+    load_env_file(pathlib.Path(__file__).resolve().parent / "client.env")
+
     parser = argparse.ArgumentParser(description="讀信器:撈、排版、印全文,然後把筆遞給你")
     parser.add_argument("--name", required=True, help="你的名字(會帶進 reader= 已讀回條)")
     parser.add_argument("--expect", type=int,
@@ -167,6 +204,10 @@ def main() -> int:
         called = fetch(server, args.room,
                        {"since_id": 0, "mentioned": args.name, "reader": args.name})
         show_called(called["messages"], args.name, server, args.room)
+
+        # ★ 加入流程的第三件事:這個房有沒有自己的規矩。
+        #   放在這裡而不是靠 agent 自己記得 —— **規則要放在必經路徑上**。
+        rule_hint(server, args.room, args.name)
 
         last_id = recent["last_id"]
         print(f"\n讀完之後,把書籤設到房間目前的位置(這是【刻意跳過】中間那段的決定):")

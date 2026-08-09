@@ -893,3 +893,100 @@ class TestAgentKindWiring:
         assert "zed" in bus.live_agents("w")
         bus.unsubscribe("w", sub)
         assert "zed" not in bus.live_agents("w")
+
+
+# ---------- 房規:這個房自己攢出來的判準 ----------
+
+class TestRoomRule:
+    """房規住在房間資料夾裡,而且**只有覆蓋這件事需要擋**。
+
+    ★ 它跟訊息的差別決定了整個設計:
+
+          訊息   只增不改 → 兩個人同時發,兩則都在,最壞是順序不如預期
+          房規   會改寫   → 兩個人同時改,一個人的那條【無聲消失】
+
+      消失的方式最惡劣:寫的人看到 200、讀的人看到一份完整的文件,
+      **沒有任何一方會發現**。所以這裡有樂觀鎖,而發言那邊刻意沒有。
+    """
+
+    def test_還沒有判準時回空的_不是_404(self, client):
+        """★ 新開的房本來就沒有判準,那是**正常狀態**不是錯誤。
+
+        回 404 的話,呼叫端得寫一段「這個錯誤其實不是錯誤」的處理 ——
+        而那正是「不存在被當成例外」開始長歪的地方。
+        """
+        post_msg(client, "fresh", "someone", "開房")
+        got = client.get("/api/rooms/fresh/rule").json()
+        assert got["text"] == ""
+        assert got["revision"] == "", "空的指紋是空字串,不是 hash('')"
+
+    def test_寫了就讀得到_而且指紋跟著內容變(self, client):
+        post_msg(client, "r1", "someone", "開房")
+
+        first = client.put("/api/rooms/r1/rule?by=alice",
+                           json={"text": "第一條:先讀再說", "expect_revision": ""})
+        assert first.status_code == 200
+        rev1 = first.json()["revision"]
+        assert rev1, "寫進去就該有指紋"
+
+        got = client.get("/api/rooms/r1/rule").json()
+        assert got["text"] == "第一條:先讀再說"
+        assert got["revision"] == rev1
+
+        second = client.put("/api/rooms/r1/rule?by=alice",
+                            json={"text": "第一條:先讀再說\n第二條:改完要說", "expect_revision": rev1})
+        assert second.status_code == 200
+        assert second.json()["revision"] != rev1, "內容變了,指紋就該變"
+
+    def test_根據舊版改寫會被擋下來(self, client):
+        """★★ 這條是整個設計的理由。
+
+        兩個 agent 同時讀到 v1,各自加一條、各自寫回。沒有這道鎖的話,
+        後寫的那個會把前一個剛加的判準**整條蓋掉**,而雙方都收到 200。
+        """
+        post_msg(client, "r2", "someone", "開房")
+        base = client.put("/api/rooms/r2/rule?by=alice",
+                          json={"text": "共同的起點", "expect_revision": ""}).json()["revision"]
+
+        # bob 先寫進去了
+        client.put("/api/rooms/r2/rule?by=bob",
+                   json={"text": "共同的起點\nbob 加的一條", "expect_revision": base})
+
+        # alice 還拿著舊指紋 —— 她不知道 bob 剛動過
+        clash = client.put("/api/rooms/r2/rule?by=alice",
+                           json={"text": "共同的起點\nalice 加的一條", "expect_revision": base})
+        assert clash.status_code == 409
+        assert clash.json()["error"] == "stale_rule"
+        assert "text" not in clash.json(), \
+            "409 不夾帶內容 —— 內容只有一條取得路徑(GET),夾一份等於開第二條路"
+
+        # 而 bob 那條還在,沒有被蓋掉
+        assert "bob 加的一條" in client.get("/api/rooms/r2/rule").json()["text"]
+
+    def test_不存在的房不能長出判準(self, client):
+        """跟 PUT cursor 同一條:打錯字不該長出一間幽靈房。"""
+        bad = client.put("/api/rooms/nowhere/rule?by=alice",
+                         json={"text": "x", "expect_revision": ""})
+        assert bad.status_code == 422, "跟 PUT cursor 回同一個碼 —— 兩處是同一種錯"
+        assert bad.json()["error"] == "no_such_room"
+
+    def test_要帶名字_而且要合法(self, client):
+        """寫入走跟發言一樣的門 —— 那道門的第一關就是「你是誰」。"""
+        post_msg(client, "r3", "someone", "開房")
+        assert client.put("/api/rooms/r3/rule",
+                          json={"text": "x", "expect_revision": ""}).status_code == 422
+        assert client.put("/api/rooms/r3/rule?by=../escape",
+                          json={"text": "x", "expect_revision": ""}).status_code == 422
+
+    def test_判準跟著房間一起被刪掉(self, client):
+        """★ 它住在房間資料夾裡,所以刪房 = 刪一個目錄,判準跟著走。
+
+        不會留下一份沒有房間的判準 —— 那種孤兒只會讓下一個開同名房的人困惑。
+        """
+        post_msg(client, "doomed2", "someone", "開房")
+        client.put("/api/rooms/doomed2/rule?by=alice",
+                   json={"text": "這個房的規矩", "expect_revision": ""})
+        assert client.get("/api/rooms/doomed2/rule").json()["text"] != ""
+
+        client.delete("/api/rooms/doomed2?by=allen")
+        assert client.get("/api/rooms/doomed2/rule").json()["text"] == ""
