@@ -667,48 +667,72 @@ class TestBellState:
         assert st.sync_room_head() == 900
         assert st.known_last_id == 900
 
-    def test_warning_says_hub_is_down_when_it_is(self, monkeypatch, tmp_path):
-        """★ 敲滿三次的那行警告要分得出**兩種完全不同的原因**。
+    def test_hub_問不到的時候一聲都不准敲(self, monkeypatch):
+        """★★★ 這條守的是一個**曾經沒人守、因此壞掉過**的假設。
 
-        「cursor 沒推進」有兩個成因,而它們要人去查完全不同的東西:
+        `read_cursor` 問不到時回 0,而那個 0 的意思是「**不知道**」不是「他沒讀過」。
+        拿「不知道」去比對會得到「他落後了一千多則」,於是敲 ——
+        而 hub 正好掛著的時候被敲醒,是最沒有用的一種叫醒:
+        agent 醒來對不了帳、發不了言,只能看著白牆再睡回去。
 
-            agent 卡住   → 去看那個視窗在忙什麼
-            hub 連不上   → 去看伺服器還在不在(agent 可能好好的)
+        ★ 這個判斷以前不需要:cursor 曾經是**本地檔案**,「讀不到」只有一種可能
+          (真的沒讀過)。搬到 hub 之後多了第二種(網路問不到),
+          **而舊的判斷沒有跟著搬家** —— 2026-08-09 實地炸:使用者關掉 server,
+          每個房各敲一聲,他在幾個房就被吵幾次。
 
-        2026-08-08 實地踩到:使用者重啟 hub 的那兩分鐘,這行印的是
-        「agent 可能卡住」—— 而 agent 什麼事都沒有。
-        **把人送去查錯方向的警告,比不警告更貴。**
+        ★★ 假設寫在註解裡會過期,寫成測試才有人守 —— 這條就是那個守衛。
+        """
+        rings = []
+        st = self._bare(ring_fn=lambda text: rings.append(text) or True)
+        st.known_last_id = 100
+        monkeypatch.setattr(st, "read_cursor", lambda: 0)
+        st.hub_reachable = False        # 那個 0 是「問不到」編出來的
+
+        for _ in range(10):
+            st.last_ring_at = 0         # 解除「才剛敲過」,證明擋下來的不是這道閘
+            st.evaluate()
+
+        assert rings == [], "hub 問不到就不該敲 —— 不知道的時候什麼都不做"
+
+    def test_hub_回來之後照樣敲(self, monkeypatch):
+        """★ 上一條不能靠「永遠不敲」來通過 —— 它擋的是【不知道】,不是【敲】本身。
+
+        hub 一活過來,節拍器下一圈就問得到,該敲的照樣敲、一則都不漏。
+        """
+        rings = []
+        st = self._bare(ring_fn=lambda text: rings.append(text) or True)
+        st.known_last_id = 100
+        monkeypatch.setattr(st, "read_cursor", lambda: 0)
+
+        st.hub_reachable = False
+        st.evaluate()
+        assert rings == []
+
+        st.hub_reachable = True         # hub 回來了
+        st.evaluate()
+        assert len(rings) == 1, "問得到之後就該敲 —— 跳過的只是那幾輪"
+
+    def test_敲滿之後的警告直說原因(self, monkeypatch):
+        """★ 那行警告以前要分辨「agent 卡住」還是「hub 連不上」。
+
+        把「hub 問不到就不敲」擋在源頭之後,**走到這裡時 hub 必定是通的** ——
+        於是那個分岔成了空殼,刪掉。
+        **修一個問題時要順手問:誰因此變成死的?**
         """
         lines = []
         monkeypatch.setattr(bell_mod, "log", lambda text: lines.append(text))
 
         st = self._bare(ring_fn=lambda text: True)
-        st.known_last_id = 100          # 落後,而且開機線在 0 以下
+        st.known_last_id = 100
         monkeypatch.setattr(st, "read_cursor", lambda: 0)
-
-        def ring_until_warned():
-            for _ in range(MAX := 10):
-                st.last_ring_at = 0     # 解除「才剛敲過」那道閘,讓它每次都敲得下去
-                st.evaluate()
-
-        # ① hub 連得上 → 說 agent 可能卡住
         st.hub_reachable = True
-        ring_until_warned()
+
+        for _ in range(10):
+            st.last_ring_at = 0
+            st.evaluate()
+
         warns = [l for l in lines if "WARN" in l]   # 前面還有 `[房名] ` 前綴
         assert warns and "agent 可能卡住" in warns[0], warns
-
-        # ② hub 連不上 → 改口,而且明說 agent 可能是好的
-        lines.clear()
-        st2 = self._bare(ring_fn=lambda text: True)
-        st2.known_last_id = 100
-        monkeypatch.setattr(st2, "read_cursor", lambda: 0)
-        st2.hub_reachable = False
-        for _ in range(10):
-            st2.last_ring_at = 0
-            st2.evaluate()
-        warns = [l for l in lines if "WARN" in l]   # 前面還有 `[房名] ` 前綴
-        assert warns and "hub 連不上" in warns[0], warns
-        assert "agent 可能卡住" not in warns[0]
 
     def test_every_log_line_says_which_room_it_is_about(self, monkeypatch):
         """★ 多房之後,log 的每一行都要指得出【是哪個房】。
@@ -990,10 +1014,16 @@ class TestBellState:
         assert len(rings) == 1          # 五秒地板把它們併成一次
 
     def _log_after_ring(self, tmp_path, monkeypatch, ring_fn) -> str:
-        """把 log 導到 tmp,敲一次鈴,回傳落檔內容。"""
+        """把 log 導到 tmp,敲一次鈴,回傳落檔內容。
+
+        ★ `read_cursor` 要換掉:真的那個會去打 `http://test`(連不上),
+          而連不上時 `evaluate` 現在【刻意不敲】—— 這些測試要驗的是「敲」之後
+          留下什麼,所以得先讓它處在「hub 通、agent 落後」的狀態。
+        """
         monkeypatch.setattr(bell_mod, "LOG_PATH", tmp_path / "bell.log")
-        state_for_log = bell_mod.BellState(ring_fn,
-                           name="x", server="http://test", room="main").on_message(1)
+        state = bell_mod.BellState(ring_fn, name="x", server="http://test", room="main")
+        monkeypatch.setattr(state, "read_cursor", lambda: 0)
+        state.on_message(1)
         return (tmp_path / "bell.log").read_text(encoding="utf-8")
 
     def test_failed_ring_is_logged(self, tmp_path, monkeypatch):
@@ -1010,6 +1040,7 @@ class TestBellState:
         monkeypatch.setattr(bell_mod, "RE_RING_SECONDS", 0)
         state = bell_mod.BellState(lambda text: False,
                                    name="x", server="http://test", room="main")
+        monkeypatch.setattr(state, "read_cursor", lambda: 0)   # hub 通、agent 落後
         for _ in range(10):
             state.on_message(1)
         assert state.rings_this_gap == bell_mod.MAX_RINGS  # 照樣封頂
